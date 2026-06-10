@@ -1,172 +1,174 @@
 # AgentBox Town
 
-AgentBox Town is an experimental AI virtual town simulator. Each character lives inside an independent AgentBox with its own position, schedule, relationships, memories, needs, emotions, event queue, action process, and long-term personality state.
+**中文** | [English](README.en.md)
 
-The project focuses on believable multi-agent town simulation rather than simple story generation. AI modules judge local decisions, while local guards enforce world rules, knowledge boundaries, movement, mortality, and persistence.
+AgentBox Town 是一个实验性的 AI 虚拟小镇模拟器。每个角色都生活在独立的 AgentBox 里，拥有自己的位置、日程、关系、记忆、需求、情绪、事件队列、行动过程和长期人格状态。
 
-## Features
+这个项目关注“像真实小镇一样运行”的多智能体模拟，而不是单纯生成剧情。AI 模块负责局部判断，本地规则负责强约束：世界状态、知识边界、移动、死亡、存档和越权审查都由本地系统兜底。
 
-- Multi-agent virtual town with 100+ character support
-- Per-character memory, relationships, emotions, needs, identity core, and long-term goals
-- Weather, date, location institutions, location chains, and location runtime state
-- Event propagation, relationship dynamics, social processes, obligations, and family sync
-- Parallel AI task batching with configurable key pool and per-key concurrency
-- Folder-based save system with per-character files and AG judgement files
-- WorldGuard local validation to reduce hidden NPCs, omniscient knowledge, teleportation, and impossible actions
+## 功能
 
-## Per-Cycle Call Graph
+- 支持 100+ 角色的小镇模拟
+- 每个角色拥有记忆、关系、多维情绪、需求、人格核心和长期目标
+- 支持日期、天气、地点制度、地点链和地点运行状态
+- 支持事件传播、关系惯性、社交流程、承诺债务和家庭同步
+- 支持多 Key 分流、分批并发和每个 Agent/模块单独设置模型
+- 存档以文件夹保存，包含角色文件和 AG 判断文件
+- WorldGuard 本地审查，限制隐藏 NPC、全知信息、瞬移、越权死亡和不可能行动
 
-GitHub renders the following Mermaid charts directly in the repository page. The call graph is split into smaller sections so GitHub's Mermaid renderer can lay it out reliably.
+## 每回合调用图表
 
-Main cycle:
+GitHub 会直接渲染下面的 Mermaid 图表。为了避免 GitHub 的 Mermaid 布局器报错，调用图被拆成几个小图。
+
+主循环：
 
 ```mermaid
 flowchart TD
-  A[Cycle Start] --> B[Snapshot Lock]
-  B --> C[Weather Agent]
-  C --> D[Location Event and Daily Plan]
-  D --> E[Location Chain Agent]
-  E --> F[Location Runtime and Social Pattern]
-  F --> G[Process Manager Agent]
-  G --> H[Pre-Judgement Agents]
-  H --> I[Scheduler]
-  I --> J[Agent Action]
-  J --> K[Time Passage Agent]
-  K --> L[State Settlement Agent]
-  L --> M[WorldGuard and Reducer]
-  M --> N[Event Impact Chain]
-  N --> O[Post Agents]
-  O --> P[Local Time Advance]
-  P --> Q[Sleep and Basic Life]
-  Q --> R[Time Decay Agent]
-  R --> S[Movement and Location Influence]
-  S --> T[Need and Emotion Coupling]
-  T --> U[Mortality Check]
-  U --> V[Family Sync]
-  V --> W{New Day}
-  W -->|No| X[Auto Save]
-  W -->|Yes| Y[Daily Settlement]
+  A[回合开始] --> B[快照锁]
+  B --> C[天气 Agent]
+  C --> D[地点事件和地点每日]
+  D --> E[地点链 Agent]
+  E --> F[地点运行和社会模式]
+  F --> G[过程管理 Agent]
+  G --> H[行动前判断 Agents]
+  H --> I[调度器]
+  I --> J[角色行动 Agent]
+  J --> K[时间流逝 Agent]
+  K --> L[状态提交 Agent]
+  L --> M[WorldGuard 和 Reducer]
+  M --> N[事件影响链]
+  N --> O[后置 Agents]
+  O --> P[本地时间推进]
+  P --> Q[睡眠和基础生理]
+  Q --> R[生理调制 Agent]
+  R --> S[移动和地点影响]
+  S --> T[需求和情绪联动]
+  T --> U[死亡检查]
+  U --> V[家庭同步]
+  V --> W{进入新一天}
+  W -->|否| X[自动存档]
+  W -->|是| Y[每日结算]
   Y --> X
 ```
 
-Pre-judgement fan-in:
+行动前判断：
 
 ```mermaid
 flowchart LR
-  A[Need Intent] --> F[Scheduler]
-  B[Context Rule] --> F
-  C[Crisis Triage] --> F
-  D[Knowledge Judge] --> F
-  E[Outcome Judge] --> F
-  F --> G[Action Queue]
+  A[需求意图] --> F[调度器]
+  B[场景规则] --> F
+  C[危机分诊] --> F
+  D[知识边界] --> F
+  E[后果判断] --> F
+  F --> G[行动队列]
 ```
 
-Event and post-action chain:
+事件和行动后处理：
 
 ```mermaid
 flowchart TD
-  A[WorldGuard Approved Result] --> B[Event Impact Agent]
-  B --> C[Information Propagation Agent]
-  C --> D[Relationship Dynamics Agent]
-  D --> E[Social Process Agent]
-  E --> F[MultiDimensional State Agent]
-  E --> G[Obligation Agent]
-  E --> H[Reporter]
-  F --> I[State Applied]
+  A[WorldGuard 通过的结果] --> B[事件影响 Agent]
+  B --> C[信息传播 Agent]
+  C --> D[关系惯性 Agent]
+  D --> E[社交流程 Agent]
+  E --> F[多维状态 Agent]
+  E --> G[承诺债务 Agent]
+  E --> H[叙事 Reporter]
+  F --> I[状态落地]
   G --> I
   H --> I
 ```
 
-Midnight settlement:
+0 点日结：
 
 ```mermaid
 flowchart TD
-  A[Daily Structural Settlement] --> B[Social Embedding Agent]
-  A --> C[Location Institution Agent]
-  B --> D[Location Daily Agent]
+  A[每日结构结算] --> B[社会落点 Agent]
+  A --> C[地点制度 Agent]
+  B --> D[地点每日 Agent]
   C --> D
-  D --> E[Location Chain Agent]
-  E --> F[Daily Planner]
-  F --> G[Self Narrative Agent]
-  G --> H[Personality Consistency Agent]
-  H --> I[Daily Memory Decay]
-  I --> J[Auto Save]
+  D --> E[地点链 Agent]
+  E --> F[每日计划 Agent]
+  F --> G[自我叙事 Agent]
+  G --> H[人格一致性 Agent]
+  H --> I[每日记忆衰退]
+  I --> J[自动存档]
 ```
 
-## Run
+## 运行
 
-Requirements:
+环境要求：
 
-- Windows is recommended for `start-ai-town-v2.cmd`
-- Node.js 18 or newer
-- No npm dependencies are required
+- 推荐 Windows，用 `start-ai-town-v2.cmd` 启动
+- Node.js 18 或更高版本
+- 不需要安装 npm 依赖
 
 ```bat
 start-ai-town-v2.cmd
 ```
 
-Then open:
+然后打开：
 
 ```text
 http://localhost:8788/
 ```
 
-On first launch, configure your AI base URL, model, and API keys in the app settings.
+首次打开后，在应用设置里填写 AI 地址、模型和 API Key。
 
-Manual startup:
+也可以手动启动：
 
 ```bash
 npm start
 ```
 
-## Configuration
+## 配置
 
-There are two supported configuration paths.
+项目支持两种配置方式。
 
-In-app configuration:
+应用内配置：
 
-- Open `http://localhost:8788/`
-- Open settings
-- Fill in AI base URL, model, API keys, concurrency, tick interval, and batch size
-- The server writes `ai-town-config.json`
+- 打开 `http://localhost:8788/`
+- 进入设置
+- 填写 AI 地址、模型、API Key、并发数、回合间隔和分批大小
+- 服务端会写入本地 `ai-town-config.json`
 
-Environment variables:
+环境变量配置：
 
-- Copy `.env.example` only as a reference; the server does not auto-load `.env`
-- Start manually with `npm start` or `node ai-town-v2-server.js`
-- `start-ai-town-v2.cmd` intentionally clears inherited AI environment variables so a fresh checkout opens in setup mode
+- `.env.example` 只是参考文件，服务端不会自动读取 `.env`
+- 如需用环境变量，手动运行 `npm start` 或 `node ai-town-v2-server.js`
+- `start-ai-town-v2.cmd` 会故意清空继承的 AI 环境变量，让新仓库首次打开进入配置模式
 
-Important local files:
+重要本地文件：
 
-- `ai-town-config.json` - generated local AI settings; ignored by Git
-- `saves/` - local save folders; ignored by Git
-- `.env` and `.env.local` - optional private environment files; ignored by Git
+- `ai-town-config.json`：本地 AI 设置，已被 Git 忽略
+- `saves/`：本地存档文件夹，已被 Git 忽略
+- `.env` 和 `.env.local`：可选私有环境文件，已被 Git 忽略
 
-Main environment variables:
+主要环境变量：
 
-| Name | Purpose | Default |
+| 名称 | 用途 | 默认值 |
 | --- | --- | --- |
-| `AI_TOWN_V2_PORT` | Local server port | `8788` |
-| `AI_TOWN_API_KEYS` | Comma/newline/semicolon separated AI keys | empty |
-| `AI_TOWN_BASE_URL` | OpenAI-compatible base URL | `https://api.openai.com/v1` |
-| `AI_TOWN_MODEL` | Default model | `gpt-4.1-mini` |
-| `AI_TOWN_MAX_CONCURRENT_PER_KEY` | Per-key request concurrency | `20` |
-| `AI_TOWN_TIMEOUT_MS` | Upstream request timeout | `180000` |
-| `AI_TOWN_MAX_REQUEST_BODY_BYTES` | Max local API body size | `10000000` |
-| `AI_TOWN_RETRY_DELAY_MS` | Retry wait for temporary upstream errors | `300` |
+| `AI_TOWN_V2_PORT` | 本地服务端口 | `8788` |
+| `AI_TOWN_API_KEYS` | AI Key 列表，可用逗号、分号或换行分隔 | 空 |
+| `AI_TOWN_BASE_URL` | OpenAI 兼容接口地址 | `https://api.openai.com/v1` |
+| `AI_TOWN_MODEL` | 默认模型 | `gpt-4.1-mini` |
+| `AI_TOWN_MAX_CONCURRENT_PER_KEY` | 每个 Key 的并发上限 | `20` |
+| `AI_TOWN_TIMEOUT_MS` | 上游请求超时时间 | `180000` |
+| `AI_TOWN_MAX_REQUEST_BODY_BYTES` | 本地接口请求体上限 | `10000000` |
+| `AI_TOWN_RETRY_DELAY_MS` | 临时上游错误重试等待 | `300` |
 
-Never commit real API keys.
+不要提交真实 API Key。
 
-## Main Files
+## 主要文件
 
-- `ai-town-v2.html` - frontend UI and simulation loop
-- `ai-town-v2-server.js` - local Node.js API server and AI proxy
-- `start-ai-town-v2.cmd` - Windows launcher
-- `package.json` - Node.js scripts and engine requirement
-- `.env.example` - optional environment variable reference
-- `ai-town-config.example.json` - local config file reference
-- `AI虚拟小镇V2项目说明.md` - project design notes
+- `ai-town-v2.html`：前端界面和模拟循环
+- `ai-town-v2-server.js`：本地 Node.js 服务端和 AI 代理
+- `start-ai-town-v2.cmd`：Windows 启动脚本
+- `package.json`：Node.js 脚本和版本要求
+- `.env.example`：环境变量参考
+- `ai-town-config.example.json`：本地配置参考
+- `AI虚拟小镇V2项目说明.md`：项目设计说明
 
-## Notes
+## 说明
 
-This is a local demo and research prototype. It is not production hardened. AI outputs are constrained by prompts and local validation, but the simulator still depends on model quality and configured API reliability.
+这是本地 Demo 和研究原型，不是生产级系统。AI 输出会受到提示词和本地审查约束，但模拟质量仍依赖模型能力和接口稳定性。
