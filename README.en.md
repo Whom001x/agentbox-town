@@ -141,8 +141,10 @@ Environment variables:
 Important local files:
 
 - `ai-town-config.json` - generated local AI settings; ignored by Git
-- `saves/` - local save folders; ignored by Git
+- `saves/` - local save folders inside the project directory; ignored by Git
 - `.env` and `.env.local` - optional private environment files; ignored by Git
+
+Saves are fixed to the `saves/` directory beside `ai-town-v2-server.js`. For example, when running from the repository root, saves are written to `./saves/`.
 
 Main environment variables:
 
