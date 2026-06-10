@@ -141,8 +141,10 @@ npm start
 重要本地文件：
 
 - `ai-town-config.json`：本地 AI 设置，已被 Git 忽略
-- `saves/`：本地存档文件夹，已被 Git 忽略
+- `saves/`：项目当前目录下的本地存档文件夹，已被 Git 忽略
 - `.env` 和 `.env.local`：可选私有环境文件，已被 Git 忽略
+
+存档路径固定为 `ai-town-v2-server.js` 所在目录下的 `saves/`。例如在仓库根目录运行时，存档会写入 `./saves/`。
 
 主要环境变量：
 
