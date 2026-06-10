@@ -1,0 +1,15 @@
+{
+  "name": "agentbox-town",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AgentBox Town: an experimental AI virtual town simulator.",
+  "main": "ai-town-v2-server.js",
+  "scripts": {
+    "start": "node ai-town-v2-server.js",
+    "check": "node --check ai-town-v2-server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "UNLICENSED"
+}
