@@ -95,6 +95,12 @@ flowchart TD
 
 ## Run
 
+Requirements:
+
+- Windows is recommended for `start-ai-town-v2.cmd`
+- Node.js 18 or newer
+- No npm dependencies are required
+
 ```bat
 start-ai-town-v2.cmd
 ```
@@ -107,17 +113,58 @@ http://localhost:8788/
 
 On first launch, configure your AI base URL, model, and API keys in the app settings.
 
+Manual startup:
+
+```bash
+npm start
+```
+
 ## Configuration
 
-`ai-town-config.json` is intentionally ignored by Git because it may contain API keys.
+There are two supported configuration paths.
 
-Use `ai-town-config.example.json` as a reference only. Do not commit real keys.
+In-app configuration:
+
+- Open `http://localhost:8788/`
+- Open settings
+- Fill in AI base URL, model, API keys, concurrency, tick interval, and batch size
+- The server writes `ai-town-config.json`
+
+Environment variables:
+
+- Copy `.env.example` only as a reference; the server does not auto-load `.env`
+- Start manually with `npm start` or `node ai-town-v2-server.js`
+- `start-ai-town-v2.cmd` intentionally clears inherited AI environment variables so a fresh checkout opens in setup mode
+
+Important local files:
+
+- `ai-town-config.json` - generated local AI settings; ignored by Git
+- `saves/` - local save folders; ignored by Git
+- `.env` and `.env.local` - optional private environment files; ignored by Git
+
+Main environment variables:
+
+| Name | Purpose | Default |
+| --- | --- | --- |
+| `AI_TOWN_V2_PORT` | Local server port | `8788` |
+| `AI_TOWN_API_KEYS` | Comma/newline/semicolon separated AI keys | empty |
+| `AI_TOWN_BASE_URL` | OpenAI-compatible base URL | `https://api.openai.com/v1` |
+| `AI_TOWN_MODEL` | Default model | `gpt-4.1-mini` |
+| `AI_TOWN_MAX_CONCURRENT_PER_KEY` | Per-key request concurrency | `20` |
+| `AI_TOWN_TIMEOUT_MS` | Upstream request timeout | `180000` |
+| `AI_TOWN_MAX_REQUEST_BODY_BYTES` | Max local API body size | `10000000` |
+| `AI_TOWN_RETRY_DELAY_MS` | Retry wait for temporary upstream errors | `300` |
+
+Never commit real API keys.
 
 ## Main Files
 
 - `ai-town-v2.html` - frontend UI and simulation loop
 - `ai-town-v2-server.js` - local Node.js API server and AI proxy
 - `start-ai-town-v2.cmd` - Windows launcher
+- `package.json` - Node.js scripts and engine requirement
+- `.env.example` - optional environment variable reference
+- `ai-town-config.example.json` - local config file reference
 - `AI虚拟小镇V2项目说明.md` - project design notes
 
 ## Notes
