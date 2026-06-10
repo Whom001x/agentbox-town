@@ -16,113 +16,81 @@ The project focuses on believable multi-agent town simulation rather than simple
 
 ## Per-Cycle Call Graph
 
-GitHub renders the following Mermaid chart directly in the repository page.
+GitHub renders the following Mermaid charts directly in the repository page. The call graph is split into smaller sections so GitHub's Mermaid renderer can lay it out reliably.
+
+Main cycle:
 
 ```mermaid
-flowchart TB
-  Start(["Start cycle / 进入一回合"])
-  Lock["Entrance lock\n防重复推进 + 快照"]
-  Weather["WeatherAgent\n日期 / 农历 / 天气"]
+flowchart TD
+  A[Cycle Start] --> B[Snapshot Lock]
+  B --> C[Weather Agent]
+  C --> D[Location Event and Daily Plan]
+  D --> E[Location Chain Agent]
+  E --> F[Location Runtime and Social Pattern]
+  F --> G[Process Manager Agent]
+  G --> H[Pre-Judgement Agents]
+  H --> I[Scheduler]
+  I --> J[Agent Action]
+  J --> K[Time Passage Agent]
+  K --> L[State Settlement Agent]
+  L --> M[WorldGuard and Reducer]
+  M --> N[Event Impact Chain]
+  N --> O[Post Agents]
+  O --> P[Local Time Advance]
+  P --> Q[Sleep and Basic Life]
+  Q --> R[Time Decay Agent]
+  R --> S[Movement and Location Influence]
+  S --> T[Need and Emotion Coupling]
+  T --> U[Mortality Check]
+  U --> V[Family Sync]
+  V --> W{New Day}
+  W -->|No| X[Auto Save]
+  W -->|Yes| Y[Daily Settlement]
+  Y --> X
+```
 
-  Start --> Lock --> Weather
+Pre-judgement fan-in:
 
-  subgraph PlacePrep["地点前置并行"]
-    LocationEvent["LocationEventAgent\n地点可见小事件"]
-    LocationDaily["LocationDailyAgent\n地点今日重点"]
-  end
+```mermaid
+flowchart LR
+  A[Need Intent] --> F[Scheduler]
+  B[Context Rule] --> F
+  C[Crisis Triage] --> F
+  D[Knowledge Judge] --> F
+  E[Outcome Judge] --> F
+  F --> G[Action Queue]
+```
 
-  Weather --> LocationEvent
-  Weather --> LocationDaily
-  LocationEvent --> LocationChain["LocationChainAgent\n地点连续事件链"]
-  LocationDaily --> LocationChain
+Event and post-action chain:
 
-  subgraph RuntimePrep["运行态并行"]
-    LocationRuntime["LocationRuntimeAgent\n人群 / 队列 / 岗位 / 资源"]
-    SocialPattern["SocialPatternAgent\n家庭 / 群体 / 关系压力"]
-  end
+```mermaid
+flowchart TD
+  A[WorldGuard Approved Result] --> B[Event Impact Agent]
+  B --> C[Information Propagation Agent]
+  C --> D[Relationship Dynamics Agent]
+  D --> E[Social Process Agent]
+  E --> F[MultiDimensional State Agent]
+  E --> G[Obligation Agent]
+  E --> H[Reporter]
+  F --> I[State Applied]
+  G --> I
+  H --> I
+```
 
-  LocationChain --> LocationRuntime
-  LocationChain --> SocialPattern
-  LocationRuntime --> ProcessManager["ProcessManagerAgent\n推进未完成行动过程"]
-  SocialPattern --> ProcessManager
+Midnight settlement:
 
-  subgraph PreJudge["行动前判断：5 类并行分批"]
-    NeedIntent["NeedIntentAgent\n当前主需求 / 动机"]
-    ContextRule["ContextRuleAgent\n时间 / 地点 / 身份规则"]
-    CrisisTriage["CrisisTriageAgent\n健康 / 安全 / 饥饿打断"]
-    KnowledgeJudge["KnowledgeJudgeAgent\n角色知道 / 不知道"]
-    OutcomeJudge["OutcomeJudgeAgent\n身份 + 严重度 + 后续去向"]
-  end
-
-  ProcessManager --> NeedIntent
-  ProcessManager --> ContextRule
-  ProcessManager --> CrisisTriage
-  ProcessManager --> KnowledgeJudge
-  ProcessManager --> OutcomeJudge
-
-  NeedIntent --> Scheduler["Scheduler\n选择本轮谁行动"]
-  ContextRule --> Scheduler
-  CrisisTriage --> Scheduler
-  KnowledgeJudge --> Scheduler
-  OutcomeJudge --> Scheduler
-
-  Scheduler --> AgentAction["AgentAction\n角色主观行动 / 过程片段"]
-  AgentAction --> TimePassage["TimePassageAgent\n耗时 / 余时 / 是否完成"]
-  TimePassage --> StateSettlement["StateSettlementAgent\n行动后状态补丁建议"]
-  StateSettlement --> WorldGuard["WorldGuard + Reducer\n知识边界 / 地点 / 隐形 NPC / 移动 / 死亡审查"]
-
-  subgraph EventBranch["事件影响链"]
-    EventImpact["EventImpactAgent\n谁被事件影响"]
-    InfoFlow["InformationPropagationAgent\n消息如何有限传播"]
-    RelationDynamics["RelationshipDynamicsAgent\n信任 / 亲密 / 怨气慢变量"]
-    SocialProcess["SocialProcessAgent\n误会 / 冲突 / 澄清 / 和解"]
-  end
-
-  WorldGuard --> EventImpact --> InfoFlow --> RelationDynamics --> SocialProcess
-
-  subgraph PostAgents["后置并行 Agent"]
-    MultiState["MultiDimensionalStateAgent\n多维情绪 / 需求 / 关系统合"]
-    Obligation["ObligationAgent\n承诺 / 任务债务抽取"]
-    Reporter["Reporter\n日志摘要"]
-  end
-
-  SocialProcess --> MultiState
-  SocialProcess --> Obligation
-  SocialProcess --> Reporter
-
-  MultiState --> LocalAdvance["Local time advance\n推进虚拟时间"]
-  Obligation --> LocalAdvance
-  Reporter --> LocalAdvance
-
-  LocalAdvance --> Sleep["Sleep / BasicLife\n睡眠 + 基础生理"]
-  Sleep --> TimeDecay["TimeDecayAgent\n因人而异的生理调制"]
-  TimeDecay --> Movement["Movement\n路线移动 / 到达判断"]
-  Movement --> LocationInfluence["LocationInfluence\n地点状态影响角色"]
-  LocationInfluence --> Coupling["Need / Emotion Coupling\n需求与情绪联动"]
-  Coupling --> Mortality["Mortality\n死亡检查"]
-  Mortality --> FamilySync["FamilySyncAgent\n晚间家庭同步"]
-  FamilySync --> DayCheck{"跨到新的一天？"}
-
-  DayCheck -- "No" --> Save["AutoSave\n写入存档文件夹"]
-  DayCheck -- "Yes" --> DailySettlement["DailyStructuralSettlement\n本地日结"]
-
-  subgraph DailyAgents["0 点日结 Agent"]
-    SocialEmbedding["SocialEmbeddingAgent\n住所 / 邻里 / 圈子补齐"]
-    LocationInstitution["LocationInstitutionAgent\n地点制度刷新"]
-    DailyPlanner["DailyPlanner\n明日动态计划"]
-    SelfNarrative["SelfNarrativeAgent\n角色自我叙事"]
-    Personality["PersonalityConsistencyAgent\n人格核心小幅稳定"]
-    MemoryDecay["DailyMemoryDecay\n每日记忆衰退"]
-  end
-
-  DailySettlement --> SocialEmbedding
-  DailySettlement --> LocationInstitution
-  SocialEmbedding --> DailyPlanner
-  LocationInstitution --> DailyPlanner
-  DailyPlanner --> SelfNarrative
-  SelfNarrative --> Personality
-  Personality --> MemoryDecay
-  MemoryDecay --> Save
+```mermaid
+flowchart TD
+  A[Daily Structural Settlement] --> B[Social Embedding Agent]
+  A --> C[Location Institution Agent]
+  B --> D[Location Daily Agent]
+  C --> D
+  D --> E[Location Chain Agent]
+  E --> F[Daily Planner]
+  F --> G[Self Narrative Agent]
+  G --> H[Personality Consistency Agent]
+  H --> I[Daily Memory Decay]
+  I --> J[Auto Save]
 ```
 
 ## Run
