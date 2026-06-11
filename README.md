@@ -139,6 +139,12 @@ start-ai-town-v2.cmd
 http://localhost:8788/
 ```
 
+同局域网设备访问：
+
+- 启动脚本默认监听 `0.0.0.0`，服务端启动时会打印 `LAN: http://本机IP:8788`
+- 手机或另一台电脑连接同一个 Wi-Fi 后，打开这个 LAN 地址
+- 如果打不开，通常是 Windows 防火墙拦截，需要允许 Node.js 访问专用网络，或放行 TCP `8788` 端口
+
 首次打开后，在应用设置里填写 AI 地址、模型和 API Key。
 
 也可以接入本地 AI，只要服务兼容 OpenAI `/v1/chat/completions`：
@@ -186,6 +192,7 @@ npm start
 | 名称 | 用途 | 默认值 |
 | --- | --- | --- |
 | `AI_TOWN_V2_PORT` | 本地服务端口 | `8788` |
+| `AI_TOWN_V2_HOST` | 监听地址；`0.0.0.0` 允许局域网访问 | `0.0.0.0` |
 | `AI_TOWN_API_KEYS` | AI Key 列表，可用逗号、分号或换行分隔；本地 AI 可为空 | 空 |
 | `AI_TOWN_BASE_URL` | OpenAI 兼容接口地址 | `https://api.openai.com/v1` |
 | `AI_TOWN_MODEL` | 默认模型 | `gpt-4.1-mini` |

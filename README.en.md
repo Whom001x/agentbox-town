@@ -139,6 +139,12 @@ Then open:
 http://localhost:8788/
 ```
 
+LAN access:
+
+- The launcher listens on `0.0.0.0` by default, and the server prints `LAN: http://your-pc-ip:8788`
+- Open that LAN URL from a phone or another computer on the same Wi-Fi
+- If it does not open, Windows Firewall is usually blocking it; allow Node.js on private networks or allow TCP port `8788`
+
 On first launch, configure your AI base URL, model, and API keys in the app settings.
 
 Local AI is supported when the server exposes an OpenAI-compatible `/v1/chat/completions` API:
@@ -186,6 +192,7 @@ Main environment variables:
 | Name | Purpose | Default |
 | --- | --- | --- |
 | `AI_TOWN_V2_PORT` | Local server port | `8788` |
+| `AI_TOWN_V2_HOST` | Bind address; `0.0.0.0` allows LAN access | `0.0.0.0` |
 | `AI_TOWN_API_KEYS` | Comma/newline/semicolon separated AI keys; can be empty for local AI | empty |
 | `AI_TOWN_BASE_URL` | OpenAI-compatible base URL | `https://api.openai.com/v1` |
 | `AI_TOWN_MODEL` | Default model | `gpt-4.1-mini` |

@@ -1,8 +1,10 @@
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
+const os = require("os");
 
 const PORT = Number(process.env.AI_TOWN_V2_PORT || 8788);
+const HOST = String(process.env.AI_TOWN_V2_HOST || "0.0.0.0");
 const ROOT = __dirname;
 const CONFIG_PATH = path.join(ROOT, "ai-town-config.json");
 const SAVE_DIR = path.join(ROOT, "saves");
@@ -715,6 +717,15 @@ function appVersion() {
     htmlMtime: html,
     serverMtime: server
   };
+}
+
+function lanUrls(port) {
+  const urls = [];
+  Object.values(os.networkInterfaces()).flat().forEach(item => {
+    if (!item || item.internal || item.family !== "IPv4") return;
+    urls.push(`http://${item.address}:${port}`);
+  });
+  return urls;
 }
 
 function readBody(req) {
@@ -2147,8 +2158,14 @@ http.createServer((req, res) => {
     return;
   }
   serveFile(req, res);
-}).listen(PORT, () => {
+}).listen(PORT, HOST, () => {
   console.log(`AI Town V2: http://localhost:${PORT}`);
+  if (HOST === "0.0.0.0" || HOST === "::") {
+    const urls = lanUrls(PORT);
+    console.log(urls.length ? `LAN: ${urls.join("  ")}` : "LAN: no IPv4 LAN address detected");
+  } else {
+    console.log(`Host: ${HOST}`);
+  }
   console.log(aiConfig.apiKeys.length
     ? `AI enabled: ${aiConfig.model}, ${aiConfig.apiKeys.length} key(s)`
     : isLocalAiBaseUrl(aiConfig.baseUrl)
