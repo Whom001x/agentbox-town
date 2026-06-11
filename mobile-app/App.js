@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Image,
@@ -284,6 +284,7 @@ export default function App() {
         <View style={styles.game}>
           <TownMap
             landscape={landscape}
+            mapWidth={width}
             mapHeight={mapHeight}
             places={mapPlaces}
             boxes={boxes}
@@ -423,37 +424,135 @@ function MiniMap({ places }) {
   );
 }
 
-function TownMap({ mapHeight, places, boxes, placeAgentCount, openPlace }) {
+function TownMap({ mapWidth, mapHeight, places, boxes, placeAgentCount, openPlace }) {
+  const canvasWidth = Math.max(mapWidth * 1.45, mapWidth + 360);
+  const canvasHeight = Math.max(mapHeight * 1.45, mapHeight + 240);
+  const initialView = useMemo(() => ({
+    x: -(canvasWidth - mapWidth) / 2,
+    y: -(canvasHeight - mapHeight) / 2,
+    scale: 1
+  }), [canvasHeight, canvasWidth, mapHeight, mapWidth]);
+  const [mapView, setMapView] = useState(initialView);
+  const gestureRef = useRef({ x: initialView.x, y: initialView.y, distance: 0, scale: 1 });
+
+  useEffect(() => {
+    setMapView(initialView);
+    gestureRef.current = { x: initialView.x, y: initialView.y, distance: 0, scale: initialView.scale };
+  }, [initialView]);
+
+  function clampMapView(next) {
+    const scale = clamp(next.scale ?? mapView.scale, 1, 2.2);
+    const scaledWidth = canvasWidth * scale;
+    const scaledHeight = canvasHeight * scale;
+    const minX = Math.min(-24, mapWidth - scaledWidth + 24);
+    const minY = Math.min(-24, mapHeight - scaledHeight + 24);
+    return {
+      scale,
+      x: clamp(next.x ?? mapView.x, minX, 24),
+      y: clamp(next.y ?? mapView.y, minY, 24)
+    };
+  }
+
+  function touchDistance(touches) {
+    if (!touches || touches.length < 2) return 0;
+    const [a, b] = touches;
+    const dx = a.pageX - b.pageX;
+    const dy = a.pageY - b.pageY;
+    return Math.sqrt(dx * dx + dy * dy);
+  }
+
+  function zoomBy(delta) {
+    setMapView(current => clampMapView({
+      ...current,
+      scale: current.scale + delta,
+      x: current.x - (canvasWidth * delta) / 2,
+      y: current.y - (canvasHeight * delta) / 2
+    }));
+  }
+
   return (
-    <ImageBackground source={assets.townMap} style={[styles.map, { height: mapHeight }]} imageStyle={styles.mapImage}>
-      <View style={styles.mapShade} />
-      {places.map((place, index) => {
-        const count = placeAgentCount(place.id);
-        const box = boxes[place.id] || {};
-        const hasEvent = (box.localEvents || []).length > 0;
-        const busy = count >= 8 || /busy|忙|排队/.test(String(box.agentState?.status || box.state?.tempo || ""));
-        return (
-          <Pressable
-            key={place.id || index}
-            style={[
-              styles.place,
-              {
-                left: `${clamp(place.x ?? (18 + (index % 4) * 22), 7, 93)}%`,
-                top: `${clamp(place.y ?? (18 + Math.floor(index / 4) * 18), 8, 92)}%`
-              },
-              busy && styles.placeBusy,
-              hasEvent && styles.placeEvent
-            ]}
-            onPress={() => openPlace(place)}
-          >
-            <Image source={assets.placeMarker} style={styles.placeMarkerImage} />
-            <Text style={styles.placeName} numberOfLines={1}>{place.name || place.id}</Text>
-            <Text style={styles.placeCount}>{count} 人</Text>
-            {hasEvent && <Image source={assets.eventMarker} style={styles.eventMark} />}
-          </Pressable>
-        );
-      })}
-    </ImageBackground>
+    <View
+      style={[styles.map, { height: mapHeight }]}
+      onStartShouldSetResponder={() => false}
+      onMoveShouldSetResponder={(event, gesture) => Math.abs(gesture.dx) > 4 || Math.abs(gesture.dy) > 4 || event.nativeEvent.touches?.length > 1}
+      onResponderGrant={(event) => {
+        gestureRef.current = {
+          x: mapView.x,
+          y: mapView.y,
+          distance: touchDistance(event.nativeEvent.touches),
+          scale: mapView.scale
+        };
+      }}
+      onResponderMove={(event, gesture) => {
+        const distance = touchDistance(event.nativeEvent.touches);
+        if (distance && gestureRef.current.distance) {
+          const nextScale = gestureRef.current.scale * (distance / gestureRef.current.distance);
+          setMapView(current => clampMapView({ ...current, scale: nextScale }));
+          return;
+        }
+        setMapView(clampMapView({
+          x: gestureRef.current.x + gesture.dx,
+          y: gestureRef.current.y + gesture.dy,
+          scale: mapView.scale
+        }));
+      }}
+    >
+      <ImageBackground
+        source={assets.townMap}
+        style={[
+          styles.mapCanvas,
+          {
+            width: canvasWidth,
+            height: canvasHeight,
+            transform: [
+              { translateX: mapView.x },
+              { translateY: mapView.y },
+              { scale: mapView.scale }
+            ]
+          }
+        ]}
+        imageStyle={styles.mapImage}
+      >
+        <View style={styles.mapShade} />
+        {places.map((place, index) => {
+          const count = placeAgentCount(place.id);
+          const box = boxes[place.id] || {};
+          const hasEvent = (box.localEvents || []).length > 0;
+          const busy = count >= 8 || /busy|忙|排队/.test(String(box.agentState?.status || box.state?.tempo || ""));
+          return (
+            <Pressable
+              key={place.id || index}
+              style={[
+                styles.place,
+                {
+                  left: `${clamp(place.x ?? (18 + (index % 4) * 22), 7, 93)}%`,
+                  top: `${clamp(place.y ?? (18 + Math.floor(index / 4) * 18), 8, 92)}%`
+                },
+                busy && styles.placeBusy,
+                hasEvent && styles.placeEvent
+              ]}
+              onPress={() => openPlace(place)}
+            >
+              <Image source={assets.placeMarker} style={styles.placeMarkerImage} />
+              <Text style={styles.placeName} numberOfLines={1}>{place.name || place.id}</Text>
+              <Text style={styles.placeCount}>{count} 人</Text>
+              {hasEvent && <Image source={assets.eventMarker} style={styles.eventMark} />}
+            </Pressable>
+          );
+        })}
+      </ImageBackground>
+      <View style={styles.mapControls}>
+        <Pressable style={styles.mapControlButton} onPress={() => zoomBy(0.18)}>
+          <Text style={styles.mapControlText}>+</Text>
+        </Pressable>
+        <Pressable style={styles.mapControlButton} onPress={() => zoomBy(-0.18)}>
+          <Text style={styles.mapControlText}>-</Text>
+        </Pressable>
+        <Pressable style={styles.mapControlButton} onPress={() => setMapView(initialView)}>
+          <Ionicons name="locate" size={16} color={palette.ink} />
+        </Pressable>
+      </View>
+    </View>
   );
 }
 
@@ -628,7 +727,6 @@ function DrawerBody({
   }
 
   if (drawer.type === "relations") {
-    const pairs = Array.isArray(agents[0]?.relationshipDynamics) ? agents[0].relationshipDynamics : [];
     const socialPairs = agents.flatMap(agent => Object.entries(agent.relationshipMatrix || {}).slice(0, 2).map(([targetId, value]) => ({
       from: agent.name,
       to: agents.find(item => item.id === targetId)?.name || targetId,
@@ -709,12 +807,43 @@ const styles = StyleSheet.create({
     overflow: "hidden",
     backgroundColor: "#2f543d"
   },
+  mapCanvas: {
+    position: "absolute",
+    left: 0,
+    top: 0
+  },
   mapImage: {
     resizeMode: "cover"
   },
   mapShade: {
     ...StyleSheet.absoluteFillObject,
     backgroundColor: "rgba(4, 13, 10, 0.08)"
+  },
+  mapControls: {
+    position: "absolute",
+    left: 144,
+    bottom: 12,
+    flexDirection: "row",
+    gap: 6,
+    padding: 5,
+    borderRadius: 16,
+    backgroundColor: "rgba(8, 18, 29, 0.76)",
+    borderWidth: 1,
+    borderColor: "rgba(147, 211, 255, 0.28)"
+  },
+  mapControlButton: {
+    width: 32,
+    height: 32,
+    borderRadius: 11,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(255,255,255,0.1)"
+  },
+  mapControlText: {
+    color: palette.ink,
+    fontSize: 19,
+    fontWeight: "900",
+    lineHeight: 22
   },
   sunGlow: {
     position: "absolute",
@@ -1246,3 +1375,4 @@ const styles = StyleSheet.create({
     fontWeight: "800"
   }
 });
+
