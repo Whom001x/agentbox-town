@@ -16,6 +16,18 @@ The project focuses on believable multi-agent town simulation rather than simple
 - Folder-based save system with per-character files and AG judgement files
 - WorldGuard local validation to reduce hidden NPCs, omniscient knowledge, teleportation, and impossible actions
 
+## Main Interface
+
+The main screen is a runnable town console, not just a chat window:
+
+- Top controls: start, pause, reset, save, open settings, and show the per-cycle flow.
+- Save manager: first launch opens the management screen; saves can be created, loaded, and deleted, with each save written to its own folder.
+- Town map: shows locations and character positions. Location details, avatars, and weather are collapsed until selected to keep 100-person towns readable.
+- Character panel: inspect position, life state, age, job, needs, multi-dimensional emotions, relationships, memories, long-term goals, active process, and event queue.
+- Settings panel: configure AI base URL, model, key pool, per-key concurrency, batch size, virtual minutes per cycle, automatic interval, and per-Agent/per-character models.
+- Status bar and call log: display model, key, Agent, duration, success/failure, retry wait, and cancellation state in real time.
+- Per-cycle flow panel: can be opened or closed inside the UI to inspect which Agents run serially and which run in parallel.
+
 ## Per-Cycle Call Graph
 
 GitHub renders the following Mermaid charts directly in the repository page. The call graph is split into smaller sections so GitHub's Mermaid renderer can lay it out reliably.
@@ -29,7 +41,7 @@ flowchart TD
   C --> D[Location Event and Daily Plan]
   D --> E[Location Chain Agent]
   E --> F[Location Runtime and Social Pattern]
-  F --> G[Process Manager Agent]
+  F --> G[Process Manager and Profession Service]
   G --> H[Pre-Judgement Agents]
   H --> I[Scheduler]
   I --> J[Agent Action]
@@ -51,6 +63,20 @@ flowchart TD
   Y --> X
 ```
 
+Concurrency and retry:
+
+```mermaid
+flowchart LR
+  A[Large Task] --> B[Split into Agent Units]
+  B --> C[Run by Key Pool and Concurrency Limit]
+  C --> D{Round Result}
+  D -->|Success| E[Continue to Next Stage]
+  D -->|Failure| F[Wait for Other Units in Same Round]
+  F --> G[Retry Failed Units after 1000ms]
+  G --> C
+  H[Manual Stop] --> I[Cancel Current Retry Queue]
+```
+
 Pre-judgement fan-in:
 
 ```mermaid
@@ -68,9 +94,9 @@ Event and post-action chain:
 ```mermaid
 flowchart TD
   A[WorldGuard Approved Result] --> B[Event Impact Agent]
-  B --> C[Information Propagation Agent]
-  C --> D[Relationship Dynamics Agent]
-  D --> E[Social Process Agent]
+  B --> C[Information Propagation Agent Batched Parallel]
+  C --> D[Relationship Dynamics Agent Batched Parallel]
+  D --> E[Social Process Agent Batched Parallel]
   E --> F[MultiDimensional State Agent]
   E --> G[Obligation Agent]
   E --> H[Reporter]
@@ -166,7 +192,7 @@ Main environment variables:
 | `AI_TOWN_MAX_CONCURRENT_PER_KEY` | Per-key request concurrency | `20` |
 | `AI_TOWN_TIMEOUT_MS` | Upstream request timeout | `180000` |
 | `AI_TOWN_MAX_REQUEST_BODY_BYTES` | Max local API body size | `10000000` |
-| `AI_TOWN_RETRY_DELAY_MS` | Retry wait for temporary upstream errors | `300` |
+| `AI_TOWN_RETRY_DELAY_MS` | Retry wait for temporary upstream errors | `1000` |
 
 Never commit real API keys.
 
