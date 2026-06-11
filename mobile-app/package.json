@@ -1,0 +1,21 @@
+{
+  "name": "agentbox-town-mobile",
+  "version": "0.1.0",
+  "private": true,
+  "main": "node_modules/expo/AppEntry.js",
+  "scripts": {
+    "start": "expo start",
+    "android": "expo start --android",
+    "ios": "expo start --ios",
+    "web": "expo start --web"
+  },
+  "dependencies": {
+    "@expo/vector-icons": "^15.1.1",
+    "expo": "^56.0.11",
+    "expo-font": "~56.0.6",
+    "react": "19.2.3",
+    "react-native": "0.85.3"
+  },
+  "devDependencies": {},
+  "license": "UNLICENSED"
+}

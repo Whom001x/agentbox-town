@@ -1,0 +1,27 @@
+{
+  "expo": {
+    "name": "小镇观察器",
+    "slug": "agentbox-town-mobile",
+    "version": "0.1.0",
+    "orientation": "default",
+    "userInterfaceStyle": "dark",
+    "scheme": "agentboxtown",
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "android": {
+      "package": "com.agentboxtown.mobile"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSAppTransportSecurity": {
+          "NSAllowsArbitraryLoads": true
+        }
+      }
+    },
+    "plugins": [
+      "expo-font"
+    ]
+  }
+}
