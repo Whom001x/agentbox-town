@@ -3025,7 +3025,10 @@ function userPrompt(task, payload) {
   return JSON.stringify(payload);
 }
 
+let aiRouter;
+
 async function callAi(task, payload, retryEpoch = aiRetryEpoch) {
+  if (aiRouter) return aiRouter.runOnce(task, payload, retryEpoch);
   const selectedKey = nextApiKey();
   if (!selectedKey) {
     const permanentBlocked = allKeysPermanentlyUnavailable();
@@ -3141,6 +3144,7 @@ async function callAi(task, payload, retryEpoch = aiRetryEpoch) {
 }
 
 async function callAiWithRetry(task, payload) {
+  if (aiRouter) return aiRouter.runWithRetry(task, payload);
   let attempt = 1;
   const retryEpoch = aiRetryEpoch;
   while (true) {
@@ -3170,11 +3174,52 @@ async function callAiWithRetry(task, payload) {
   }
 }
 
-const aiRouter = createAiRouter({
-  callWithRetry: callAiWithRetry,
-  callOnce: callAi,
+aiRouter = createAiRouter({
   getMetrics: publicMetrics,
   getConfig: publicConfig,
+  runtime: {
+    aiConfig,
+    metrics,
+    get keyHealth() { return keyHealth; },
+    activeControllers: activeAiControllers,
+    timeoutMs: AI_TIMEOUT_MS,
+    retryDelayMs: AI_RETRY_DELAY_MS,
+    getRetryEpoch: () => aiRetryEpoch,
+    getMetricsEpoch: () => metricsEpoch,
+    nextApiKey,
+    modelForTask,
+    systemPrompt,
+    userPrompt,
+    strictJson,
+    normalizeUpstreamError,
+    markKeySuccess,
+    markKeyFailure,
+    pushCallLog,
+    delayUnlessCancelled,
+    makeCancelledError: makeAiRetryCancelledError,
+    makeNoKeyError: () => {
+      const permanentBlocked = allKeysPermanentlyUnavailable();
+      const localAi = isLocalAiBaseUrl(aiConfig.baseUrl);
+      const error = new Error(
+        permanentBlocked
+          ? "All API keys are unavailable"
+          : localAi ? "Local AI concurrency limit reached"
+            : aiConfig.apiKeys.length ? "All API keys are cooling down" : "AI API key is not configured"
+      );
+      error.status = 503;
+      error.type = permanentBlocked ? "credential_error" : "key_pool_unavailable";
+      return error;
+    },
+    setContinuousErrors: value => {
+      aiContinuousErrors = Number(value) || 0;
+      metrics.continuousErrors = aiContinuousErrors;
+    },
+    addContinuousError: () => {
+      aiContinuousErrors += 1;
+      metrics.continuousErrors = aiContinuousErrors;
+      return aiContinuousErrors;
+    }
+  },
   pushLog: item => {
     if (item?.status !== "error") return;
     pushCallLog({

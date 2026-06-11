@@ -5342,7 +5342,7 @@
       };
     }
 
-    async function runSetupBlueprintAgent(targetAgentCount, targetLocationCount, setupPlaces, seedRows) {
+    async function legacyRunSetupBlueprintAgent(targetAgentCount, targetLocationCount, setupPlaces, seedRows) {
       const fallback = fallbackSetupBlueprint(targetAgentCount, targetLocationCount, setupPlaces, seedRows);
       if (!world.config.aiEnabled) return fallback;
       try {
@@ -5422,7 +5422,7 @@
       return ensureRealSeedNames(ensureSetupSeedCount(rows, targetAgentCount)).slice(0, targetAgentCount);
     }
 
-    async function runSetupAgentBatchAgent(blueprint, setupPlaces, seedRows, targetAgentCount) {
+    async function legacyRunSetupAgentBatchAgent(blueprint, setupPlaces, seedRows, targetAgentCount) {
       const slots = setupRoleSlots(targetAgentCount, seedRows, blueprint);
       const batchSize = setupAgentBatchSize(targetAgentCount);
       const batches = chunkList(slots, batchSize).map((batchSlots, batchIndex) => ({ batchSlots, batchIndex }));
@@ -5493,7 +5493,7 @@
       return { households: householdsOut, groups, relations: relations.slice(0, 1000), logs: [{ title: "本地关系草图", body: `生成 ${householdsOut.length} 个住户、${groups.length} 个圈子。` }] };
     }
 
-    async function runSetupRelationSketchAgent(seedRows, setupPlaces, blueprint) {
+    async function legacyRunSetupRelationSketchAgent(seedRows, setupPlaces, blueprint) {
       const fallback = fallbackSetupSocialStructure(seedRows, setupPlaces);
       if (!world.config.aiEnabled) return fallback;
       try {
@@ -5539,7 +5539,7 @@
       return { issues, logs: [{ title: "本地建镇审查", body: `发现 ${issues.length} 个待补项。` }] };
     }
 
-    async function runSetupAuditAgent(seedRows, setupPlaces, sketch, blueprint) {
+    async function legacyRunSetupAuditAgent(seedRows, setupPlaces, sketch, blueprint) {
       const local = localSetupAudit(seedRows, setupPlaces, sketch);
       if (!world.config.aiEnabled) return local;
       try {
@@ -5580,17 +5580,17 @@
       return assignSeedPlaces(ensureRealSeedNames(rows), setupPlaces);
     }
 
-    async function completeSetupWithPipeline(targetAgentCount, targetLocationCount, setupPlaces, seedRows) {
+    async function legacyCompleteSetupWithPipeline(targetAgentCount, targetLocationCount, setupPlaces, seedRows) {
       setSetupProgress("建镇规划 Agent 判断人数、地点和批次", 12, true);
-      const blueprint = await runSetupBlueprintAgent(targetAgentCount, targetLocationCount, setupPlaces, seedRows);
+      const blueprint = await legacyRunSetupBlueprintAgent(targetAgentCount, targetLocationCount, setupPlaces, seedRows);
       const finalPlaces = ensureSetupPlaceCount((blueprint.places || setupPlaces).map((place, index) => normalizeSetupPlace(place, index)), blueprint.targetLocationCount || targetLocationCount);
       setSetupProgress(`人物 Agent 并行生成 ${blueprint.targetAgentCount || targetAgentCount} 人`, 24, true);
-      const agentBatch = await runSetupAgentBatchAgent(blueprint, finalPlaces, seedRows, blueprint.targetAgentCount || targetAgentCount);
+      const agentBatch = await legacyRunSetupAgentBatchAgent(blueprint, finalPlaces, seedRows, blueprint.targetAgentCount || targetAgentCount);
       let finalRows = assignSeedPlaces(agentBatch.rows, finalPlaces);
       setSetupProgress("关系草图 Agent 生成初始家庭/圈子表", 62, true);
-      let relationshipSketch = await runSetupRelationSketchAgent(finalRows, finalPlaces, blueprint);
+      let relationshipSketch = await legacyRunSetupRelationSketchAgent(finalRows, finalPlaces, blueprint);
       setSetupProgress("建镇审查 Agent 检查缺口", 78, true);
-      const audit = await runSetupAuditAgent(finalRows, finalPlaces, relationshipSketch, blueprint);
+      const audit = await legacyRunSetupAuditAgent(finalRows, finalPlaces, relationshipSketch, blueprint);
       finalRows = applySetupAuditFixes(finalRows, audit, finalPlaces);
       relationshipSketch = {
         households: [...(relationshipSketch.households || []), ...(audit.households || [])],
@@ -5610,7 +5610,7 @@
       };
     }
 
-    async function aiCompleteSetup() {
+    async function legacyAiCompleteSetup() {
       if (!world.config.aiEnabled) {
         openSettings("AI 补全前需要先配置 AI 或本地 AI。");
         return;
@@ -5621,7 +5621,7 @@
       const targetLocationCount = desiredSetupLocationCount(targetAgentCount);
       const setupPlaces = ensureSetupPlaceCount(readSetupPlaces(), targetLocationCount);
       const seedRows = readSetupSeeds();
-      const tables = await completeSetupWithPipeline(targetAgentCount, targetLocationCount, setupPlaces, seedRows);
+      const tables = await legacyCompleteSetupWithPipeline(targetAgentCount, targetLocationCount, setupPlaces, seedRows);
       latestSetupTables = tables;
       renderSetupLocations(tables.places);
       renderSetupRoles(tables.agents);
