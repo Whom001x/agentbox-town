@@ -552,7 +552,13 @@ function agentInfoSnapshot(agent = {}) {
     stateSettlementNotes,
     ...info
   } = agent;
-  return info;
+  return {
+    ...info,
+    age: agent.age ?? agent.ageYears ?? null,
+    emotions: agent.emotions || agent.emotionVector || {},
+    longTermGoal: agent.longTermGoal || (Array.isArray(agent.longTermGoals) ? agent.longTermGoals[0]?.title : "") || "",
+    relationships: agent.relationships || agent.relations || {}
+  };
 }
 
 function agentStateSnapshot(agent = {}) {
@@ -565,6 +571,7 @@ function agentStateSnapshot(agent = {}) {
     movement: agent.movement || null,
     needs: agent.needs || {},
     emotionVector: agent.emotionVector || {},
+    emotions: agent.emotions || agent.emotionVector || {},
     energy: agent.energy,
     isSleeping: agent.isSleeping,
     sleepWindow: agent.sleepWindow,

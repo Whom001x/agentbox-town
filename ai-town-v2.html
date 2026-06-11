@@ -1589,6 +1589,7 @@
         relations: {},
         ...seed
       };
+      seed = enrichSetupSeed(seed, index);
       Object.assign(seed, normalizeAgeFields(seed));
       const plan = scheduleTemplate(seed.job, seed.place);
       const householdId = Object.keys(households).find(key => households[key].members.includes(seed.id));
@@ -1611,11 +1612,13 @@
       const identityCore = initialIdentityCore(seed, temperament, personalityProfile);
       return {
         ...seed,
+        age: seed.ageYears,
         color: colors[index % colors.length],
         position: seed.place,
         movement: null,
         mood: seed.emotion,
         emotionVector,
+        emotions: { ...emotionVector },
         previousEmotionVector: { ...emotionVector },
         needs,
         previousNeeds: { ...needs },
@@ -1626,6 +1629,7 @@
         personalityProfile,
         identityCore,
         longTermGoals,
+        longTermGoal: longTermGoals[0]?.title || seed.goal || "维持日常生活",
         selfNarrative: `${seed.name}把“${seed.goal}”当成当前最重要的事，但每天会被需求、情绪、关系和地点事件慢慢改变。`,
         identityStability: 70,
         actionPlan: [],
@@ -1666,6 +1670,7 @@
           rumor: []
         },
         relations: relationMap,
+        relationships: relationMap,
         relationshipMatrix
       };
     }
@@ -1715,6 +1720,7 @@
       if (reason) rel.lastReason = String(reason).slice(0, 80);
       const composite = clamp(Math.round(rel.trust * 0.28 + rel.intimacy * 0.24 + rel.respect * 0.18 + rel.familiarity * 0.12 + rel.dependency * 0.08 - rel.resentment * 0.22 - rel.rivalry * 0.08), 0, 100);
       agent.relations[targetId] = composite;
+      agent.relationships = agent.relations;
       return rel;
     }
 
@@ -2641,11 +2647,13 @@
     }
 
     function adjustEmotion(agent, changes) {
+      if (!agent.emotionVector) agent.emotionVector = initialEmotionVector(agent.mood || agent.emotion || "平静");
       Object.entries(changes).forEach(([key, delta]) => {
         if (agent.emotionVector[key] === undefined) agent.emotionVector[key] = 0;
         agent.emotionVector[key] = clamp(agent.emotionVector[key] + delta, 0, 100);
       });
       agent.mood = dominantEmotion(agent);
+      agent.emotions = agent.emotionVector;
     }
 
     function adjustNeeds(agent, changes) {
@@ -4525,8 +4533,13 @@
         ...agent,
         currentTask,
         ageYears: age.ageYears,
+        age: age.ageYears,
         ageDays: age.ageDays,
         ageStage: age.ageStage,
+        emotionVector: agent.emotionVector || agent.emotions || base.emotionVector,
+        emotions: agent.emotions || agent.emotionVector || base.emotionVector,
+        longTermGoals: Array.isArray(agent.longTermGoals) && agent.longTermGoals.length ? agent.longTermGoals : base.longTermGoals,
+        longTermGoal: agent.longTermGoal || agent.longTermGoals?.[0]?.title || base.longTermGoals?.[0]?.title || "维持日常生活",
         lifeStatus: ["alive", "critical", "dead"].includes(agent.lifeStatus) ? agent.lifeStatus : "alive",
         deathAt: agent.deathAt || null,
         deathCause: agent.deathCause || "",
@@ -4562,7 +4575,8 @@
           agent.personalityProfile || base.personalityProfile || initialPersonalityProfile(agent, agent.temperament || base.temperament || {})
         ),
         relationshipMatrix: agent.relationshipMatrix || base.relationshipMatrix,
-        relations: agent.relations || base.relations
+        relations: agent.relations || agent.relationships || base.relations,
+        relationships: agent.relationships || agent.relations || base.relations
       };
     }
 
@@ -4844,24 +4858,75 @@
         .replace(/>/g, "&gt;");
     }
 
+    function defaultSetupGoal(seed = {}) {
+      const job = String(seed.job || "居民");
+      if (/小学生|初中生|高中生|学生|儿童/.test(job)) return "跟上课程和同伴关系";
+      if (/老师|教师|班主任/.test(job)) return "照看学生状态和课堂秩序";
+      if (/医生|护士|医护|护理/.test(job)) return "维持诊所运转并照顾病人";
+      if (/店主|店员|小卖部|早餐|餐饮|帮工|售货|收银/.test(job)) return "维持店里生意和熟客关系";
+      if (/上班族|职员|工人|公务|窗口|镇政府|社区/.test(job)) return "稳定完成工作并维持家庭日常";
+      if (/老人|退休/.test(job)) return "保持身体舒服并和熟人保持联系";
+      if (/保安|警察|民警|安保/.test(job)) return "守住负责区域的安全秩序";
+      return "维持稳定生活并处理身边关系";
+    }
+
+    function defaultSetupMemories(seed = {}) {
+      const name = String(seed.name || "这个人");
+      const job = String(seed.job || "居民");
+      const place = placeName(seed.place || "") || "镇上";
+      const memories = [];
+      if (/学生|儿童/.test(job)) memories.push(`${name}记得最近在${place}有一次课程或同伴相处让自己有些在意。`);
+      else if (/老师|教师/.test(job)) memories.push(`${name}记得最近有学生状态不太稳定，需要多留意。`);
+      else if (/医生|护士|医护|护理/.test(job)) memories.push(`${name}记得镇上几位居民最近身体状况需要复查或观察。`);
+      else if (/店主|店员|小卖部|早餐|餐饮|帮工|售货|收银/.test(job)) memories.push(`${name}记得几个熟客的习惯，也担心忙时照顾不过来。`);
+      else if (/老人|退休/.test(job)) memories.push(`${name}记得自己最近身体比以前更容易疲惫，所以会留意休息。`);
+      else if (/上班族|职员|工人|公务|窗口|镇政府|社区/.test(job)) memories.push(`${name}记得今天还有工作和家里的小事需要兼顾。`);
+      else memories.push(`${name}记得自己在小镇里有固定的生活圈和几个点头熟人。`);
+      memories.push(`${name}熟悉${place}附近的日常节奏，知道有些人会在那里出现。`);
+      return memories.slice(0, 3);
+    }
+
+    function enrichSetupSeed(seed = {}, index = 0) {
+      const age = normalizeAgeFields(seed);
+      const goal = String(seed.goal || "").trim() || defaultSetupGoal(seed);
+      const rawMemory = Array.isArray(seed.memory)
+        ? seed.memory
+        : String(seed.memory || "").split(/[；;\n]+/);
+      const memory = rawMemory.map(item => String(item).trim()).filter(Boolean).slice(0, 3);
+      const filledMemory = memory.length ? memory : defaultSetupMemories({ ...seed, ...age, goal });
+      return {
+        ...seed,
+        id: String(seed.id || `agent_${index + 1}`).trim(),
+        ageYears: age.ageYears,
+        age: age.ageYears,
+        ageDays: age.ageDays,
+        ageStage: age.ageStage,
+        goal,
+        longTermGoal: goal,
+        memory: filledMemory
+      };
+    }
+
     function normalizeSeed(seed, index) {
       const place = seed.place && places.some(item => item.id === seed.place) ? seed.place : "";
       const name = String(seed.name || generatedChineseName(index)).trim().slice(0, 12);
-      const age = normalizeAgeFields(seed);
+      const enriched = enrichSetupSeed({ ...seed, name, place }, index);
+      const age = normalizeAgeFields(enriched);
       return {
-        id: String(seed.id || safeIdFromName(name, index)).trim().slice(0, 32),
+        id: String(enriched.id || safeIdFromName(name, index)).trim().slice(0, 32),
         name,
-        job: String(seed.job || "居民").trim().slice(0, 18),
+        job: String(enriched.job || "居民").trim().slice(0, 18),
         ageYears: age.ageYears,
+        age: age.ageYears,
         ageDays: age.ageDays,
         ageStage: age.ageStage,
         place,
-        emotion: String(seed.emotion || "平静").trim().slice(0, 12),
-        goal: String(seed.goal || "过好今天").trim().slice(0, 28),
-        memory: Array.isArray(seed.memory)
-          ? seed.memory.map(item => String(item).slice(0, 80)).filter(Boolean).slice(0, 3)
-          : String(seed.memory || "").split(/[；;\n]+/).map(item => item.trim()).filter(Boolean).slice(0, 3),
-        relations: seed.relations && typeof seed.relations === "object" && !Array.isArray(seed.relations) ? seed.relations : {}
+        emotion: String(enriched.emotion || "平静").trim().slice(0, 12),
+        goal: String(enriched.goal || defaultSetupGoal(enriched)).trim().slice(0, 36),
+        memory: Array.isArray(enriched.memory)
+          ? enriched.memory.map(item => String(item).slice(0, 100)).filter(Boolean).slice(0, 3)
+          : defaultSetupMemories(enriched),
+        relations: enriched.relations && typeof enriched.relations === "object" && !Array.isArray(enriched.relations) ? enriched.relations : {}
       };
     }
 
@@ -5388,7 +5453,10 @@
           routines: ["晚间回家", "同步家里情况"],
           responsibilities: members.length > 1 ? ["互相照看", "分担日常"] : ["照顾自己"]
         });
-        members.forEach((from, index) => members.slice(index + 1).forEach(to => relations.push({ from, to, type: "家人", trust: 78, intimacy: 70, respect: 55, debt: 0 })));
+        members.forEach((from, index) => members.slice(index + 1).forEach(to => {
+          relations.push({ from, to, type: "家人", trust: 78, intimacy: 70, respect: 55, debt: 0 });
+          relations.push({ from: to, to: from, type: "家人", trust: 78, intimacy: 70, respect: 55, debt: 0 });
+        }));
       }
       setupPlaces.forEach(place => {
         if (!placeIds.has(place.id)) return;
@@ -5396,7 +5464,10 @@
         if (members.length < 2) return;
         const type = socialGroupTypeForPlace(place.id);
         groups.push({ id: `setup_group_${place.id}`, type, place: place.id, members, authority: members.slice(0, 3) });
-        members.forEach((from, index) => members.slice(index + 1, index + 4).forEach(to => relations.push({ from, to, type, trust: 50, intimacy: 35, respect: 45, debt: 0 })));
+        members.forEach((from, index) => members.slice(index + 1, index + 4).forEach(to => {
+          relations.push({ from, to, type, trust: 50, intimacy: 35, respect: 45, debt: 0 });
+          relations.push({ from: to, to: from, type, trust: 50, intimacy: 35, respect: 45, debt: 0 });
+        }));
       });
       return { households: householdsOut, groups, relations: relations.slice(0, 1000), logs: [{ title: "本地关系草图", body: `生成 ${householdsOut.length} 个住户、${groups.length} 个圈子。` }] };
     }
@@ -5560,7 +5631,8 @@
         const setupPlaces = ensureSetupPlaceCount(tableReady ? latestSetupTables.places : readSetupPlaces(), desiredSetupLocationCount(desiredCount));
         setSetupProgress("整理地点配置", 12, true);
         applyPlaceConfig(setupPlaces);
-        const setupSeeds = assignSeedPlaces(ensureSetupSeedCount(tableReady ? latestSetupTables.agents : currentRows, desiredCount), setupPlaces);
+        const setupSeeds = assignSeedPlaces(ensureSetupSeedCount(tableReady ? latestSetupTables.agents : currentRows, desiredCount), setupPlaces)
+          .map((seed, index) => normalizeSeed(enrichSetupSeed(seed, index), index));
         if (!setupSeeds.length) {
           byId("setupHint").textContent = "至少需要 1 个角色。";
           setSetupProgress("至少需要 1 个角色", 0, false);
@@ -5584,17 +5656,18 @@
         world.startClock = startClock;
         world.customSetup = true;
         world.setupNote = byId("setupPrompt").value.trim();
-        world.setupTables = tableReady
-          ? { ...latestSetupTables, agents: setupSeeds, places: setupPlaces, createdAt: latestSetupTables.createdAt || new Date().toISOString() }
-          : { blueprint: null, agents: setupSeeds, places: setupPlaces, relationships: null, audit: localSetupAudit(setupSeeds, setupPlaces, { households: [], groups: [], relations: [] }), agentBatches: [], createdAt: new Date().toISOString() };
         resetLocationBoxes();
-        const setupRelationships = tableReady && latestSetupTables.relationships && (
+        const setupRelationshipsFromAi = tableReady && latestSetupTables.relationships && (
           latestSetupTables.relationships.households?.length ||
           latestSetupTables.relationships.groups?.length ||
           latestSetupTables.relationships.relations?.length
         ) ? latestSetupTables.relationships : null;
-        setSetupProgress(setupRelationships ? "写入 AI 关系草图表" : "生成本地社会结构", 42, true);
-        applySocialStructure(setupRelationships || fallbackSocialStructure());
+        const setupRelationships = setupRelationshipsFromAi || fallbackSetupSocialStructure(setupSeeds, setupPlaces);
+        world.setupTables = tableReady
+          ? { ...latestSetupTables, agents: setupSeeds, places: setupPlaces, relationships: setupRelationships, createdAt: latestSetupTables.createdAt || new Date().toISOString() }
+          : { blueprint: null, agents: setupSeeds, places: setupPlaces, relationships: setupRelationships, audit: localSetupAudit(setupSeeds, setupPlaces, setupRelationships), agentBatches: [], createdAt: new Date().toISOString() };
+        setSetupProgress(setupRelationshipsFromAi ? "写入 AI 关系草图表" : "生成本地社会结构", 42, true);
+        applySocialStructure(setupRelationships);
         world.socialStructureDone = true;
         setSetupProgress("补齐本地社会落点", 48, true);
         applySocialEmbedding({}, "local");
@@ -5612,7 +5685,7 @@
         applyLocationRuntime(fallbackLocationRuntime(), "local");
         setSetupProgress("生成本地社会模式", 72, true);
         applySocialPatterns(fallbackSocialPatterns(), "local");
-        pushLog("新存档", `已创建自定义存档 ${name}，角色 ${setupSeeds.length} 个。${setupRelationships ? "已写入 AI 建镇关系草图表。" : "使用本地社会结构兜底。"}`);
+        pushLog("新存档", `已创建自定义存档 ${name}，角色 ${setupSeeds.length} 个。${setupRelationshipsFromAi ? "已写入 AI 建镇关系草图表。" : "已按当前人物生成本地家庭/圈子关系草图。"}`);
         setSetupProgress("写入存档文件", 82, true);
         await saveCurrentArchive("create");
         setSetupProgress("刷新存档列表", 92, true);
@@ -7878,6 +7951,7 @@
         }, rel.type || "社会结构");
         from.knownFacts.add(rel.to);
       });
+      world.agents.forEach(agent => { agent.relationships = agent.relations || {}; });
       world.socialEmbeddingDone = false;
       pushRecord("社会结构", `已生成 ${world.socialStructures.households.length} 个家庭、${world.socialStructures.groups.length} 个群组。`, "social");
     }
