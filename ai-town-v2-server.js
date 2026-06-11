@@ -693,7 +693,7 @@ function markKeyFailure(index, error, durationMs) {
   item.lastDurationMs = durationMs;
   item.lastError = error.message.slice(0, 160);
   if (isPermanentAiError(error)) {
-    item.cooldownUntil = Date.now() + 3600000;
+    item.cooldownUntil = Date.now() + 60000;
     return;
   }
   if (item.consecutiveFailures >= 3) {
