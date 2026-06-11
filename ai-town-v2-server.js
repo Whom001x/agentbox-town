@@ -2,7 +2,6 @@ const http = require("http");
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
-const { spawn } = require("child_process");
 const { nodeStepPayload, minutesToClock } = require("./ai-town-node-core");
 const { guardAction } = require("./ai-town-world-guard");
 const { createAiRouter } = require("./ai-town-ai-router");
@@ -1765,24 +1764,12 @@ function lanUrls(port) {
   return urls;
 }
 
-function findBrowserExecutable() {
-  const candidates = [
-    process.env.AI_TOWN_BROWSER,
-    "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
-    "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
-    "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
-    "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe"
-  ].filter(Boolean);
-  return candidates.find(item => fs.existsSync(item)) || "";
-}
-
 function runtimeStatus() {
-  const processRunning = Boolean(runtimeProcess && runtimeProcess.exitCode === null && !runtimeProcess.killed);
   return {
-    running: runtimeState === "running" && (runtimeEngine === "node-core-v1" || processRunning),
-    processRunning,
+    running: runtimeState === "running" && runtimeEngine === "node-core-v1",
+    processRunning: false,
     state: runtimeState,
-    pid: processRunning ? runtimeProcess.pid : 0,
+    pid: 0,
     slot: runtimeSlot,
     startedAt: runtimeStartedAt ? new Date(runtimeStartedAt).toISOString() : "",
     message: runtimeLastMessage,
@@ -1790,7 +1777,7 @@ function runtimeStatus() {
     controller: "node-runtime-controller",
     computeEngine: runtimeEngine,
     monitorUrl: `http://localhost:${PORT}/ai-town-monitor.html`,
-    runtimeUrl: runtimeSlot ? `http://127.0.0.1:${PORT}/?runtime=1&autostart=1&slot=${encodeURIComponent(runtimeSlot)}` : ""
+    runtimeUrl: runtimeSlot ? `http://127.0.0.1:${PORT}/?slot=${encodeURIComponent(runtimeSlot)}` : ""
   };
 }
 
@@ -1841,6 +1828,37 @@ async function runNodeRuntimeLoop() {
 async function startRuntime(slot = "", options = {}) {
   const mode = options.mode || "run";
   const engine = options.engine || "node-core-v1";
+  if (engine !== "node-core-v1") {
+    const error = new Error(`Unsupported runtime engine: ${engine}`);
+    error.status = 400;
+    throw error;
+  }
+  const nodeSaves = listSaves();
+  const nodeChosenSlot = safeSaveName(slot || runtimeSlot || nodeSaves[0]?.slot || "autosave");
+  runtimeSlot = nodeChosenSlot;
+  runtimeEngine = "node-core-v1";
+  runtimeStartedAt = Date.now();
+  if (mode === "step") {
+    runtimeState = "stepping";
+    runtimeLastMessage = "Node single step running";
+    runNodeRuntimeStep(nodeChosenSlot)
+      .then(summary => {
+        runtimeState = "paused";
+        runtimeStartedAt = 0;
+        runtimeLastMessage = `Node single step completed: ${summary.clockText}`;
+      })
+      .catch(error => {
+        runtimeState = "paused";
+        runtimeStartedAt = 0;
+        runtimeLastMessage = `Node single step failed: ${error.message}`;
+      });
+    return runtimeStatus();
+  }
+  runtimeState = "running";
+  runtimeLastMessage = "Node runtime running";
+  runNodeRuntimeLoop();
+  return runtimeStatus();
+  /*
   const processRunning = Boolean(runtimeProcess && runtimeProcess.exitCode === null && !runtimeProcess.killed);
   if (processRunning && runtimeState === "running" && mode === "run") return runtimeStatus();
   if (processRunning) killRuntimeProcess();
@@ -1919,6 +1937,7 @@ async function startRuntime(slot = "", options = {}) {
     }
   });
   return runtimeStatus();
+  */
 }
 
 function completeRuntimeStep(message = "单步完成") {
@@ -3028,7 +3047,8 @@ function userPrompt(task, payload) {
 let aiRouter;
 
 async function callAi(task, payload, retryEpoch = aiRetryEpoch) {
-  if (aiRouter) return aiRouter.runOnce(task, payload, retryEpoch);
+  if (!aiRouter) throw new Error("AI router is not initialized");
+  return aiRouter.runOnce(task, payload, retryEpoch);
   const selectedKey = nextApiKey();
   if (!selectedKey) {
     const permanentBlocked = allKeysPermanentlyUnavailable();
@@ -3144,7 +3164,8 @@ async function callAi(task, payload, retryEpoch = aiRetryEpoch) {
 }
 
 async function callAiWithRetry(task, payload) {
-  if (aiRouter) return aiRouter.runWithRetry(task, payload);
+  if (!aiRouter) throw new Error("AI router is not initialized");
+  return aiRouter.runWithRetry(task, payload);
   let attempt = 1;
   const retryEpoch = aiRetryEpoch;
   while (true) {

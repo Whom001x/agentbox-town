@@ -12228,8 +12228,8 @@
         byId("saveDirectoryText").textContent = error.message;
       });
       const params = new URLSearchParams(window.location.search);
-      const runtimeMode = params.get("runtime") === "1";
-      const runtimeStepMode = params.get("step") === "1";
+      const runtimeMode = false;
+      const runtimeStepMode = false;
       const runtimeSlot = params.get("slot") || saveListCache[0]?.slot || "";
       if (runtimeMode) {
         document.title = "AgentBox Town Runtime";
