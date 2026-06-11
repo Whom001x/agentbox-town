@@ -40,6 +40,8 @@
     <div>
       <select id="saveSelect"></select>
       <button class="primary" id="startBtn">启动后台</button>
+      <button id="pauseBtn">暂停</button>
+      <button id="stepBtn">单步</button>
       <button id="stopBtn">停止后台</button>
     </div>
   </header>
@@ -102,9 +104,11 @@
       const critical = agents.filter(a => a.lifeStatus === "critical").length;
       document.getElementById("subtitle").textContent = `${payload.meta?.name || slot || "无存档"}｜${fmtClock(world)}｜${agents.length} 人`;
       document.getElementById("runtimeBox").innerHTML = `
-        <div>状态：<b>${runtime.running ? "后台运行中" : "未运行"}</b></div>
+        <div>状态：<b>${runtime.state || (runtime.running ? "running" : "stopped")}</b></div>
         <div>PID：${runtime.pid || "-"}</div>
         <div>存档：${runtime.slot || "-"}</div>
+        <div>说明：${runtime.message || "-"}</div>
+        <div>控制器：${runtime.controller || "-"}｜计算：${runtime.computeEngine || "-"}</div>
         <div>AI 请求：${metrics.inFlight || 0}｜成功 ${metrics.success || 0}｜失败 ${metrics.failure || 0}</div>
         <div>模型：${metrics.model || "-"}</div>
       `;
@@ -135,6 +139,14 @@
     }
     document.getElementById("startBtn").onclick = async () => {
       await api("/api/runtime/start", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ slot: selectedSlot() }) });
+      await refresh();
+    };
+    document.getElementById("pauseBtn").onclick = async () => {
+      await api("/api/runtime/pause", { method: "POST" });
+      await refresh();
+    };
+    document.getElementById("stepBtn").onclick = async () => {
+      await api("/api/runtime/step", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ slot: selectedSlot() }) });
       await refresh();
     };
     document.getElementById("stopBtn").onclick = async () => {

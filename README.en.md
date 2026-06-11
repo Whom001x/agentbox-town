@@ -149,8 +149,9 @@ Display and background runtime:
 
 - Main UI: `http://localhost:8788/`, with full editing, settings, and simulation controls
 - Display UI: `http://localhost:8788/ai-town-monitor.html`, which only reads saves and call status without running the simulation loop
-- The display UI's start button launches a headless Edge process on the host to run the selected save in the background
-- The stop button stops only that background runtime process; it does not delete saves
+- Node RuntimeController owns background state: `running`, `paused`, `stepping`, and `stopped`
+- The display UI's start, pause, step, and stop buttons all call server-side Runtime APIs
+- This first migration stage still uses `headless-browser-shim` as the compute engine: the server launches headless Edge to run the old simulation core; later stages will move the core into pure Node
 
 On first launch, configure your AI base URL, model, and API keys in the app settings.
 

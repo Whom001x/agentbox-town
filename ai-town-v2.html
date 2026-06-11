@@ -4792,8 +4792,8 @@
         return;
       }
       list.innerHTML = saveListCache.map(save => `
-        <div class="save-row ${runtimeStatusCache.running && runtimeStatusCache.slot === save.slot ? "running-save" : ""}" data-save-slot="${save.slot}">
-          <div><strong>${save.name}${runtimeStatusCache.running && runtimeStatusCache.slot === save.slot ? `<span class="running-badge">后台运行中</span>` : ""}</strong><span>${save.clockText || "未知时间"}｜第 ${save.day || 1} 天｜${save.agentCount || 0} 人｜${save.format === "json" ? "旧JSON" : "文件夹"}｜${new Date(save.updatedAt).toLocaleString()}</span></div>
+        <div class="save-row ${runtimeStatusCache.slot === save.slot && runtimeStatusCache.state !== "stopped" ? "running-save" : ""}" data-save-slot="${save.slot}">
+          <div><strong>${save.name}${runtimeStatusCache.slot === save.slot && runtimeStatusCache.state !== "stopped" ? `<span class="running-badge">后台${runtimeStatusCache.state || "运行"}</span>` : ""}</strong><span>${save.clockText || "未知时间"}｜第 ${save.day || 1} 天｜${save.agentCount || 0} 人｜${save.format === "json" ? "旧JSON" : "文件夹"}｜${new Date(save.updatedAt).toLocaleString()}</span></div>
           <button type="button" data-load-save="${save.slot}">读取</button>
           <button type="button" data-delete-save="${save.slot}">删除</button>
         </div>
@@ -4815,8 +4815,8 @@
       saveListCache = data.saves || [];
       byId("saveDirectoryText").textContent = `存档文件夹：${data.directory || "outputs/saves"}`;
       byId("managerRuntimeText").textContent = runtimeStatusCache.running
-        ? `后台状态：正在运行 ${runtimeStatusCache.slot || "未知存档"}｜PID ${runtimeStatusCache.pid || "-"}`
-        : "后台状态：未运行";
+        ? `后台状态：${runtimeStatusCache.state || "running"} ${runtimeStatusCache.slot || "未知存档"}｜PID ${runtimeStatusCache.pid || "-"}`
+        : `后台状态：${runtimeStatusCache.state || "未运行"}${runtimeStatusCache.slot ? ` ${runtimeStatusCache.slot}` : ""}`;
       if (!currentSaveSlot && saveListCache[0]) currentSaveSlot = saveListCache[0].slot;
       renderSaveList();
     }
@@ -10993,12 +10993,14 @@
     async function refreshRuntimeStatus() {
       try {
         runtimeStatusCache = await api("/api/runtime/status", {}, CONFIG_TIMEOUT_MS);
-        byId("runtimeState").textContent = runtimeStatusCache.running ? runtimeStatusCache.slot || "运行中" : "未运行";
+        byId("runtimeState").textContent = runtimeStatusCache.state && runtimeStatusCache.state !== "stopped"
+          ? `${runtimeStatusCache.state}:${runtimeStatusCache.slot || "-"}`
+          : "未运行";
         byId("runtimeState").title = runtimeStatusCache.running ? `PID ${runtimeStatusCache.pid || "-"}｜${runtimeStatusCache.runtimeUrl || ""}` : "";
         if (byId("managerRuntimeText")) {
           byId("managerRuntimeText").textContent = runtimeStatusCache.running
-            ? `后台状态：正在运行 ${runtimeStatusCache.slot || "未知存档"}｜PID ${runtimeStatusCache.pid || "-"}`
-            : "后台状态：未运行";
+            ? `后台状态：${runtimeStatusCache.state || "running"} ${runtimeStatusCache.slot || "未知存档"}｜PID ${runtimeStatusCache.pid || "-"}`
+            : `后台状态：${runtimeStatusCache.state || "未运行"}${runtimeStatusCache.slot ? ` ${runtimeStatusCache.slot}` : ""}`;
         }
       } catch {
         byId("runtimeState").textContent = "未知";
@@ -11883,7 +11885,7 @@
       }
       byId("queueCount").textContent = world.actionQueue.length;
       byId("runningCount").textContent = world.cycleInProgress ? (byId("metricInFlight").textContent || "1") : "0";
-      byId("runBtn").textContent = allAgentsDead() ? "已停止" : (world.running ? "暂停" : "启动");
+      byId("runBtn").textContent = allAgentsDead() ? "已停止" : (runtimeStatusCache.state === "running" ? "暂停后台" : "启动后台");
       byId("weatherBtn").textContent = byId("weatherPanel").hidden ? "天气" : "关闭天气";
       byId("cycleFlowBtn").textContent = byId("cyclePanel").hidden ? "每回合流程" : "关闭流程";
       byId("relationshipGraphBtn").textContent = byId("relationshipGraphPanel").hidden ? "关系蛛网" : "关闭蛛网";
@@ -12108,23 +12110,27 @@
         render();
         return;
       }
-      const nextRunning = !world.running;
-      world.running = nextRunning;
-      if (!nextRunning) {
-        world.aiBackoffUntil = 0;
-        if (world.loopTimer) clearTimeout(world.loopTimer);
-        world.loopTimer = null;
-        pushLog("自动调度已暂停", world.cycleInProgress ? "当前回合正在收尾，不会取消；完成后不会自动进入下一回合。" : "不会自动进入下一回合。", "system");
-      } else {
-        clearAiBackoff();
-      }
-      scheduleLoop();
-      render();
+      const shouldPause = runtimeStatusCache.state === "running" || world.running;
+      const endpoint = shouldPause ? "/api/runtime/pause" : "/api/runtime/start";
+      api(endpoint, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ slot: currentSaveSlot || saveListCache[0]?.slot || "" })
+      }, CONFIG_TIMEOUT_MS).then(() => refreshRuntimeStatus()).then(render).catch(error => {
+        pushLog("后台控制失败", error.message, "system");
+        render();
+      });
     });
-    byId("stepBtn").addEventListener("click", () => cycle().catch(error => {
-      pushLog("单步失败", error.message);
-      render();
-    }));
+    byId("stepBtn").addEventListener("click", () => {
+      api("/api/runtime/step", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ slot: currentSaveSlot || saveListCache[0]?.slot || "" })
+      }, CONFIG_TIMEOUT_MS).then(() => refreshRuntimeStatus()).then(render).catch(error => {
+        pushLog("后台单步失败", error.message, "system");
+        render();
+      });
+    });
 
     let appVersion = "";
     async function refreshWhenSourceChanged() {
@@ -12147,6 +12153,7 @@
       });
       const params = new URLSearchParams(window.location.search);
       const runtimeMode = params.get("runtime") === "1";
+      const runtimeStepMode = params.get("step") === "1";
       const runtimeSlot = params.get("slot") || saveListCache[0]?.slot || "";
       if (runtimeMode) {
         document.title = "AgentBox Town Runtime";
@@ -12162,6 +12169,24 @@
         world.running = true;
         clearAiBackoff();
         scheduleLoop();
+      }
+      if (runtimeMode && runtimeStepMode) {
+        world.running = false;
+        try {
+          await cycle();
+          await saveCurrentArchive("auto");
+          await api("/api/runtime/step-complete", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ slot: runtimeSlot, message: "单步完成并已保存" })
+          }, CONFIG_TIMEOUT_MS);
+        } catch (error) {
+          await api("/api/runtime/step-complete", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ slot: runtimeSlot, message: `单步失败：${error.message}` })
+          }, CONFIG_TIMEOUT_MS).catch(() => {});
+        }
       }
       await refreshMetrics();
       await refreshRuntimeStatus();

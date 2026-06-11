@@ -149,8 +149,9 @@ http://localhost:8788/
 
 - 主界面：`http://localhost:8788/`，包含完整编辑、设置和模拟能力
 - 显示端：`http://localhost:8788/ai-town-monitor.html`，只读取后台存档和调用状态，不执行模拟计算
-- 显示端里的“启动后台”会用无界面 Edge 在主机后台运行当前存档
-- 显示端里的“停止后台”只停止后台计算进程，不删除存档
+- Node RuntimeController 负责维护后台状态：`running`、`paused`、`stepping`、`stopped`
+- 显示端里的“启动后台 / 暂停 / 单步 / 停止后台”都调用服务端 Runtime API
+- 当前第一阶段计算引擎仍是 `headless-browser-shim`：服务端用无界面 Edge 执行旧模拟核心；后续会继续把模拟核心迁到纯 Node
 
 首次打开后，在应用设置里填写 AI 地址、模型和 API Key。
 

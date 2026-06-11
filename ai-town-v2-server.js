@@ -54,6 +54,8 @@ const activeAiControllers = new Set();
 let runtimeProcess = null;
 let runtimeStartedAt = 0;
 let runtimeSlot = "";
+let runtimeState = "stopped";
+let runtimeLastMessage = "";
 
 function ensureSaveDir() {
   fs.mkdirSync(SAVE_DIR, { recursive: true });
@@ -744,28 +746,50 @@ function findBrowserExecutable() {
 }
 
 function runtimeStatus() {
-  const running = Boolean(runtimeProcess && runtimeProcess.exitCode === null && !runtimeProcess.killed);
+  const processRunning = Boolean(runtimeProcess && runtimeProcess.exitCode === null && !runtimeProcess.killed);
   return {
-    running,
-    pid: running ? runtimeProcess.pid : 0,
+    running: runtimeState === "running" && processRunning,
+    processRunning,
+    state: runtimeState,
+    pid: processRunning ? runtimeProcess.pid : 0,
     slot: runtimeSlot,
     startedAt: runtimeStartedAt ? new Date(runtimeStartedAt).toISOString() : "",
+    message: runtimeLastMessage,
+    controller: "node-runtime-controller",
+    computeEngine: "headless-browser-shim",
     monitorUrl: `http://localhost:${PORT}/ai-town-monitor.html`,
     runtimeUrl: runtimeSlot ? `http://127.0.0.1:${PORT}/?runtime=1&autostart=1&slot=${encodeURIComponent(runtimeSlot)}` : ""
   };
 }
 
-function stopRuntime() {
+function killRuntimeProcess() {
   if (runtimeProcess && runtimeProcess.exitCode === null && !runtimeProcess.killed) {
     runtimeProcess.kill();
   }
   runtimeProcess = null;
   runtimeStartedAt = 0;
-  runtimeSlot = "";
 }
 
-function startRuntime(slot = "") {
-  if (runtimeProcess && runtimeProcess.exitCode === null && !runtimeProcess.killed) return runtimeStatus();
+function stopRuntime() {
+  killRuntimeProcess();
+  runtimeSlot = "";
+  runtimeState = "stopped";
+  runtimeLastMessage = "后台运行已停止";
+}
+
+function pauseRuntime() {
+  const slot = runtimeSlot;
+  killRuntimeProcess();
+  runtimeSlot = slot;
+  runtimeState = "paused";
+  runtimeLastMessage = "后台运行已暂停";
+}
+
+function startRuntime(slot = "", options = {}) {
+  const mode = options.mode || "run";
+  const processRunning = Boolean(runtimeProcess && runtimeProcess.exitCode === null && !runtimeProcess.killed);
+  if (processRunning && runtimeState === "running" && mode === "run") return runtimeStatus();
+  if (processRunning) killRuntimeProcess();
   const browser = findBrowserExecutable();
   if (!browser) {
     const error = new Error("No Edge/Chrome executable found. Set AI_TOWN_BROWSER to a Chromium browser path.");
@@ -773,9 +797,12 @@ function startRuntime(slot = "") {
     throw error;
   }
   const saves = listSaves();
-  const chosenSlot = safeSaveName(slot || saves[0]?.slot || "autosave");
-  const runtimeUrl = `http://127.0.0.1:${PORT}/?runtime=1&autostart=1&slot=${encodeURIComponent(chosenSlot)}`;
-  const userDataDir = path.join(os.tmpdir(), "agentbox-town-runtime-profile");
+  const chosenSlot = safeSaveName(slot || runtimeSlot || saves[0]?.slot || "autosave");
+  const params = new URLSearchParams({ runtime: "1", slot: chosenSlot });
+  if (mode === "step") params.set("step", "1");
+  else params.set("autostart", "1");
+  const runtimeUrl = `http://127.0.0.1:${PORT}/?${params.toString()}`;
+  const userDataDir = path.join(os.tmpdir(), `agentbox-town-runtime-profile-${mode}`);
   runtimeProcess = spawn(browser, [
     "--headless=new",
     "--disable-gpu",
@@ -791,11 +818,27 @@ function startRuntime(slot = "") {
   runtimeProcess.unref();
   runtimeStartedAt = Date.now();
   runtimeSlot = chosenSlot;
+  runtimeState = mode === "step" ? "stepping" : "running";
+  runtimeLastMessage = mode === "step" ? "后台正在执行单步" : "后台正在运行";
   runtimeProcess.on("exit", () => {
     runtimeProcess = null;
     runtimeStartedAt = 0;
-    runtimeSlot = "";
+    if (runtimeState === "running" || runtimeState === "stepping") {
+      runtimeState = runtimeState === "stepping" ? "paused" : "stopped";
+      runtimeLastMessage = runtimeState === "paused" ? "单步结束" : "后台进程已退出";
+    }
   });
+  return runtimeStatus();
+}
+
+function completeRuntimeStep(message = "单步完成") {
+  if (runtimeState === "stepping") {
+    const slot = runtimeSlot;
+    killRuntimeProcess();
+    runtimeSlot = slot;
+    runtimeState = "paused";
+    runtimeLastMessage = message;
+  }
   return runtimeStatus();
 }
 
@@ -2074,9 +2117,44 @@ async function handleApi(req, res) {
     try {
       const raw = await readBody(req);
       const body = JSON.parse(raw || "{}");
-      send(res, 200, startRuntime(body.slot || ""));
+      send(res, 200, startRuntime(body.slot || "", { mode: body.mode || "run" }));
     } catch (error) {
       send(res, error.status || 500, { error: { message: error.message, type: "runtime_start_error" } });
+    }
+    return;
+  }
+  if (apiPath === "/api/runtime/resume" && req.method === "POST") {
+    try {
+      const raw = await readBody(req);
+      const body = JSON.parse(raw || "{}");
+      send(res, 200, startRuntime(body.slot || runtimeSlot || "", { mode: "run" }));
+    } catch (error) {
+      send(res, error.status || 500, { error: { message: error.message, type: "runtime_resume_error" } });
+    }
+    return;
+  }
+  if (apiPath === "/api/runtime/pause" && req.method === "POST") {
+    pauseRuntime();
+    send(res, 200, runtimeStatus());
+    return;
+  }
+  if (apiPath === "/api/runtime/step" && req.method === "POST") {
+    try {
+      const raw = await readBody(req);
+      const body = JSON.parse(raw || "{}");
+      send(res, 200, startRuntime(body.slot || runtimeSlot || "", { mode: "step" }));
+    } catch (error) {
+      send(res, error.status || 500, { error: { message: error.message, type: "runtime_step_error" } });
+    }
+    return;
+  }
+  if (apiPath === "/api/runtime/step-complete" && req.method === "POST") {
+    try {
+      const raw = await readBody(req);
+      const body = JSON.parse(raw || "{}");
+      send(res, 200, completeRuntimeStep(body.message || "单步完成"));
+    } catch (error) {
+      send(res, error.status || 500, { error: { message: error.message, type: "runtime_step_complete_error" } });
     }
     return;
   }
