@@ -548,29 +548,6 @@
         node.addEventListener("click", () => showPlace(place.id));
         map.appendChild(node);
       });
-      const grouped = new Map();
-      agents().forEach(agent => {
-        const id = agent.position || agent.place || "town";
-        if (!grouped.has(id)) grouped.set(id, []);
-        grouped.get(id).push(agent);
-      });
-      grouped.forEach((items, placeId) => {
-        const place = placeById(placeId) || knownPlaces[0] || { x: 50, y: 50 };
-        const baseX = Number(place.x || 50);
-        const baseY = Number(place.y || 50);
-        items.slice(0, 8).forEach((agent, index) => {
-          const angle = (Math.PI * 2 * index) / Math.max(1, Math.min(8, items.length));
-          const node = document.createElement("button");
-          node.className = `agent-dot ${selectedAgent === agent.id ? "selected" : ""} ${isDead(agent) ? "dead" : ""}`;
-          node.style.left = `${Math.max(5, Math.min(95, baseX + Math.cos(angle) * 5))}%`;
-          node.style.top = `${Math.max(5, Math.min(95, baseY + Math.sin(angle) * 5))}%`;
-          node.style.background = colorPool[Math.abs(String(agent.id || agent.name || "").length + index) % colorPool.length];
-          node.textContent = String(agent.name || "?").slice(0, 1);
-          node.title = agent.name || "";
-          node.addEventListener("click", () => showAgent(agent.id));
-          map.appendChild(node);
-        });
-      });
     }
 
     function renderTicker() {
