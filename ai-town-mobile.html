@@ -1,0 +1,792 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>小镇观察器 Mobile</title>
+  <style>
+    :root {
+      --bg: #0f1713;
+      --panel: #1f2d23;
+      --panel2: #28392b;
+      --line: rgba(246, 222, 151, .34);
+      --ink: #fff4d0;
+      --muted: #c9ba86;
+      --green: #7fc16f;
+      --blue: #76b7d6;
+      --red: #d76d5f;
+      --amber: #e0b764;
+      --shadow: 0 18px 42px rgba(0, 0, 0, .42);
+    }
+    * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+    html, body { min-height: 100%; }
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at 20% -10%, rgba(224, 183, 100, .18), transparent 34%),
+        radial-gradient(circle at 90% 6%, rgba(118, 183, 214, .14), transparent 28%),
+        linear-gradient(180deg, #0b110f, #142017 46%, #0d1411);
+      color: var(--ink);
+      font-family: "Microsoft YaHei", "PingFang SC", Arial, sans-serif;
+      overflow-x: hidden;
+    }
+    button, select {
+      font: inherit;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: linear-gradient(180deg, #405741, #26372b);
+      color: var(--ink);
+      min-height: 42px;
+      padding: 0 12px;
+      font-weight: 800;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 7px 16px rgba(0,0,0,.24);
+    }
+    button.primary {
+      background: linear-gradient(180deg, #94ca76, #54995b);
+      color: #101b13;
+      border-color: rgba(255, 236, 169, .62);
+    }
+    button.ghost {
+      background: rgba(17, 25, 20, .72);
+      box-shadow: none;
+    }
+    .app {
+      min-height: 100vh;
+      padding: 10px 10px calc(86px + env(safe-area-inset-bottom));
+      display: grid;
+      gap: 10px;
+    }
+    .hud {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      display: grid;
+      gap: 8px;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: rgba(16, 24, 19, .94);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(14px);
+    }
+    .title-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+    }
+    .title-row h1 {
+      margin: 0;
+      color: #ffe7a4;
+      font-size: 20px;
+      line-height: 1.1;
+      text-shadow: 0 2px 0 rgba(0,0,0,.28);
+    }
+    .slot-select {
+      min-width: 118px;
+      max-width: 46vw;
+      background: rgba(10, 16, 13, .82);
+      color: var(--ink);
+    }
+    .hud-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 7px;
+    }
+    .stat {
+      min-width: 0;
+      padding: 8px 10px;
+      border: 1px solid rgba(246,222,151,.23);
+      border-radius: 12px;
+      background: rgba(37, 51, 39, .76);
+    }
+    .stat span {
+      display: block;
+      color: var(--muted);
+      font-size: 11px;
+      margin-bottom: 4px;
+    }
+    .stat strong {
+      display: block;
+      color: var(--ink);
+      font-size: 13px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .world {
+      position: relative;
+      min-height: min(62vh, 620px);
+      border: 8px solid rgba(29, 41, 31, .94);
+      border-radius: 20px;
+      overflow: hidden;
+      background:
+        radial-gradient(circle at 16% 17%, rgba(127,193,111,.25), transparent 16%),
+        radial-gradient(circle at 72% 74%, rgba(118,183,214,.18), transparent 19%),
+        linear-gradient(90deg, rgba(255,255,255,.055) 1px, transparent 1px),
+        linear-gradient(rgba(255,255,255,.05) 1px, transparent 1px),
+        linear-gradient(135deg, #2d4a34, #4d6035 48%, #2f4732);
+      background-size: auto, auto, 44px 44px, 44px 44px, auto;
+      box-shadow: var(--shadow);
+    }
+    .road {
+      position: absolute;
+      background: linear-gradient(90deg, #76664a, #aa9064, #76664a);
+      box-shadow: inset 0 0 0 2px rgba(255,255,255,.05);
+      opacity: .9;
+    }
+    .road.h { left: 0; right: 0; top: 47%; height: 42px; }
+    .road.v { top: 0; bottom: 0; left: 49%; width: 42px; }
+    .place {
+      position: absolute;
+      width: 74px;
+      min-height: 50px;
+      transform: translate(-50%, -50%);
+      border: 2px solid rgba(255, 234, 165, .62);
+      border-radius: 13px;
+      background: linear-gradient(180deg, #f4dfa7, #b88d52);
+      color: #25190e;
+      padding: 6px 7px;
+      box-shadow: 0 7px 0 rgba(62,45,23,.55), 0 14px 22px rgba(0,0,0,.25);
+      font-size: 11px;
+      text-align: center;
+      overflow: hidden;
+    }
+    .place.selected {
+      border-color: #fff7c8;
+      box-shadow: 0 0 0 4px rgba(255,230,128,.3), 0 7px 0 rgba(62,45,23,.55), 0 14px 22px rgba(0,0,0,.25);
+    }
+    .place strong,
+    .place span {
+      display: block;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      pointer-events: none;
+    }
+    .place strong { font-size: 12px; }
+    .place span { color: #51391d; margin-top: 2px; }
+    .agent-dot {
+      position: absolute;
+      width: 30px;
+      height: 30px;
+      transform: translate(-50%, -50%);
+      border: 2px solid #fff4bd;
+      border-radius: 50%;
+      display: grid;
+      place-items: center;
+      color: #fff;
+      font-weight: 900;
+      font-size: 12px;
+      box-shadow: 0 4px 0 rgba(0,0,0,.34), 0 9px 16px rgba(0,0,0,.32);
+    }
+    .agent-dot.dead {
+      filter: grayscale(1);
+      opacity: .55;
+    }
+    .agent-dot.selected {
+      outline: 4px solid rgba(255, 231, 135, .36);
+    }
+    .ticker {
+      display: grid;
+      gap: 8px;
+    }
+    .event-card {
+      border: 1px solid rgba(246,222,151,.25);
+      border-radius: 14px;
+      background: rgba(17, 25, 20, .72);
+      padding: 10px 12px;
+      box-shadow: 0 10px 24px rgba(0,0,0,.24);
+    }
+    .event-card strong {
+      display: block;
+      color: #ffe7a4;
+      font-size: 14px;
+      margin-bottom: 5px;
+    }
+    .event-card span {
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+    .drawer {
+      position: fixed;
+      left: 10px;
+      right: 10px;
+      bottom: calc(78px + env(safe-area-inset-bottom));
+      z-index: 30;
+      max-height: min(62vh, 560px);
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: rgba(18, 27, 21, .97);
+      box-shadow: var(--shadow);
+      transform: translateY(calc(100% + 96px));
+      transition: transform .22s ease;
+    }
+    .drawer.open { transform: translateY(0); }
+    .drawer-head {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: center;
+      padding: 12px;
+      border-bottom: 1px solid rgba(246,222,151,.24);
+      background: rgba(18, 27, 21, .98);
+    }
+    .drawer-head h2 {
+      margin: 0;
+      color: #ffe7a4;
+      font-size: 17px;
+    }
+    .drawer-body {
+      display: grid;
+      gap: 9px;
+      padding: 12px;
+    }
+    .field {
+      min-width: 0;
+      border: 1px solid rgba(246,222,151,.22);
+      border-radius: 12px;
+      background: rgba(35, 50, 38, .72);
+      padding: 9px 10px;
+    }
+    .field span {
+      display: block;
+      color: var(--muted);
+      font-size: 11px;
+      margin-bottom: 5px;
+    }
+    .field strong {
+      display: block;
+      color: var(--ink);
+      font-size: 13px;
+      line-height: 1.45;
+      overflow-wrap: anywhere;
+    }
+    .bar-row {
+      display: grid;
+      grid-template-columns: 44px 1fr 34px;
+      gap: 7px;
+      align-items: center;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .track {
+      height: 8px;
+      border-radius: 999px;
+      background: rgba(7, 11, 9, .7);
+      overflow: hidden;
+    }
+    .fill {
+      height: 100%;
+      border-radius: inherit;
+      background: linear-gradient(90deg, var(--green), #ffe083);
+    }
+    .list {
+      display: grid;
+      gap: 8px;
+    }
+    .row {
+      border: 1px solid rgba(246,222,151,.22);
+      border-radius: 13px;
+      background: rgba(31, 44, 34, .76);
+      padding: 10px;
+    }
+    .row strong {
+      display: block;
+      color: #ffe7a4;
+      font-size: 14px;
+    }
+    .row span {
+      display: block;
+      color: var(--muted);
+      margin-top: 4px;
+      font-size: 12px;
+      line-height: 1.45;
+    }
+    .nav {
+      position: fixed;
+      left: 10px;
+      right: 10px;
+      bottom: calc(8px + env(safe-area-inset-bottom));
+      z-index: 35;
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 6px;
+      padding: 8px;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: rgba(12, 19, 15, .96);
+      box-shadow: 0 -14px 32px rgba(0,0,0,.42);
+      backdrop-filter: blur(14px);
+    }
+    .nav button {
+      min-height: 48px;
+      padding: 0 4px;
+      font-size: 12px;
+      border-radius: 13px;
+    }
+    .nav button.active {
+      background: linear-gradient(180deg, #f1ce78, #9c7336);
+      color: #181007;
+    }
+    .empty {
+      display: grid;
+      place-items: center;
+      min-height: 100vh;
+      padding: 20px;
+    }
+    .empty-card {
+      width: min(440px, 100%);
+      display: grid;
+      gap: 12px;
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      background: rgba(18, 27, 21, .94);
+      padding: 18px;
+      box-shadow: var(--shadow);
+    }
+    .empty-card h1 { margin: 0; color: #ffe7a4; }
+    .empty-card p { margin: 0; color: var(--muted); line-height: 1.55; }
+    .save-list {
+      display: grid;
+      gap: 8px;
+      max-height: 52vh;
+      overflow: auto;
+    }
+    .toast {
+      position: fixed;
+      left: 14px;
+      right: 14px;
+      top: 12px;
+      z-index: 60;
+      padding: 10px 12px;
+      border: 1px solid rgba(215,109,95,.45);
+      border-radius: 13px;
+      background: rgba(58, 28, 24, .96);
+      color: #ffe6df;
+      box-shadow: var(--shadow);
+      font-size: 13px;
+    }
+    .toast[hidden] { display: none; }
+  </style>
+</head>
+<body>
+  <div id="toast" class="toast" hidden></div>
+  <div id="empty" class="empty">
+    <section class="empty-card">
+      <h1>小镇观察器</h1>
+      <p>选择一个存档进入手机版观察界面。手机版只负责观察和控制后台，建档、配置 AI、调试仍在桌面主界面完成。</p>
+      <div class="save-list" id="startSaveList"></div>
+      <button class="ghost" id="openDesktopBtn" type="button">打开桌面管理台</button>
+    </section>
+  </div>
+
+  <main id="app" class="app" hidden>
+    <header class="hud">
+      <div class="title-row">
+        <h1 id="townName">小镇</h1>
+        <select class="slot-select" id="slotSelect"></select>
+      </div>
+      <div class="hud-grid">
+        <div class="stat"><span>时间</span><strong id="clockText">-</strong></div>
+        <div class="stat"><span>天气</span><strong id="weatherText">-</strong></div>
+        <div class="stat"><span>后台</span><strong id="runtimeText">-</strong></div>
+        <div class="stat"><span>居民</span><strong id="peopleText">-</strong></div>
+      </div>
+    </header>
+
+    <section class="world" id="worldMap" aria-label="小镇地图">
+      <div class="road h"></div>
+      <div class="road v"></div>
+    </section>
+
+    <section class="ticker" id="ticker"></section>
+  </main>
+
+  <section class="drawer" id="drawer" aria-live="polite">
+    <div class="drawer-head">
+      <h2 id="drawerTitle">详情</h2>
+      <button class="ghost" id="closeDrawerBtn" type="button">关闭</button>
+    </div>
+    <div class="drawer-body" id="drawerBody"></div>
+  </section>
+
+  <nav class="nav" id="nav" hidden>
+    <button class="active" data-tab="map" type="button">地图</button>
+    <button data-tab="people" type="button">角色</button>
+    <button data-tab="events" type="button">事件</button>
+    <button data-tab="places" type="button">地点</button>
+    <button data-tab="control" type="button">控制</button>
+  </nav>
+
+  <script>
+    const $ = id => document.getElementById(id);
+    const colorPool = ["#69a85f", "#5d9ab8", "#c96454", "#b98743", "#7f70b0", "#5f938d", "#9a7161", "#8ba64d"];
+    const needLabels = { hunger: "饱腹", hygiene: "清洁", health: "健康", social: "社交", responsibility: "责任", stress: "抗压", comfort: "舒适", safety: "安全" };
+    const emotionLabels = { happy: "开心", anxious: "焦虑", angry: "愤怒", sad: "悲伤", tired: "疲惫", lonely: "孤独", hopeful: "希望", calm: "平静", curious: "好奇" };
+    let saves = [];
+    let slot = new URLSearchParams(location.search).get("slot") || "";
+    let payload = null;
+    let runtime = null;
+    let activeTab = "map";
+    let selectedPlace = "";
+    let selectedAgent = "";
+    let refreshTimer = null;
+
+    function esc(value) {
+      return String(value ?? "").replace(/[&<>"']/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
+    }
+
+    async function api(path, options = {}, timeoutMs = 12000) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const response = await fetch(path, { ...options, signal: controller.signal });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data?.error?.message || data?.error || "请求失败");
+        return data;
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
+    function toast(message) {
+      $("toast").textContent = message;
+      $("toast").hidden = false;
+      clearTimeout(toast.timer);
+      toast.timer = setTimeout(() => $("toast").hidden = true, 2600);
+    }
+
+    function world() { return payload?.world || {}; }
+    function agents() { return Array.isArray(world().agents) ? world().agents : []; }
+    function places() { return Array.isArray(world().places) ? world().places : []; }
+    function boxes() { return payload?.locationBoxes || {}; }
+    function placeById(id) { return places().find(item => item.id === id) || null; }
+    function placeName(id) { return placeById(id)?.name || id || "未知地点"; }
+    function aliveAgents() { return agents().filter(agent => !isDead(agent)); }
+    function isDead(agent) { return agent?.lifeStatus === "dead" || agent?.terminalState?.dead; }
+
+    function clockText() {
+      const w = world();
+      if (payload?.meta?.clockText) return payload.meta.clockText;
+      const minutes = Number(w.clock || 0);
+      const day = Math.floor(minutes / 1440) + 1;
+      const hh = String(Math.floor((minutes % 1440) / 60)).padStart(2, "0");
+      const mm = String(minutes % 60).padStart(2, "0");
+      return `第 ${day} 天 ${hh}:${mm}`;
+    }
+
+    function weatherText() {
+      const weather = world().weatherBox || {};
+      return weather.current?.condition || weather.now?.condition || weather.condition || "暂无天气";
+    }
+
+    function healthSummary(agent) {
+      const needs = agent.needs || {};
+      const low = Object.entries(needs).filter(([, value]) => Number(value) <= 25).map(([key]) => needLabels[key] || key);
+      if (isDead(agent)) return "已死亡";
+      if (agent.isSleeping) return "睡眠中";
+      if (low.length) return `${low.slice(0, 2).join("、")}偏低`;
+      return agent.mood || "状态稳定";
+    }
+
+    function primaryText(agent) {
+      return agent.currentTask || agent.activeProcess?.currentStep || agent.lastTimePassage?.summary || "观察周围";
+    }
+
+    function renderStart() {
+      const list = $("startSaveList");
+      if (!saves.length) {
+        list.innerHTML = `<div class="row"><strong>没有存档</strong><span>请先回桌面管理台创建一个小镇存档。</span></div>`;
+        return;
+      }
+      list.innerHTML = saves.map(save => `
+        <button class="${save.slot === slot ? "primary" : "ghost"}" data-load="${esc(save.slot)}" type="button">
+          ${esc(save.name || save.slot)}｜${esc(save.clockText || "未知时间")}｜${save.agentCount || 0}人
+        </button>
+      `).join("");
+      list.querySelectorAll("[data-load]").forEach(button => {
+        button.addEventListener("click", () => loadSlot(button.dataset.load));
+      });
+    }
+
+    function renderHud() {
+      const w = world();
+      const save = saves.find(item => item.slot === slot);
+      $("townName").textContent = save?.name || payload?.meta?.name || slot || "小镇";
+      $("clockText").textContent = clockText();
+      $("weatherText").textContent = weatherText();
+      $("runtimeText").textContent = runtime?.state === "running" ? `运行中 ${runtime.slot || ""}` : runtime?.state || "未运行";
+      $("peopleText").textContent = `${aliveAgents().length}/${agents().length}`;
+      $("slotSelect").innerHTML = saves.map(save => `<option value="${esc(save.slot)}"${save.slot === slot ? " selected" : ""}>${esc(save.name || save.slot)}</option>`).join("");
+    }
+
+    function placeAgentCount(id) {
+      return agents().filter(agent => agent.position === id && !isDead(agent)).length;
+    }
+
+    function renderMap() {
+      const map = $("worldMap");
+      map.querySelectorAll(".place,.agent-dot").forEach(node => node.remove());
+      const list = places();
+      const knownPlaces = list.length ? list : [{ id: "town", name: "小镇", x: 50, y: 50 }];
+      knownPlaces.forEach((place, index) => {
+        const x = Number.isFinite(Number(place.x)) ? Number(place.x) : 18 + (index % 4) * 22;
+        const y = Number.isFinite(Number(place.y)) ? Number(place.y) : 18 + Math.floor(index / 4) * 18;
+        const node = document.createElement("button");
+        node.className = `place ${selectedPlace === place.id ? "selected" : ""}`;
+        node.style.left = `${Math.max(8, Math.min(92, x))}%`;
+        node.style.top = `${Math.max(8, Math.min(92, y))}%`;
+        node.innerHTML = `<strong>${esc(place.name || place.id)}</strong><span>${placeAgentCount(place.id)}人</span>`;
+        node.addEventListener("click", () => showPlace(place.id));
+        map.appendChild(node);
+      });
+      const grouped = new Map();
+      agents().forEach(agent => {
+        const id = agent.position || agent.place || "town";
+        if (!grouped.has(id)) grouped.set(id, []);
+        grouped.get(id).push(agent);
+      });
+      grouped.forEach((items, placeId) => {
+        const place = placeById(placeId) || knownPlaces[0] || { x: 50, y: 50 };
+        const baseX = Number(place.x || 50);
+        const baseY = Number(place.y || 50);
+        items.slice(0, 8).forEach((agent, index) => {
+          const angle = (Math.PI * 2 * index) / Math.max(1, Math.min(8, items.length));
+          const node = document.createElement("button");
+          node.className = `agent-dot ${selectedAgent === agent.id ? "selected" : ""} ${isDead(agent) ? "dead" : ""}`;
+          node.style.left = `${Math.max(5, Math.min(95, baseX + Math.cos(angle) * 5))}%`;
+          node.style.top = `${Math.max(5, Math.min(95, baseY + Math.sin(angle) * 5))}%`;
+          node.style.background = colorPool[Math.abs(String(agent.id || agent.name || "").length + index) % colorPool.length];
+          node.textContent = String(agent.name || "?").slice(0, 1);
+          node.title = agent.name || "";
+          node.addEventListener("click", () => showAgent(agent.id));
+          map.appendChild(node);
+        });
+      });
+    }
+
+    function renderTicker() {
+      const rows = [
+        ...(Array.isArray(world().records) ? world().records : []),
+        ...(Array.isArray(world().logs) ? world().logs : [])
+      ].slice(0, 4);
+      $("ticker").innerHTML = rows.length ? rows.map(item => `
+        <div class="event-card"><strong>${esc(item.title || "小镇事件")}</strong><span>${esc(item.body || item.summary || item.text || "")}</span></div>
+      `).join("") : `<div class="event-card"><strong>暂无事件</strong><span>等待后台推进小镇。</span></div>`;
+    }
+
+    function bars(data, labels) {
+      const entries = Object.entries(labels).filter(([key]) => data && data[key] !== undefined);
+      if (!entries.length) return `<div class="field"><span>数值</span><strong>暂无</strong></div>`;
+      return entries.map(([key, label]) => {
+        const value = Math.max(0, Math.min(100, Number(data[key] || 0)));
+        return `<div class="bar-row"><span>${label}</span><div class="track"><div class="fill" style="width:${value}%"></div></div><strong>${Math.round(value)}</strong></div>`;
+      }).join("");
+    }
+
+    function openDrawer(title, html) {
+      $("drawerTitle").textContent = title;
+      $("drawerBody").innerHTML = html;
+      $("drawer").classList.add("open");
+    }
+
+    function closeDrawer() {
+      $("drawer").classList.remove("open");
+    }
+
+    function showPlace(id) {
+      selectedPlace = id;
+      selectedAgent = "";
+      const place = placeById(id) || { id, name: id };
+      const box = boxes()[id] || {};
+      const here = agents().filter(agent => agent.position === id);
+      renderMap();
+      openDrawer(place.name || id, `
+        <div class="field"><span>状态</span><strong>${esc(box.agentState?.status || box.state?.tempo || "普通")}</strong></div>
+        <div class="field"><span>在场角色</span><strong>${esc(here.map(agent => agent.name).join("、") || "当前无人")}</strong></div>
+        <div class="field"><span>地点事件</span><strong>${esc((box.localEvents || []).map(event => event.title || event.summary).slice(0, 3).join("；") || "暂无")}</strong></div>
+        <div class="field"><span>可见地点</span><strong>${esc((place.visible || []).map(placeName).join("、") || "无")}</strong></div>
+        <div class="list">
+          ${here.slice(0, 30).map(agent => `<button class="ghost" data-agent="${esc(agent.id)}" type="button">${esc(agent.name)}｜${esc(agent.job || "居民")}｜${esc(healthSummary(agent))}</button>`).join("")}
+        </div>
+      `);
+      $("drawerBody").querySelectorAll("[data-agent]").forEach(button => button.addEventListener("click", () => showAgent(button.dataset.agent)));
+    }
+
+    function showAgent(id) {
+      const agent = agents().find(item => item.id === id);
+      if (!agent) return;
+      selectedAgent = id;
+      selectedPlace = agent.position || "";
+      renderMap();
+      const memories = agent.memory || {};
+      const memoryText = ["emotional", "long", "short", "rumor"].flatMap(key => Array.isArray(memories[key]) ? memories[key] : [])
+        .slice(0, 5).map(item => item.text || String(item)).join("；");
+      openDrawer(agent.name || "角色", `
+        <div class="field"><span>身份</span><strong>${esc(agent.job || "居民")}｜${esc(agent.ageYears || agent.age || "未知年龄")}岁｜${esc(placeName(agent.position))}</strong></div>
+        <div class="field"><span>正在做</span><strong>${esc(primaryText(agent))}</strong></div>
+        <div class="field"><span>状态</span><strong>${esc(healthSummary(agent))}</strong></div>
+        <div class="field"><span>长期目标</span><strong>${esc(agent.longTermGoal || agent.longTermGoals?.[0]?.title || "暂无")}</strong></div>
+        <div class="field"><span>需求</span><strong>${bars(agent.needs || {}, needLabels)}</strong></div>
+        <div class="field"><span>情绪</span><strong>${bars(agent.emotionVector || agent.emotions || {}, emotionLabels)}</strong></div>
+        <div class="field"><span>记忆</span><strong>${esc(memoryText || agent.memorySummary || "暂无")}</strong></div>
+      `);
+    }
+
+    function showPeople() {
+      openDrawer("角色", `<div class="list">${
+        agents().slice(0, 120).map(agent => `
+          <button class="ghost" data-agent="${esc(agent.id)}" type="button">${esc(agent.name)}｜${esc(agent.job || "居民")}｜${esc(placeName(agent.position))}｜${esc(healthSummary(agent))}</button>
+        `).join("") || `<div class="row"><strong>暂无角色</strong><span>当前存档没有角色数据。</span></div>`
+      }</div>`);
+      $("drawerBody").querySelectorAll("[data-agent]").forEach(button => button.addEventListener("click", () => showAgent(button.dataset.agent)));
+    }
+
+    function showPlaces() {
+      openDrawer("地点", `<div class="list">${
+        places().map(place => `<button class="ghost" data-place="${esc(place.id)}" type="button">${esc(place.name)}｜${placeAgentCount(place.id)}人</button>`).join("")
+      }</div>`);
+      $("drawerBody").querySelectorAll("[data-place]").forEach(button => button.addEventListener("click", () => showPlace(button.dataset.place)));
+    }
+
+    function showEvents() {
+      const rows = [
+        ...(Array.isArray(world().records) ? world().records : []),
+        ...(Array.isArray(world().logs) ? world().logs : []),
+        ...(Array.isArray(world().publicEvents) ? world().publicEvents : [])
+      ].slice(0, 80);
+      openDrawer("事件", `<div class="list">${
+        rows.map(item => `<div class="row"><strong>${esc(item.title || "事件")}</strong><span>${esc(item.body || item.summary || item.text || "")}</span></div>`).join("") || `<div class="row"><strong>暂无事件</strong><span>后台推进后会出现事件。</span></div>`
+      }</div>`);
+    }
+
+    function showControl() {
+      openDrawer("控制", `
+        <div class="field"><span>当前存档</span><strong>${esc(slot || "-")}</strong></div>
+        <div class="field"><span>后台状态</span><strong>${esc(runtime?.state || "未知")}｜${esc(runtime?.lastMessage || "")}</strong></div>
+        <button class="primary" id="toggleRunBtn" type="button">${runtime?.state === "running" ? "暂停后台" : "启动后台"}</button>
+        <button class="ghost" id="stepOnceBtn" type="button">推进一步</button>
+        <button class="ghost" id="reloadBtn" type="button">刷新数据</button>
+        <button class="ghost" id="desktopBtn" type="button">进入桌面管理台</button>
+      `);
+      $("toggleRunBtn").addEventListener("click", toggleRun);
+      $("stepOnceBtn").addEventListener("click", stepOnce);
+      $("reloadBtn").addEventListener("click", refresh);
+      $("desktopBtn").addEventListener("click", () => location.href = "/");
+    }
+
+    function renderTab() {
+      document.querySelectorAll(".nav button").forEach(button => button.classList.toggle("active", button.dataset.tab === activeTab));
+      if (activeTab === "map") closeDrawer();
+      if (activeTab === "people") showPeople();
+      if (activeTab === "events") showEvents();
+      if (activeTab === "places") showPlaces();
+      if (activeTab === "control") showControl();
+    }
+
+    function render() {
+      if (!payload) return;
+      $("empty").hidden = true;
+      $("app").hidden = false;
+      $("nav").hidden = false;
+      renderHud();
+      renderMap();
+      renderTicker();
+      if (activeTab !== "map") renderTab();
+    }
+
+    async function loadSaves() {
+      const data = await api("/api/saves");
+      saves = data.saves || [];
+      if (!slot) slot = saves.find(save => Number(save.agentCount || 0) > 0)?.slot || saves[0]?.slot || "";
+      renderStart();
+      $("slotSelect").innerHTML = saves.map(save => `<option value="${esc(save.slot)}"${save.slot === slot ? " selected" : ""}>${esc(save.name || save.slot)}</option>`).join("");
+    }
+
+    async function loadSlot(nextSlot) {
+      if (!nextSlot) return;
+      slot = nextSlot;
+      const url = new URL(location.href);
+      url.searchParams.set("slot", slot);
+      history.replaceState(null, "", url);
+      payload = await api(`/api/saves/${encodeURIComponent(slot)}`);
+      selectedPlace = payload?.world?.selectedPlace || payload?.world?.agents?.[0]?.position || payload?.world?.places?.[0]?.id || "";
+      selectedAgent = payload?.world?.selected || payload?.world?.agents?.[0]?.id || "";
+      await refreshRuntime();
+      render();
+    }
+
+    async function refreshRuntime() {
+      runtime = await api("/api/runtime/status", {}, 6000).catch(() => runtime || { state: "未知" });
+    }
+
+    async function refresh() {
+      try {
+        await loadSaves();
+        if (slot) {
+          payload = await api(`/api/saves/${encodeURIComponent(slot)}`);
+          await refreshRuntime();
+          render();
+        }
+      } catch (error) {
+        toast(error.message || "刷新失败");
+      }
+    }
+
+    async function toggleRun() {
+      try {
+        const endpoint = runtime?.state === "running" ? "/api/runtime/pause" : "/api/runtime/start";
+        runtime = await api(endpoint, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ slot, engine: "node-core-v1" })
+        });
+        render();
+      } catch (error) {
+        toast(error.message || "控制失败");
+      }
+    }
+
+    async function stepOnce() {
+      try {
+        runtime = await api("/api/runtime/step", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ slot, engine: "node-core-v1" })
+        });
+        render();
+      } catch (error) {
+        toast(error.message || "单步失败");
+      }
+    }
+
+    $("slotSelect").addEventListener("change", event => loadSlot(event.target.value).catch(error => toast(error.message)));
+    $("closeDrawerBtn").addEventListener("click", () => { activeTab = "map"; renderTab(); });
+    $("openDesktopBtn").addEventListener("click", () => location.href = "/");
+    document.querySelectorAll(".nav button").forEach(button => {
+      button.addEventListener("click", () => {
+        activeTab = button.dataset.tab;
+        renderTab();
+      });
+    });
+
+    (async function init() {
+      try {
+        await loadSaves();
+        if (slot) await loadSlot(slot);
+        refreshTimer = setInterval(refresh, 5000);
+      } catch (error) {
+        toast(error.message || "加载失败");
+      }
+    })();
+  </script>
+</body>
+</html>

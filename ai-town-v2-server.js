@@ -3743,7 +3743,7 @@ async function handleApi(req, res) {
 
 function serveFile(req, res) {
   const urlPath = decodeURIComponent(req.url.split("?")[0]);
-  const fileName = urlPath === "/" ? "ai-town-v2.html" : urlPath.replace(/^\/+/, "");
+  const fileName = urlPath === "/" ? "ai-town-v2.html" : urlPath === "/mobile" ? "ai-town-mobile.html" : urlPath.replace(/^\/+/, "");
   const fullPath = path.resolve(ROOT, fileName);
   if (!fullPath.startsWith(ROOT)) {
     send(res, 403, "Forbidden", "text/plain; charset=utf-8");
