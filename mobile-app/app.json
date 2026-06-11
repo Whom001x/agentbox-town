@@ -27,6 +27,12 @@
     },
     "plugins": [
       "expo-font"
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "dbe14457-63b0-4201-beb8-09e44c353325"
+      }
+    },
+    "owner": "whompyls-team"
   }
 }
