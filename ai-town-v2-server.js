@@ -4,12 +4,15 @@ const path = require("path");
 const os = require("os");
 const { spawn } = require("child_process");
 const { nodeStepPayload, minutesToClock } = require("./ai-town-node-core");
+const { guardAction } = require("./ai-town-world-guard");
+const { createAiRouter } = require("./ai-town-ai-router");
 
 const PORT = Number(process.env.AI_TOWN_V2_PORT || 8788);
 const HOST = String(process.env.AI_TOWN_V2_HOST || "0.0.0.0");
 const ROOT = __dirname;
 const CONFIG_PATH = path.join(ROOT, "ai-town-config.json");
 const SAVE_DIR = path.join(ROOT, "saves");
+const RUNTIME_PROGRESS_PATH = path.join(SAVE_DIR, "runtime-progress.json");
 const AI_TIMEOUT_MS = Number(process.env.AI_TOWN_TIMEOUT_MS || 180000);
 const MAX_REQUEST_BODY_BYTES = Number(process.env.AI_TOWN_MAX_REQUEST_BODY_BYTES || 10_000_000);
 const DEFAULT_MAX_CONCURRENT_PER_KEY = Number(process.env.AI_TOWN_MAX_CONCURRENT_PER_KEY || 20);
@@ -74,6 +77,21 @@ let runtimeProgress = {
   lastError: ""
 };
 
+function persistRuntimeProgress() {
+  try {
+    ensureSaveDir();
+    fs.writeFileSync(RUNTIME_PROGRESS_PATH, JSON.stringify(runtimeProgress, null, 2), "utf8");
+  } catch {}
+}
+
+function loadRuntimeProgress() {
+  try {
+    if (!fs.existsSync(RUNTIME_PROGRESS_PATH)) return;
+    const saved = JSON.parse(fs.readFileSync(RUNTIME_PROGRESS_PATH, "utf8").replace(/^\uFEFF/, ""));
+    if (saved && typeof saved === "object") runtimeProgress = { ...runtimeProgress, ...saved, running: false };
+  } catch {}
+}
+
 function resetRuntimeProgress(slot = "", phase = "idle") {
   runtimeProgress = {
     running: false,
@@ -89,6 +107,7 @@ function resetRuntimeProgress(slot = "", phase = "idle") {
     updatedAt: new Date().toISOString(),
     lastError: ""
   };
+  persistRuntimeProgress();
 }
 
 function beginRuntimeProgress(slot, phaseTotal) {
@@ -106,6 +125,7 @@ function beginRuntimeProgress(slot, phaseTotal) {
     updatedAt: new Date().toISOString(),
     lastError: ""
   };
+  persistRuntimeProgress();
 }
 
 function updateRuntimeProgress(phase, detail = {}) {
@@ -120,6 +140,7 @@ function updateRuntimeProgress(phase, detail = {}) {
     currentAgent: detail.currentAgent || "",
     updatedAt: new Date().toISOString()
   };
+  persistRuntimeProgress();
 }
 
 function completeRuntimeProgress(message = "completed") {
@@ -134,6 +155,7 @@ function completeRuntimeProgress(message = "completed") {
     completed: [...(runtimeProgress.completed || []), message].slice(-20),
     updatedAt: new Date().toISOString()
   };
+  persistRuntimeProgress();
 }
 
 function failRuntimeProgress(error) {
@@ -146,6 +168,7 @@ function failRuntimeProgress(error) {
     lastError: error?.message || String(error || "unknown error"),
     updatedAt: new Date().toISOString()
   };
+  persistRuntimeProgress();
 }
 
 function ensureSaveDir() {
@@ -840,10 +863,95 @@ function writeFolderSave(slot, payload) {
   writeJudgementFiles(saveFolder, payload.world || {});
 }
 
+function readCharacterFolders(saveFolder) {
+  const charactersDir = path.join(saveFolder, "characters");
+  if (!fs.existsSync(charactersDir)) return [];
+  return fs.readdirSync(charactersDir, { withFileTypes: true })
+    .filter(item => item.isDirectory())
+    .map(item => {
+      const dir = path.join(charactersDir, item.name);
+      const info = readJsonIfExists(path.join(dir, "info.json"), {});
+      const state = readJsonIfExists(path.join(dir, "state.json"), {});
+      const memory = readJsonIfExists(path.join(dir, "memory.json"), {});
+      const judgementsDir = path.join(dir, "judgements");
+      const judgements = {};
+      if (fs.existsSync(judgementsDir)) {
+        fs.readdirSync(judgementsDir)
+          .filter(name => name.endsWith(".json"))
+          .forEach(name => {
+            const key = path.basename(name, ".json");
+            const value = readJsonIfExists(path.join(judgementsDir, name), null);
+            if (value && typeof value === "object") judgements[key] = value[key] ?? value;
+          });
+      }
+      return {
+        ...info,
+        ...state,
+        memory: memory.memory || info.memory || state.memory || { short: [], long: [], emotional: [], secret: [], rumor: [] },
+        knownFacts: memory.knownFacts || info.knownFacts || [],
+        memorySummary: memory.memorySummary || info.memorySummary || "",
+        ...judgements
+      };
+    })
+    .filter(agent => agent.id);
+}
+
+function readWorldTableFolder(saveFolder, folder, fallback) {
+  const dir = path.join(saveFolder, folder);
+  const index = readJsonIfExists(path.join(dir, "index.json"), null);
+  if (index !== null) return index;
+  if (!fs.existsSync(dir)) return fallback;
+  const result = {};
+  fs.readdirSync(dir)
+    .filter(name => name.endsWith(".json"))
+    .forEach(name => {
+      result[path.basename(name, ".json")] = readJsonIfExists(path.join(dir, name), null);
+    });
+  return Object.keys(result).length ? result : fallback;
+}
+
+function readSplitSavePayload(slot) {
+  const folderPath = saveFolderFor(slot);
+  if (!fs.existsSync(folderPath)) return null;
+  const meta = readJsonIfExists(path.join(folderPath, "meta.json"), { name: slot });
+  const worldState = readJsonIfExists(path.join(folderPath, "world-state.json"), {});
+  const agents = readCharacterFolders(folderPath);
+  const places = readWorldTableFolder(folderPath, "places", worldState.places || []);
+  const events = readWorldTableFolder(folderPath, "events", {});
+  const relations = readWorldTableFolder(folderPath, "relations", {});
+  const runtime = readWorldTableFolder(folderPath, "runtime", {});
+  const world = {
+    ...worldState,
+    agents,
+    places: Array.isArray(places) ? places : worldState.places || [],
+    records: events.records || worldState.records || [],
+    eventImpacts: events.eventImpacts || worldState.eventImpacts || [],
+    informationFlows: events.informationFlows || worldState.informationFlows || [],
+    socialProcesses: events.socialProcesses || worldState.socialProcesses || [],
+    relationshipDynamics: relations.relationshipDynamics || worldState.relationshipDynamics || [],
+    households: relations.households || worldState.households || [],
+    groups: relations.groups || worldState.groups || [],
+    locationRuntimeState: runtime.locationRuntimeState || worldState.locationRuntimeState || null,
+    processRuntimeState: runtime.processRuntimeState || worldState.processRuntimeState || null,
+    professionServiceState: runtime.professionServiceState || worldState.professionServiceState || null,
+    socialPatterns: runtime.socialPatterns || worldState.socialPatterns || null,
+    dailyAgentState: runtime.dailyAgentState || worldState.dailyAgentState || null
+  };
+  return {
+    version: 2,
+    savedAt: meta.updatedAt || meta.savedAt || new Date().toISOString(),
+    meta,
+    world,
+    locationBoxes: readJsonIfExists(path.join(folderPath, "location-boxes.json"), {})
+  };
+}
+
 function readSavePayload(slot) {
   const folderPath = saveFolderFor(slot);
   const folderWorldPath = path.join(folderPath, "world.json");
   if (fs.existsSync(folderWorldPath)) return JSON.parse(fs.readFileSync(folderWorldPath, "utf8"));
+  const splitPayload = readSplitSavePayload(slot);
+  if (splitPayload) return splitPayload;
   const jsonPath = savePathFor(slot);
   if (fs.existsSync(jsonPath)) return JSON.parse(fs.readFileSync(jsonPath, "utf8"));
   return null;
@@ -1136,6 +1244,10 @@ function nodeRuntimeAdjustEmotion(agent, changes = {}, limit = 8) {
 }
 
 function nodeRuntimeGuardAction(world, agent, aiResult) {
+  return guardAction({ world, agent, aiResult, visibleAgents: nodeRuntimeVisibleAgents(world, agent) });
+}
+
+function nodeRuntimeLegacyGuardAction(world, agent, aiResult) {
   const action = aiResult?.action || {};
   const guarded = { ...aiResult, action: { ...action } };
   const text = `${action.type || ""} ${action.summary || ""} ${action.currentTask || ""}`;
@@ -3058,6 +3170,257 @@ async function callAiWithRetry(task, payload) {
   }
 }
 
+const aiRouter = createAiRouter({
+  callWithRetry: callAiWithRetry,
+  callOnce: callAi,
+  getMetrics: publicMetrics,
+  getConfig: publicConfig,
+  pushLog: item => {
+    if (item?.status !== "error") return;
+    pushCallLog({
+      task: item.task || "aiRouter",
+      model: modelForTask(item.task || "", {}),
+      keyIndex: 0,
+      agentId: "",
+      agentName: "",
+      status: "router_error",
+      durationMs: item.durationMs || 0,
+      error: item.error || ""
+    });
+  }
+});
+
+let setupJobRunning = false;
+
+function setupSafeId(value, fallback) {
+  return safeSaveName(String(value || fallback || "item").toLowerCase()).replace(/-/g, "_").slice(0, 40);
+}
+
+function setupDefaultPlaces(target = 12) {
+  const base = [
+    ["square", "中心广场", "public"], ["school", "镇立学校", "education"], ["clinic", "社区诊所", "medical"],
+    ["store", "小卖部", "shop"], ["breakfast", "早餐店", "food"], ["apartments", "居民楼", "home"],
+    ["riverside", "河边步道", "leisure"], ["office", "镇务办公室", "work"], ["factory", "小工坊", "work"],
+    ["park", "小公园", "leisure"], ["bus_stop", "公交站", "transport"], ["market", "菜市场", "shop"]
+  ];
+  return base.slice(0, Math.max(1, target)).map((item, index) => ({
+    id: item[0],
+    name: item[1],
+    type: item[2],
+    x: 12 + (index % 4) * 24,
+    y: 16 + Math.floor(index / 4) * 24,
+    capacity: item[2] === "home" ? 80 : 25,
+    visible: []
+  }));
+}
+
+function setupNormalizePlaces(input = [], target = 12) {
+  const used = new Set();
+  const rows = (Array.isArray(input) ? input : []).map((place, index) => {
+    let id = setupSafeId(place.id || place.name, `place_${index + 1}`);
+    while (used.has(id)) id = `${id}_${used.size + 1}`;
+    used.add(id);
+    return {
+      id,
+      name: String(place.name || id).slice(0, 24),
+      type: String(place.type || ""),
+      x: clampNumber(place.x, 5, 95, 15 + (index % 5) * 16),
+      y: clampNumber(place.y, 5, 95, 15 + Math.floor(index / 5) * 16),
+      capacity: clampNumber(place.capacity, 1, 300, 30),
+      visible: Array.isArray(place.visible) ? place.visible.map(String).slice(0, 12) : []
+    };
+  });
+  setupDefaultPlaces(target).forEach(place => {
+    if (rows.length >= target) return;
+    if (!used.has(place.id)) {
+      used.add(place.id);
+      rows.push(place);
+    }
+  });
+  return rows.slice(0, Math.max(1, target));
+}
+
+function setupChineseName(index) {
+  const surnames = ["赵", "钱", "孙", "李", "周", "吴", "郑", "王", "陈", "林", "刘", "黄", "杨", "何", "郭", "马", "胡", "朱", "高", "罗"];
+  const given = ["安宁", "思远", "晓梅", "文清", "海峰", "雨欣", "志强", "小满", "春华", "明轩", "芳仪", "建国", "若溪", "子涵", "桂兰", "远航", "秋实", "慧敏", "晨曦", "德胜"];
+  return `${surnames[index % surnames.length]}${given[Math.floor(index / surnames.length) % given.length]}${index >= surnames.length * given.length ? index + 1 : ""}`;
+}
+
+function setupRoleForIndex(index) {
+  const roles = ["学生", "学生", "老师", "医生", "护士", "小卖部店主", "早餐店老板", "上班族", "工坊工人", "退休老人", "保安", "镇务工作人员"];
+  return roles[index % roles.length];
+}
+
+function setupPlaceForRole(role, places, index) {
+  const text = String(role || "");
+  const find = pattern => places.find(place => pattern.test(`${place.id} ${place.name} ${place.type}`))?.id;
+  return (/学生|老师/.test(text) && find(/school|学校|education/))
+    || (/医生|护士/.test(text) && find(/clinic|诊所|medical/))
+    || (/店|小卖部/.test(text) && find(/store|小卖部|shop/))
+    || (/早餐|老板/.test(text) && find(/breakfast|早餐|food/))
+    || (/退休|老人/.test(text) && find(/apartments|居民|home/))
+    || (/上班|工人|工作人员/.test(text) && find(/office|factory|工坊|work/))
+    || places[index % Math.max(1, places.length)]?.id
+    || "square";
+}
+
+function setupNormalizeSeeds(input = [], count = 12, places = []) {
+  const rows = [];
+  const usedNames = new Set();
+  const source = Array.isArray(input) ? input : [];
+  for (let index = 0; index < count; index += 1) {
+    const seed = source[index] || {};
+    const job = String(seed.job || setupRoleForIndex(index));
+    let name = String(seed.name || setupChineseName(index)).trim();
+    while (!name || usedNames.has(name) || /^(角色|居民|镇民|NPC|agent|person)\d*$/i.test(name)) {
+      name = setupChineseName(index + usedNames.size + 1);
+    }
+    usedNames.add(name);
+    rows.push({
+      id: setupSafeId(seed.id, `agent_${index + 1}`),
+      name,
+      job,
+      ageYears: clampNumber(seed.ageYears || seed.age, 1, 100, /学生/.test(job) ? 12 : /老人|退休/.test(job) ? 68 : 36),
+      place: places.some(place => place.id === seed.place) ? seed.place : setupPlaceForRole(job, places, index),
+      emotion: String(seed.emotion || "平静"),
+      goal: String(seed.goal || "维持稳定生活").slice(0, 60),
+      memory: Array.isArray(seed.memory) && seed.memory.length ? seed.memory.slice(0, 4) : [`记得自己在${job}身份里的日常责任。`],
+      relations: seed.relations && typeof seed.relations === "object" ? seed.relations : {}
+    });
+  }
+  return rows;
+}
+
+function setupMakeAgent(seed, index) {
+  const baseNeed = () => clampNumber(58 + Math.round(Math.random() * 28), 0, 100, 70);
+  const emotion = () => clampNumber(35 + Math.round(Math.random() * 35), 0, 100, 50);
+  return {
+    ...seed,
+    position: seed.place,
+    lifeStatus: "alive",
+    currentTask: "开始一天的日常安排",
+    needs: { hunger: baseNeed(), hygiene: baseNeed(), health: baseNeed(), social: baseNeed(), responsibility: baseNeed(), stress: baseNeed(), comfort: baseNeed(), safety: baseNeed() },
+    emotionVector: { happy: emotion(), anxious: emotion(), angry: emotion(), sad: emotion(), tired: emotion(), lonely: emotion(), hopeful: emotion(), calm: emotion(), curious: emotion() },
+    memory: { short: seed.memory || [], long: [], emotional: [], secret: [], rumor: [] },
+    memorySummary: (seed.memory || []).join("；").slice(0, 240),
+    knownFacts: [],
+    eventQueue: [],
+    longTermGoals: [{ title: seed.goal || "维持稳定生活", progress: 25, priority: 6, horizon: "month" }],
+    relationshipMatrix: seed.relations || {},
+    ageDays: Math.round(Number(seed.ageYears || 30) * 365),
+    ageStage: Number(seed.ageYears || 30) < 18 ? "teen" : Number(seed.ageYears || 30) >= 65 ? "elder" : "adult",
+    identityCore: { values: [seed.goal || "稳定生活"], habits: [], avoidance: [], fears: [] },
+    order: index
+  };
+}
+
+function setupFallbackRelationships(agents, places) {
+  const home = places.find(place => /home|apartment|居民|住宅/.test(`${place.id} ${place.name} ${place.type}`))?.id || places[0]?.id || "square";
+  const households = [];
+  const groups = [];
+  const relations = [];
+  for (let i = 0; i < agents.length; i += 3) {
+    const members = agents.slice(i, i + 3).map(agent => agent.id);
+    households.push({ id: `home_${Math.floor(i / 3) + 1}`, homePlace: home, members, type: members.length > 1 ? "family" : "single", routines: ["晚间回家"], responsibilities: ["互相照看"] });
+    members.forEach(from => members.filter(to => to !== from).forEach(to => relations.push({ from, to, type: "家人", trust: 72, intimacy: 65, respect: 55, debt: 0 })));
+  }
+  places.forEach(place => {
+    const members = agents.filter(agent => agent.place === place.id || agent.position === place.id).map(agent => agent.id);
+    if (members.length > 1) groups.push({ id: `group_${place.id}`, type: place.type || "local", place: place.id, members, authority: members.slice(0, 2) });
+  });
+  return { households, groups, relations };
+}
+
+function setupMakeWorld({ slot, prompt, startClock, config, places, seeds, relationships, setupTables }) {
+  const agents = seeds.map(setupMakeAgent);
+  const social = relationships || setupFallbackRelationships(agents, places);
+  return {
+    version: 2,
+    savedAt: new Date().toISOString(),
+    meta: { name: slot, clockText: minutesToClock(startClock).text, day: Math.floor(startClock / 1440) + 1, agentCount: agents.length, updatedAt: new Date().toISOString() },
+    world: {
+      clock: startClock,
+      startClock,
+      running: false,
+      selected: agents[0]?.id || "",
+      selectedPlace: agents[0]?.position || places[0]?.id || "",
+      config: config || publicConfig(),
+      places,
+      seedData: seeds,
+      resetSeedData: seeds,
+      agents,
+      records: [],
+      logs: [{ title: "Node 建镇", body: `后端创建 ${agents.length} 人小镇。`, type: "setup", time: minutesToClock(startClock).text, clock: startClock }],
+      actionQueue: [],
+      publicEvents: [],
+      eventChains: [],
+      obligations: [],
+      socialStructures: social,
+      households: social.households || [],
+      groups: social.groups || [],
+      setupNote: prompt || "",
+      customSetup: true,
+      setupTables,
+      weatherBox: { current: { condition: "多云", temperature: 24, humidity: 60 }, calendar: { day: Math.floor(startClock / 1440) + 1 } },
+      nodeRuntimeCounters: { tick: 0, context: 0, post: 0, saveSplit: 0 }
+    },
+    locationBoxes: {}
+  };
+}
+
+async function runNodeSetupCreate(body = {}) {
+  const slot = safeSaveName(body.slot || body.name || `town-${Date.now()}`);
+  const targetAgentCount = clampNumber(body.targetAgentCount || body.agentCount, 1, 500, 30);
+  const targetLocationCount = clampNumber(body.targetLocationCount || body.locationCount, 1, 120, Math.max(8, Math.ceil(targetAgentCount / 6)));
+  const startClock = clampNumber(body.startClock, 0, 24 * 60 - 1, 8 * 60);
+  const prompt = String(body.prompt || body.premise || "");
+  beginRuntimeProgress(slot, 7);
+  updateRuntimeProgress("setup-places", { phaseIndex: 1, currentTask: "normalize places" });
+  let places = setupNormalizePlaces(body.places || [], targetLocationCount);
+  let seeds = setupNormalizeSeeds(body.agents || body.seeds || [], targetAgentCount, places);
+  let blueprint = null;
+  let relationships = null;
+  if (body.useAi !== false && publicConfig().aiEnabled) {
+    updateRuntimeProgress("setup-blueprint", { phaseIndex: 2, currentTask: "AI blueprint" });
+    try {
+      blueprint = await aiRouter.run("setupBlueprintAgent", { premise: prompt, targetAgentCount, targetLocationCount, existingPlaces: places, existingAgents: seeds, requestedBatchSize: 10 });
+      if (Array.isArray(blueprint.places) && blueprint.places.length) places = setupNormalizePlaces(blueprint.places, targetLocationCount);
+    } catch (error) {
+      blueprint = { fallback: true, error: error.message };
+    }
+    updateRuntimeProgress("setup-agents", { phaseIndex: 3, currentTask: "AI agent batches" });
+    const batchSize = 10;
+    const batches = [];
+    for (let i = 0; i < targetAgentCount; i += batchSize) batches.push(seeds.slice(i, i + batchSize).map((seed, offset) => ({ index: i + offset, id: seed.id, existing: seed, roleHint: seed.job, placeHints: [seed.place] })));
+    try {
+      const results = await aiRouter.runBatch(batches, Math.min(20, batches.length), async (slots, index) => aiRouter.run("setupAgentBatchAgent", { premise: prompt, blueprint, places, slots, usedNames: seeds.map(seed => seed.name), aiBatch: { index: index + 1, total: batches.length } }, { once: true }));
+      const returned = results.flatMap(result => Array.isArray(result?.agents) ? result.agents : []);
+      if (returned.length) seeds = setupNormalizeSeeds(returned, targetAgentCount, places);
+    } catch (error) {
+      blueprint = { ...(blueprint || {}), batchError: error.message };
+    }
+    updateRuntimeProgress("setup-relations", { phaseIndex: 4, currentTask: "AI relationship sketch" });
+    try {
+      relationships = await aiRouter.run("setupRelationSketchAgent", { premise: prompt, blueprint, places, agents: seeds.map(seed => ({ id: seed.id, name: seed.name, job: seed.job, ageYears: seed.ageYears, place: seed.place })), targetAgentCount });
+    } catch (error) {
+      relationships = { ...setupFallbackRelationships(seeds, places), error: error.message };
+    }
+  }
+  updateRuntimeProgress("setup-world", { phaseIndex: 5, currentTask: "assemble world" });
+  const fallbackRelations = setupFallbackRelationships(seeds, places);
+  const safeRelationships = {
+    households: Array.isArray(relationships?.households) && relationships.households.length ? relationships.households : fallbackRelations.households,
+    groups: Array.isArray(relationships?.groups) && relationships.groups.length ? relationships.groups : fallbackRelations.groups,
+    relations: Array.isArray(relationships?.relations) && relationships.relations.length ? relationships.relations : fallbackRelations.relations
+  };
+  const payload = setupMakeWorld({ slot, prompt, startClock, config: publicConfig(), places, seeds, relationships: safeRelationships, setupTables: { blueprint, agents: seeds, places, relationships: safeRelationships, createdAt: new Date().toISOString() } });
+  updateRuntimeProgress("setup-save", { phaseIndex: 6, currentTask: "write save files" });
+  writeFolderSave(slot, payload);
+  updateRuntimeProgress("setup-complete", { phaseIndex: 7, currentTask: "setup completed" });
+  completeRuntimeProgress(`setup ${slot}`);
+  return { ok: true, slot, meta: payload.meta, saves: listSaves(), directory: SAVE_DIR };
+}
+
 async function handleApi(req, res) {
   const apiPath = req.url.split("?")[0];
   if (apiPath === "/api/version" && req.method === "GET") {
@@ -3093,6 +3456,40 @@ async function handleApi(req, res) {
   }
   if (apiPath === "/api/runtime/progress" && req.method === "GET") {
     send(res, 200, runtimeProgress);
+    return;
+  }
+  if (apiPath === "/api/setup/create" && req.method === "POST") {
+    try {
+      const raw = await readBody(req);
+      const body = JSON.parse(raw || "{}");
+      if (setupJobRunning) {
+        send(res, 409, { error: { message: "Setup job is already running", type: "setup_busy" }, progress: runtimeProgress });
+        return;
+      }
+      if (body.wait) {
+        setupJobRunning = true;
+        try {
+          send(res, 200, await runNodeSetupCreate(body));
+        } finally {
+          setupJobRunning = false;
+        }
+        return;
+      }
+      setupJobRunning = true;
+      const slot = safeSaveName(body.slot || body.name || `town-${Date.now()}`);
+      runNodeSetupCreate({ ...body, slot })
+        .catch(error => {
+          failRuntimeProgress(error);
+          runtimeLastMessage = `Node setup failed: ${error.message}`;
+        })
+        .finally(() => {
+          setupJobRunning = false;
+        });
+      send(res, 202, { ok: true, state: "setup_running", slot, progress: runtimeProgress });
+    } catch (error) {
+      setupJobRunning = false;
+      send(res, error.status || 500, { error: { message: error.message, type: "setup_create_error" } });
+    }
     return;
   }
   if (apiPath === "/api/runtime/start" && req.method === "POST") {
@@ -3231,7 +3628,7 @@ async function handleApi(req, res) {
     try {
       const raw = await readBody(req);
       const body = JSON.parse(raw || "{}");
-      const result = await callAiWithRetry(body.task, body.payload || {});
+      const result = await aiRouter.run(body.task, body.payload || {});
       send(res, 200, result);
     } catch (error) {
       send(res, error.status || 500, { error: { message: error.message, type: error.type || "internal_error" } });
@@ -3242,7 +3639,7 @@ async function handleApi(req, res) {
     try {
       const raw = await readBody(req);
       const body = JSON.parse(raw || "{}");
-      const result = await callAi(body.task, body.payload || {});
+      const result = await aiRouter.run(body.task, body.payload || {}, { once: true });
       send(res, 200, result);
     } catch (error) {
       send(res, error.status || 500, { error: { message: error.message, type: error.type || "internal_error" } });
@@ -3304,6 +3701,7 @@ function serveFile(req, res) {
 
 loadConfig();
 ensureKeyHealth();
+loadRuntimeProgress();
 
 http.createServer((req, res) => {
   if (req.url.startsWith("/api/")) {

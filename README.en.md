@@ -246,3 +246,11 @@ Never commit real API keys.
 ## Notes
 
 This is a local demo and research prototype. It is not production hardened. AI outputs are constrained by prompts and local validation, but the simulator still depends on model quality and configured API reliability.
+
+## Node Engineering Update
+
+- Added backend setup creation API: `POST /api/setup/create`.
+- Added split-file save read fallback from `characters/`, `places/`, `events/`, `relations/`, and `runtime/`.
+- Added persistent runtime progress at `saves/runtime-progress.json`.
+- Split AI routing helper into `ai-town-ai-router.js`.
+- Split local action validation into `ai-town-world-guard.js`.
