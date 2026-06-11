@@ -10916,7 +10916,7 @@
         return;
       }
       if (world.running && world.config.schedulerIntervalMs > 0) {
-        world.loopTimer = setTimeout(runAutoLoop, 0);
+        world.loopTimer = setTimeout(runAutoLoop, world.cycleInProgress ? 1000 : 0);
       }
     }
 
@@ -11865,7 +11865,6 @@
     async function openSettings(message = "") {
       if (world.running) {
         world.running = false;
-        void cancelAiRetryRequests();
         scheduleLoop();
         render();
       }
@@ -12079,7 +12078,7 @@
         world.aiBackoffUntil = 0;
         if (world.loopTimer) clearTimeout(world.loopTimer);
         world.loopTimer = null;
-        void cancelAiRetryRequests();
+        pushLog("自动调度已暂停", world.cycleInProgress ? "当前回合正在收尾，不会取消；完成后不会自动进入下一回合。" : "不会自动进入下一回合。", "system");
       } else {
         clearAiBackoff();
       }
