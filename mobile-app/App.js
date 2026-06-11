@@ -3,6 +3,7 @@ import {
   ActivityIndicator,
   Dimensions,
   Modal,
+  NativeModules,
   Pressable,
   SafeAreaView,
   ScrollView,
@@ -52,7 +53,13 @@ const emotionLabels = {
   curious: "好奇"
 };
 
-const defaultServer = "http://192.168.10.30:8788";
+function guessServerUrl() {
+  const scriptUrl = NativeModules?.SourceCode?.scriptURL || "";
+  const match = String(scriptUrl).match(/^[a-z]+:\/\/([^/:?#]+)/i);
+  return match?.[1] ? `http://${match[1]}:8788` : "http://192.168.5.6:8788";
+}
+
+const defaultServer = guessServerUrl();
 
 function cleanBaseUrl(value) {
   return String(value || "").trim().replace(/\/+$/, "");
