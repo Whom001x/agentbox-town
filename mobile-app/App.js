@@ -379,10 +379,10 @@ function TopHud({ townName, clockText, weatherText, runtime, loading, refresh, t
       </View>
       <View style={styles.hudActions}>
         <Pressable style={styles.roundButton} onPress={toggleRuntime}>
-          <Ionicons name={runtime?.state === "running" ? "pause" : "play"} size={20} color={palette.ink} />
+          <Ionicons name={runtime?.state === "running" ? "pause" : "play"} size={17} color={palette.ink} />
         </Pressable>
         <Pressable style={styles.roundButton} onPress={refresh}>
-          {loading ? <ActivityIndicator color={palette.ink} size="small" /> : <Ionicons name="refresh" size={19} color={palette.ink} />}
+          {loading ? <ActivityIndicator color={palette.ink} size="small" /> : <Ionicons name="refresh" size={16} color={palette.ink} />}
         </Pressable>
       </View>
     </View>
@@ -496,7 +496,7 @@ function BottomBar({ showPeople, showPlaces, showEvents, showRelations, showCont
 function ActionButton({ icon, label, active, onPress }) {
   return (
     <Pressable style={[styles.actionButton, active && styles.actionActive]} onPress={onPress}>
-      <Ionicons name={icon} size={22} color={active ? palette.dark : palette.ink} />
+      <Ionicons name={icon} size={19} color={active ? palette.dark : palette.ink} />
       <Text style={[styles.actionText, active && styles.actionTextActive]}>{label}</Text>
     </Pressable>
   );
@@ -722,15 +722,15 @@ const styles = StyleSheet.create({
   },
   place: {
     position: "absolute",
-    width: 84,
-    minHeight: 58,
-    marginLeft: -42,
-    marginTop: -29,
+    width: 72,
+    minHeight: 48,
+    marginLeft: -36,
+    marginTop: -24,
     borderWidth: 1,
     borderColor: "rgba(255, 237, 178, 0.75)",
-    borderRadius: 14,
+    borderRadius: 12,
     backgroundColor: "rgba(236, 194, 104, 0.92)",
-    padding: 8,
+    padding: 6,
     shadowColor: "#000",
     shadowOpacity: 0.35,
     shadowRadius: 12,
@@ -746,21 +746,21 @@ const styles = StyleSheet.create({
   placeName: {
     color: "#25170b",
     fontWeight: "900",
-    fontSize: 13
+    fontSize: 11
   },
   placeCount: {
     color: "#4d3517",
-    marginTop: 3,
-    fontSize: 12,
+    marginTop: 2,
+    fontSize: 10,
     fontWeight: "700"
   },
   eventMark: {
     position: "absolute",
     right: -6,
     top: -6,
-    width: 20,
-    height: 20,
-    borderRadius: 10,
+    width: 17,
+    height: 17,
+    borderRadius: 9,
     backgroundColor: palette.red,
     alignItems: "center",
     justifyContent: "center"
@@ -771,15 +771,15 @@ const styles = StyleSheet.create({
   },
   topHud: {
     position: "absolute",
-    top: 10,
-    right: 14,
-    width: 300,
-    minHeight: 54,
-    borderRadius: 18,
+    top: 8,
+    right: 10,
+    width: 250,
+    minHeight: 46,
+    borderRadius: 15,
     borderWidth: 1,
     borderColor: palette.line,
     backgroundColor: palette.panel,
-    padding: 8,
+    padding: 7,
     flexDirection: "row",
     alignItems: "center",
     gap: 10
@@ -791,21 +791,21 @@ const styles = StyleSheet.create({
   townName: {
     color: palette.ink,
     fontWeight: "900",
-    fontSize: 17
+    fontSize: 14
   },
   hudSub: {
     color: palette.muted,
-    marginTop: 3,
-    fontSize: 12
+    marginTop: 2,
+    fontSize: 10
   },
   hudActions: {
     flexDirection: "row",
-    gap: 8
+    gap: 6
   },
   roundButton: {
-    width: 38,
-    height: 38,
-    borderRadius: 13,
+    width: 32,
+    height: 32,
+    borderRadius: 11,
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: "rgba(255,255,255,0.1)",
@@ -814,18 +814,18 @@ const styles = StyleSheet.create({
   },
   miniMap: {
     position: "absolute",
-    top: 12,
-    left: 12,
-    width: 150,
-    borderRadius: 20,
+    top: 8,
+    left: 8,
+    width: 126,
+    borderRadius: 16,
     borderWidth: 1,
     borderColor: palette.line,
     backgroundColor: palette.panel,
     overflow: "hidden"
   },
   panelHeader: {
-    minHeight: 40,
-    paddingHorizontal: 12,
+    minHeight: 32,
+    paddingHorizontal: 9,
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
@@ -842,10 +842,10 @@ const styles = StyleSheet.create({
   panelTitle: {
     color: palette.ink,
     fontWeight: "900",
-    fontSize: 14
+    fontSize: 12
   },
   miniMapBody: {
-    height: 116,
+    height: 88,
     backgroundColor: "rgba(56, 94, 60, 0.7)"
   },
   miniDot: {
@@ -857,15 +857,15 @@ const styles = StyleSheet.create({
   },
   sidePanel: {
     position: "absolute",
-    right: 14,
-    top: 76,
-    width: 278,
-    maxHeight: 300,
-    borderRadius: 20,
+    right: 10,
+    top: 62,
+    width: 238,
+    maxHeight: 250,
+    borderRadius: 16,
     borderWidth: 1,
     borderColor: palette.line,
     backgroundColor: palette.panel,
-    padding: 10,
+    padding: 8,
     overflow: "hidden"
   },
   sidePanelPortrait: {
@@ -877,25 +877,25 @@ const styles = StyleSheet.create({
     maxHeight: 200
   },
   eventRow: {
-    padding: 10,
-    borderRadius: 13,
+    padding: 8,
+    borderRadius: 11,
     backgroundColor: "rgba(24, 48, 70, 0.82)",
     marginTop: 8
   },
   eventTitle: {
     color: palette.ink,
     fontWeight: "900",
-    fontSize: 13
+    fontSize: 11
   },
   eventBody: {
     color: palette.muted,
-    marginTop: 4,
-    fontSize: 12,
-    lineHeight: 17
+    marginTop: 3,
+    fontSize: 10,
+    lineHeight: 14
   },
   warningRow: {
-    padding: 9,
-    borderRadius: 12,
+    padding: 7,
+    borderRadius: 10,
     backgroundColor: "rgba(106, 47, 37, 0.7)",
     marginTop: 7
   },
@@ -905,8 +905,8 @@ const styles = StyleSheet.create({
   },
   runtimeText: {
     color: palette.muted,
-    marginTop: 10,
-    fontSize: 12
+    marginTop: 8,
+    fontSize: 10
   },
   emptyText: {
     color: palette.muted,
@@ -914,23 +914,23 @@ const styles = StyleSheet.create({
   },
   bottomBar: {
     position: "absolute",
-    left: "22%",
-    right: "22%",
-    bottom: 10,
-    borderRadius: 22,
+    left: "27%",
+    right: "27%",
+    bottom: 8,
+    borderRadius: 18,
     borderWidth: 1,
     borderColor: palette.line,
     backgroundColor: "rgba(8, 18, 29, 0.92)",
-    padding: 7
+    padding: 6
   },
   bottomItems: {
-    gap: 8,
+    gap: 6,
     paddingRight: 4
   },
   actionButton: {
-    minWidth: 72,
-    minHeight: 52,
-    borderRadius: 16,
+    minWidth: 58,
+    minHeight: 44,
+    borderRadius: 13,
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: "rgba(255,255,255,0.08)"
@@ -941,8 +941,8 @@ const styles = StyleSheet.create({
   actionText: {
     color: palette.ink,
     fontWeight: "800",
-    fontSize: 12,
-    marginTop: 3
+    fontSize: 10,
+    marginTop: 2
   },
   actionTextActive: {
     color: palette.dark
@@ -970,12 +970,12 @@ const styles = StyleSheet.create({
   peopleBadge: {
     position: "absolute",
     left: 12,
-    bottom: 132,
+    bottom: 102,
     flexDirection: "row",
     alignItems: "center",
     gap: 6,
     paddingHorizontal: 10,
-    minHeight: 34,
+    minHeight: 30,
     borderRadius: 999,
     backgroundColor: palette.panel,
     borderWidth: 1,
