@@ -506,19 +506,25 @@ function Drawer(props) {
   const { drawer, close } = props;
   return (
     <Modal visible={!!drawer.type} transparent animationType="slide" onRequestClose={close}>
-      <Pressable style={styles.modalBackdrop} onPress={close}>
-        <Pressable style={styles.drawer} onPress={() => {}}>
+      <View style={styles.modalBackdrop}>
+        <Pressable style={styles.backdropTap} onPress={close} />
+        <View style={styles.drawer}>
           <View style={styles.drawerHead}>
             <Text style={styles.drawerTitle}>{drawer.title}</Text>
             <Pressable style={styles.closeButton} onPress={close}>
               <Ionicons name="close" size={20} color={palette.ink} />
             </Pressable>
           </View>
-          <ScrollView contentContainerStyle={styles.drawerBody}>
+          <ScrollView
+            contentContainerStyle={styles.drawerBody}
+            keyboardShouldPersistTaps="handled"
+            nestedScrollEnabled
+            showsVerticalScrollIndicator
+          >
             <DrawerBody {...props} />
           </ScrollView>
-        </Pressable>
-      </Pressable>
+        </View>
+      </View>
     </Modal>
   );
 }
@@ -1079,6 +1085,9 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: "flex-end",
     backgroundColor: "rgba(0,0,0,0.25)"
+  },
+  backdropTap: {
+    ...StyleSheet.absoluteFillObject
   },
   drawer: {
     maxHeight: "72%",
