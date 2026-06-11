@@ -703,13 +703,224 @@ function writeRuntimePayload(slot, payload) {
   });
 }
 
-function runNodeRuntimeStep(slot) {
+function nodeRuntimePlaceId(world, agent) {
+  return agent?.position || agent?.place || "";
+}
+
+function nodeRuntimePlace(world, placeId) {
+  const places = Array.isArray(world?.places) ? world.places : [];
+  return places.find(place => place.id === placeId) || { id: placeId, name: placeId || "unknown" };
+}
+
+function nodeRuntimeAgentBrief(agent) {
+  return {
+    id: agent.id,
+    name: agent.name,
+    job: agent.job || "",
+    ageYears: agent.ageYears ?? agent.age ?? null,
+    ageStage: agent.ageStage || "",
+    lifeStatus: agent.lifeStatus || "alive",
+    position: agent.position || agent.place || "",
+    currentTask: agent.currentTask || "",
+    needs: agent.needs || {},
+    emotionVector: agent.emotionVector || agent.emotions || {},
+    energy: agent.energy,
+    isSleeping: Boolean(agent.isSleeping),
+    activeProcess: agent.activeProcess || null,
+    eventQueue: Array.isArray(agent.eventQueue) ? agent.eventQueue.slice(0, 5) : [],
+    longTermGoals: Array.isArray(agent.longTermGoals) ? agent.longTermGoals.slice(0, 3) : [],
+    identityCore: agent.identityCore || null,
+    personalityProfile: agent.personalityProfile || null
+  };
+}
+
+function nodeRuntimeNeedPressure(agent) {
+  const needs = agent?.needs || {};
+  const lowNeeds = ["hunger", "health", "safety", "stress", "responsibility", "comfort", "social"]
+    .map(key => 100 - Number(needs[key] ?? 70));
+  const needPressure = Math.max(0, ...lowNeeds);
+  const eventPressure = Array.isArray(agent?.eventQueue) && agent.eventQueue.length ? 18 : 0;
+  const processPressure = agent?.activeProcess ? 15 : 0;
+  const sleepingPenalty = agent?.isSleeping ? -35 : 0;
+  return Math.max(0, needPressure + eventPressure + processPressure + sleepingPenalty);
+}
+
+function nodeRuntimeCandidates(world) {
+  const agents = Array.isArray(world?.agents) ? world.agents : [];
+  const maxActions = Math.max(1, Math.min(MAX_ACTIONS_HARD_LIMIT, Number(world?.config?.maxActionsPerCycle || aiConfig.maxActionsPerCycle || 3)));
+  return agents
+    .filter(agent => agent && agent.id && agent.lifeStatus !== "dead")
+    .map(agent => ({ agent, pressure: nodeRuntimeNeedPressure(agent) }))
+    .filter(item => item.pressure >= 18 || item.agent.activeProcess || (Array.isArray(item.agent.eventQueue) && item.agent.eventQueue.length))
+    .sort((a, b) => b.pressure - a.pressure)
+    .slice(0, Math.max(maxActions * 2, maxActions))
+    .map(item => nodeRuntimeAgentBrief(item.agent));
+}
+
+function nodeRuntimeVisibleAgents(world, agent) {
+  const placeId = nodeRuntimePlaceId(world, agent);
+  return (world.agents || [])
+    .filter(item => item?.id && item.id !== agent.id && item.lifeStatus !== "dead" && nodeRuntimePlaceId(world, item) === placeId)
+    .slice(0, 12)
+    .map(nodeRuntimeAgentBrief);
+}
+
+function nodeRuntimeSchedulerPayload(world, dueAgents) {
+  const maxActions = Math.max(1, Math.min(MAX_ACTIONS_HARD_LIMIT, Number(world?.config?.maxActionsPerCycle || aiConfig.maxActionsPerCycle || 3)));
+  return {
+    clock: world.clock || 0,
+    clockText: world.clockText || world.weatherBox?.calendar?.text || "",
+    calendar: world.weatherBox?.calendar || {},
+    maxActions,
+    dueAgents,
+    agents: dueAgents,
+    places: Array.isArray(world.places) ? world.places.map(place => ({ id: place.id, name: place.name, type: place.type || "" })).slice(0, 120) : [],
+    recentRecords: Array.isArray(world.records) ? world.records.slice(0, 12) : [],
+    recentLogs: Array.isArray(world.logs) ? world.logs.slice(0, 12) : [],
+    simulationLevel: "node-core-v1"
+  };
+}
+
+function nodeRuntimeActionPayload(world, agent, candidate = {}) {
+  const placeId = nodeRuntimePlaceId(world, agent);
+  const place = nodeRuntimePlace(world, placeId);
+  const visibleAgents = nodeRuntimeVisibleAgents(world, agent);
+  return {
+    agent: nodeRuntimeAgentBrief(agent),
+    candidate,
+    clock: world.clock || 0,
+    tickMinutes: Number(world?.config?.virtualMinutesPerPulse || aiConfig.virtualMinutesPerPulse || 60),
+    calendar: world.weatherBox?.calendar || {},
+    currentLocation: {
+      ...place,
+      population: {
+        otherCount: visibleAgents.length,
+        visibleAgents,
+        hasStaff: visibleAgents.some(item => /医生|护士|老师|店员|老板|职员|工作人员/.test(String(item.job || ""))),
+        staff: visibleAgents.filter(item => /医生|护士|老师|店员|老板|职员|工作人员/.test(String(item.job || ""))).slice(0, 6)
+      }
+    },
+    visibleAgents,
+    locations: Array.isArray(world.places) ? world.places.map(item => ({ id: item.id, name: item.name })).slice(0, 120) : [],
+    recentRecords: Array.isArray(world.records) ? world.records.slice(0, 8) : [],
+    visibleKnowledge: Array.isArray(agent.knownFacts) ? agent.knownFacts.slice(0, 12) : [],
+    memorySummary: agent.memorySummary || "",
+    memory: agent.memory || {},
+    intentState: agent.intentState || null,
+    contextJudgement: agent.contextJudgement || null,
+    crisisTriage: agent.crisisTriage || null,
+    knowledgeJudgement: agent.knowledgeJudgement || null,
+    outcomeJudgement: agent.outcomeJudgement || null
+  };
+}
+
+function nodeRuntimeClampDelta(value, min = -8, max = 8) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return 0;
+  return Math.max(min, Math.min(max, number));
+}
+
+function nodeRuntimeApplyAction(world, agent, aiResult) {
+  const action = aiResult?.action || {};
+  agent.currentTask = String(action.currentTask || action.summary || agent.currentTask || "维持当前安排").slice(0, 80);
+  agent.mood = String(action.mood || agent.mood || "").slice(0, 40);
+  agent.emotionVector ||= agent.emotions || {};
+  Object.entries(action.emotionDelta || {}).forEach(([key, delta]) => {
+    const before = Number(agent.emotionVector[key] ?? 50);
+    agent.emotionVector[key] = Math.max(0, Math.min(100, before + nodeRuntimeClampDelta(delta)));
+  });
+  agent.emotions = agent.emotionVector;
+  if (action.processUpdate && typeof action.processUpdate === "object") {
+    if (action.processUpdate.finished) {
+      agent.activeProcess = null;
+    } else {
+      agent.activeProcess = {
+        ...(agent.activeProcess || {}),
+        goal: String(action.processUpdate.goal || agent.activeProcess?.goal || action.currentTask || "").slice(0, 80),
+        stage: String(action.processUpdate.stage || agent.activeProcess?.stage || "execute").slice(0, 30),
+        currentStep: String(action.processUpdate.currentStep || "").slice(0, 120),
+        progress: Math.max(0, Math.min(100, Number(agent.activeProcess?.progress || 0) + nodeRuntimeClampDelta(action.processUpdate.progressDelta, 0, 60))),
+        blockedBy: String(action.processUpdate.blockedBy || "").slice(0, 120),
+        updatedAt: world.clock || 0
+      };
+    }
+  }
+  if (action.memory?.text) {
+    agent.memory ||= { short: [], long: [], emotional: [], secret: [], rumor: [] };
+    const layer = ["short", "long", "emotional", "secret", "rumor"].includes(action.memory.layer) ? action.memory.layer : "short";
+    agent.memory[layer] ||= [];
+    agent.memory[layer].unshift({
+      text: String(action.memory.text).slice(0, 180),
+      importance: Math.max(1, Math.min(5, Number(action.memory.importance || 3))),
+      at: world.clock || 0,
+      source: "node-agent-action"
+    });
+    agent.memory[layer] = agent.memory[layer].slice(0, 30);
+  }
+  const targetPlace = String(action.newLocation || "");
+  const exists = targetPlace && Array.isArray(world.places) && world.places.some(place => place.id === targetPlace);
+  if (exists && targetPlace !== nodeRuntimePlaceId(world, agent)) {
+    agent.movement = {
+      from: nodeRuntimePlaceId(world, agent),
+      to: targetPlace,
+      startedAt: world.clock || 0,
+      arriveAt: Number(world.clock || 0) + Math.max(10, Math.min(60, Number(world?.config?.virtualMinutesPerPulse || 60) / 2))
+    };
+  }
+  world.records ||= [];
+  world.records.unshift({
+    title: `${agent.name} 的行动`,
+    body: String(action.summary || agent.currentTask || "维持当前生活节奏").slice(0, 220),
+    type: "node_agent_action",
+    agents: [agent.id],
+    time: world.weatherBox?.calendar?.text || "",
+    clock: world.clock || 0,
+    source: "node-runtime-agent-loop"
+  });
+  world.records = world.records.slice(0, 300);
+  return action;
+}
+
+async function runNodeRuntimeStep(slot) {
   const safeSlot = safeSaveName(slot || runtimeSlot || listSaves()[0]?.slot || "autosave");
   const payload = readSavePayload(safeSlot);
   if (!payload) {
     const error = new Error(`Save not found: ${safeSlot}`);
     error.status = 404;
     throw error;
+  }
+  const world = payload.world || payload;
+  const dueAgents = nodeRuntimeCandidates(world);
+  if (dueAgents.length) {
+    const scheduled = await callAiWithRetry("scheduler", nodeRuntimeSchedulerPayload(world, dueAgents));
+    const selected = Array.isArray(scheduled?.candidates) ? scheduled.candidates : [];
+    const maxActions = Math.max(1, Math.min(MAX_ACTIONS_HARD_LIMIT, Number(world?.config?.maxActionsPerCycle || aiConfig.maxActionsPerCycle || 3)));
+    const byId = new Map((world.agents || []).map(agent => [agent.id, agent]));
+    const actionCalls = selected
+      .filter(item => byId.has(item.agentId))
+      .slice(0, maxActions)
+      .map(candidate => {
+        const agent = byId.get(candidate.agentId);
+        return callAiWithRetry("agentAction", nodeRuntimeActionPayload(world, agent, candidate))
+          .then(result => ({ status: "fulfilled", agent, candidate, result }))
+          .catch(error => ({ status: "rejected", agent, candidate, error }));
+      });
+    const actionResults = await Promise.all(actionCalls);
+    actionResults.forEach(item => {
+      if (item.status === "fulfilled") {
+        nodeRuntimeApplyAction(world, item.agent, item.result);
+        return;
+      }
+      world.logs ||= [];
+      world.logs.unshift({
+        title: "Node AgentAction failed",
+        body: `${item.agent?.name || item.candidate?.agentId || ""}: ${item.error?.message || "unknown error"}`,
+        type: "node_runtime_error",
+        time: world.weatherBox?.calendar?.text || "",
+        clock: world.clock || 0,
+        source: "node-runtime-agent-loop"
+      });
+    });
   }
   const result = nodeStepPayload(payload);
   writeRuntimePayload(safeSlot, result.payload);
@@ -799,6 +1010,7 @@ function runtimeStatus() {
 function killRuntimeProcess() {
   if (runtimeTimer) clearTimeout(runtimeTimer);
   runtimeTimer = null;
+  cancelAiRetries("后台运行已暂停或停止，取消当前 AI 重试");
   if (runtimeProcess && runtimeProcess.exitCode === null && !runtimeProcess.killed) {
     runtimeProcess.kill();
   }
@@ -821,10 +1033,10 @@ function pauseRuntime() {
   runtimeLastMessage = "后台运行已暂停";
 }
 
-function runNodeRuntimeLoop() {
+async function runNodeRuntimeLoop() {
   if (runtimeState !== "running" || runtimeEngine !== "node-core-v1") return;
   try {
-    const summary = runNodeRuntimeStep(runtimeSlot);
+    const summary = await runNodeRuntimeStep(runtimeSlot);
     runtimeLastMessage = `Node tick：${summary.clockText}`;
   } catch (error) {
     runtimeState = "paused";
@@ -837,7 +1049,7 @@ function runNodeRuntimeLoop() {
   runtimeTimer = setTimeout(runNodeRuntimeLoop, delayMs);
 }
 
-function startRuntime(slot = "", options = {}) {
+async function startRuntime(slot = "", options = {}) {
   const mode = options.mode || "run";
   const engine = options.engine || "node-core-v1";
   const processRunning = Boolean(runtimeProcess && runtimeProcess.exitCode === null && !runtimeProcess.killed);
@@ -851,7 +1063,7 @@ function startRuntime(slot = "", options = {}) {
     runtimeStartedAt = Date.now();
     if (mode === "step") {
       runtimeState = "stepping";
-      const summary = runNodeRuntimeStep(chosenSlot);
+      const summary = await runNodeRuntimeStep(chosenSlot);
       runtimeState = "paused";
       runtimeStartedAt = 0;
       runtimeLastMessage = `Node 单步完成：${summary.clockText}`;
@@ -2190,7 +2402,7 @@ async function handleApi(req, res) {
     try {
       const raw = await readBody(req);
       const body = JSON.parse(raw || "{}");
-      send(res, 200, startRuntime(body.slot || "", { mode: body.mode || "run", engine: body.engine || "node-core-v1" }));
+      send(res, 200, await startRuntime(body.slot || "", { mode: body.mode || "run", engine: body.engine || "node-core-v1" }));
     } catch (error) {
       send(res, error.status || 500, { error: { message: error.message, type: "runtime_start_error" } });
     }
@@ -2200,7 +2412,7 @@ async function handleApi(req, res) {
     try {
       const raw = await readBody(req);
       const body = JSON.parse(raw || "{}");
-      send(res, 200, startRuntime(body.slot || runtimeSlot || "", { mode: "run", engine: body.engine || runtimeEngine || "node-core-v1" }));
+      send(res, 200, await startRuntime(body.slot || runtimeSlot || "", { mode: "run", engine: body.engine || runtimeEngine || "node-core-v1" }));
     } catch (error) {
       send(res, error.status || 500, { error: { message: error.message, type: "runtime_resume_error" } });
     }
@@ -2215,7 +2427,7 @@ async function handleApi(req, res) {
     try {
       const raw = await readBody(req);
       const body = JSON.parse(raw || "{}");
-      send(res, 200, startRuntime(body.slot || runtimeSlot || "", { mode: "step", engine: body.engine || "node-core-v1" }));
+      send(res, 200, await startRuntime(body.slot || runtimeSlot || "", { mode: "step", engine: body.engine || "node-core-v1" }));
     } catch (error) {
       send(res, error.status || 500, { error: { message: error.message, type: "runtime_step_error" } });
     }

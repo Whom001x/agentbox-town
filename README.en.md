@@ -16,6 +16,20 @@ The project focuses on believable multi-agent town simulation rather than simple
 - Folder-based save system with per-character files and AG judgement files
 - WorldGuard local validation to reduce hidden NPCs, omniscient knowledge, teleportation, and impossible actions
 
+## Node Runtime Migration Status
+
+Background runtime ownership has moved to Node. `node-core-v1` no longer depends on the browser loop for basic world progression, and it now runs a server-side AI action chain:
+
+- Each step reads the save folder and selects candidate characters with need pressure, event queues, or unfinished processes.
+- Node calls `Scheduler` to choose which characters act this round.
+- Node calls `AgentAction` for selected characters in parallel, distributed through the key pool and per-key concurrency limit.
+- `AgentAction` results are written back to character current tasks, emotions, memories, active processes, movement requests, and action records.
+- After actions are applied, Node core advances virtual time, sleep, physiological decay, basic eating/care, movement arrival, and mortality checks.
+- The background loop is serial: the next round is scheduled only after Scheduler, AgentAction, and Node tick have all completed.
+- Pausing or stopping the background runtime cancels current AI retries so old requests do not keep the backend stuck.
+
+`headless-browser-shim` remains as a compatibility fallback. Later stages can continue moving `NeedIntent / ContextRule / CrisisTriage / KnowledgeJudge / OutcomeJudge`, `StateSettlement`, information propagation, relationship dynamics, and social processes into pure Node.
+
 ## Main Interface
 
 The main screen is a runnable town console, not just a chat window:
