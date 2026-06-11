@@ -151,7 +151,8 @@ Display and background runtime:
 - Display UI: `http://localhost:8788/ai-town-monitor.html`, which only reads saves and call status without running the simulation loop
 - Node RuntimeController owns background state: `running`, `paused`, `stepping`, and `stopped`
 - The display UI's start, pause, step, and stop buttons all call server-side Runtime APIs
-- This first migration stage still uses `headless-browser-shim` as the compute engine: the server launches headless Edge to run the old simulation core; later stages will move the core into pure Node
+- The current compute engine is `node-core-v1`: the server can now advance time, sleep, physiology, basic eating/care, movement arrival, and mortality checks directly, then write the save back
+- `headless-browser-shim` remains as a compatibility fallback; later stages will move Scheduler, AgentAction, and post-Agent chains into pure Node
 
 On first launch, configure your AI base URL, model, and API keys in the app settings.
 

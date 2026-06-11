@@ -12115,7 +12115,7 @@
       api(endpoint, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ slot: currentSaveSlot || saveListCache[0]?.slot || "" })
+        body: JSON.stringify({ slot: currentSaveSlot || saveListCache[0]?.slot || "", engine: "node-core-v1" })
       }, CONFIG_TIMEOUT_MS).then(() => refreshRuntimeStatus()).then(render).catch(error => {
         pushLog("后台控制失败", error.message, "system");
         render();
@@ -12125,7 +12125,7 @@
       api("/api/runtime/step", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ slot: currentSaveSlot || saveListCache[0]?.slot || "" })
+        body: JSON.stringify({ slot: currentSaveSlot || saveListCache[0]?.slot || "", engine: "node-core-v1" })
       }, CONFIG_TIMEOUT_MS).then(() => refreshRuntimeStatus()).then(render).catch(error => {
         pushLog("后台单步失败", error.message, "system");
         render();

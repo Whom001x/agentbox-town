@@ -3,6 +3,7 @@ const fs = require("fs");
 const path = require("path");
 const os = require("os");
 const { spawn } = require("child_process");
+const { nodeStepPayload } = require("./ai-town-node-core");
 
 const PORT = Number(process.env.AI_TOWN_V2_PORT || 8788);
 const HOST = String(process.env.AI_TOWN_V2_HOST || "0.0.0.0");
@@ -56,6 +57,8 @@ let runtimeStartedAt = 0;
 let runtimeSlot = "";
 let runtimeState = "stopped";
 let runtimeLastMessage = "";
+let runtimeEngine = "node-core-v1";
+let runtimeTimer = null;
 
 function ensureSaveDir() {
   fs.mkdirSync(SAVE_DIR, { recursive: true });
@@ -684,6 +687,37 @@ function readSavePayload(slot) {
   return null;
 }
 
+function writeRuntimePayload(slot, payload) {
+  const safeSlot = safeSaveName(slot);
+  const metaName = payload?.meta?.name || safeSlot;
+  writeFolderSave(safeSlot, {
+    version: payload.version || 2,
+    savedAt: new Date().toISOString(),
+    meta: {
+      ...(payload.meta && typeof payload.meta === "object" ? payload.meta : {}),
+      name: metaName,
+      updatedAt: new Date().toISOString()
+    },
+    world: payload.world || {},
+    locationBoxes: payload.locationBoxes || {}
+  });
+}
+
+function runNodeRuntimeStep(slot) {
+  const safeSlot = safeSaveName(slot || runtimeSlot || listSaves()[0]?.slot || "autosave");
+  const payload = readSavePayload(safeSlot);
+  if (!payload) {
+    const error = new Error(`Save not found: ${safeSlot}`);
+    error.status = 404;
+    throw error;
+  }
+  const result = nodeStepPayload(payload);
+  writeRuntimePayload(safeSlot, result.payload);
+  runtimeSlot = safeSlot;
+  runtimeLastMessage = `Node tick 完成：${result.summary.clockText}`;
+  return result.summary;
+}
+
 function markKeySuccess(index, durationMs) {
   const item = keyHealth[index];
   if (!item) return;
@@ -748,7 +782,7 @@ function findBrowserExecutable() {
 function runtimeStatus() {
   const processRunning = Boolean(runtimeProcess && runtimeProcess.exitCode === null && !runtimeProcess.killed);
   return {
-    running: runtimeState === "running" && processRunning,
+    running: runtimeState === "running" && (runtimeEngine === "node-core-v1" || processRunning),
     processRunning,
     state: runtimeState,
     pid: processRunning ? runtimeProcess.pid : 0,
@@ -756,13 +790,15 @@ function runtimeStatus() {
     startedAt: runtimeStartedAt ? new Date(runtimeStartedAt).toISOString() : "",
     message: runtimeLastMessage,
     controller: "node-runtime-controller",
-    computeEngine: "headless-browser-shim",
+    computeEngine: runtimeEngine,
     monitorUrl: `http://localhost:${PORT}/ai-town-monitor.html`,
     runtimeUrl: runtimeSlot ? `http://127.0.0.1:${PORT}/?runtime=1&autostart=1&slot=${encodeURIComponent(runtimeSlot)}` : ""
   };
 }
 
 function killRuntimeProcess() {
+  if (runtimeTimer) clearTimeout(runtimeTimer);
+  runtimeTimer = null;
   if (runtimeProcess && runtimeProcess.exitCode === null && !runtimeProcess.killed) {
     runtimeProcess.kill();
   }
@@ -785,11 +821,47 @@ function pauseRuntime() {
   runtimeLastMessage = "后台运行已暂停";
 }
 
+function runNodeRuntimeLoop() {
+  if (runtimeState !== "running" || runtimeEngine !== "node-core-v1") return;
+  try {
+    const summary = runNodeRuntimeStep(runtimeSlot);
+    runtimeLastMessage = `Node tick：${summary.clockText}`;
+  } catch (error) {
+    runtimeState = "paused";
+    runtimeLastMessage = `Node tick 失败：${error.message}`;
+    return;
+  }
+  loadConfig();
+  const payload = readSavePayload(runtimeSlot);
+  const delayMs = Math.max(0, Number(payload?.world?.config?.schedulerIntervalMs || aiConfig.schedulerIntervalMs || 2500));
+  runtimeTimer = setTimeout(runNodeRuntimeLoop, delayMs);
+}
+
 function startRuntime(slot = "", options = {}) {
   const mode = options.mode || "run";
+  const engine = options.engine || "node-core-v1";
   const processRunning = Boolean(runtimeProcess && runtimeProcess.exitCode === null && !runtimeProcess.killed);
   if (processRunning && runtimeState === "running" && mode === "run") return runtimeStatus();
   if (processRunning) killRuntimeProcess();
+  if (engine === "node-core-v1") {
+    const saves = listSaves();
+    const chosenSlot = safeSaveName(slot || runtimeSlot || saves[0]?.slot || "autosave");
+    runtimeSlot = chosenSlot;
+    runtimeEngine = "node-core-v1";
+    runtimeStartedAt = Date.now();
+    if (mode === "step") {
+      runtimeState = "stepping";
+      const summary = runNodeRuntimeStep(chosenSlot);
+      runtimeState = "paused";
+      runtimeStartedAt = 0;
+      runtimeLastMessage = `Node 单步完成：${summary.clockText}`;
+      return runtimeStatus();
+    }
+    runtimeState = "running";
+    runtimeLastMessage = "Node 核心后台正在运行";
+    runNodeRuntimeLoop();
+    return runtimeStatus();
+  }
   const browser = findBrowserExecutable();
   if (!browser) {
     const error = new Error("No Edge/Chrome executable found. Set AI_TOWN_BROWSER to a Chromium browser path.");
@@ -798,6 +870,7 @@ function startRuntime(slot = "", options = {}) {
   }
   const saves = listSaves();
   const chosenSlot = safeSaveName(slot || runtimeSlot || saves[0]?.slot || "autosave");
+  runtimeEngine = "headless-browser-shim";
   const params = new URLSearchParams({ runtime: "1", slot: chosenSlot });
   if (mode === "step") params.set("step", "1");
   else params.set("autostart", "1");
@@ -2117,7 +2190,7 @@ async function handleApi(req, res) {
     try {
       const raw = await readBody(req);
       const body = JSON.parse(raw || "{}");
-      send(res, 200, startRuntime(body.slot || "", { mode: body.mode || "run" }));
+      send(res, 200, startRuntime(body.slot || "", { mode: body.mode || "run", engine: body.engine || "node-core-v1" }));
     } catch (error) {
       send(res, error.status || 500, { error: { message: error.message, type: "runtime_start_error" } });
     }
@@ -2127,7 +2200,7 @@ async function handleApi(req, res) {
     try {
       const raw = await readBody(req);
       const body = JSON.parse(raw || "{}");
-      send(res, 200, startRuntime(body.slot || runtimeSlot || "", { mode: "run" }));
+      send(res, 200, startRuntime(body.slot || runtimeSlot || "", { mode: "run", engine: body.engine || runtimeEngine || "node-core-v1" }));
     } catch (error) {
       send(res, error.status || 500, { error: { message: error.message, type: "runtime_resume_error" } });
     }
@@ -2142,7 +2215,7 @@ async function handleApi(req, res) {
     try {
       const raw = await readBody(req);
       const body = JSON.parse(raw || "{}");
-      send(res, 200, startRuntime(body.slot || runtimeSlot || "", { mode: "step" }));
+      send(res, 200, startRuntime(body.slot || runtimeSlot || "", { mode: "step", engine: body.engine || "node-core-v1" }));
     } catch (error) {
       send(res, error.status || 500, { error: { message: error.message, type: "runtime_step_error" } });
     }
