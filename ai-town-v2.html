@@ -1130,6 +1130,7 @@
       { id: "locationChainAgent", label: "地点链", hint: "地点连续事件链" },
       { id: "locationRuntimeAgent", label: "地点运行", hint: "人群/队列/岗位/资源" },
       { id: "processManagerAgent", label: "过程管理", hint: "未完成行动推进" },
+      { id: "professionServiceAgent", label: "职业服务", hint: "医生/老师/店员/窗口处理请求" },
       { id: "socialPatternAgent", label: "社会模式", hint: "长期关系/群体压力" },
       { id: "eventImpactAgent", label: "事件影响", hint: "谁被事件牵动" },
       { id: "informationPropagationAgent", label: "信息传播", hint: "谁知道/怎么传" },
@@ -1171,6 +1172,7 @@
       locationChainAgent: "地点链",
       locationRuntimeAgent: "地点运行",
       processManagerAgent: "过程管理",
+      professionServiceAgent: "职业服务",
       socialPatternAgent: "社会模式",
       eventImpactAgent: "事件影响",
       informationPropagationAgent: "信息传播",
@@ -2717,19 +2719,27 @@
       if (!agent.terminalState) agent.terminalState = { criticalMinutes: 0, lastReasons: [], since: null };
       const needs = agent.needs || {};
       const age = ageProfile(agent);
-      const reasons = mortalityReasons(agent);
-      const terminalCount = reasons.length;
+      let reasons = mortalityReasons(agent);
+      let terminalCount = reasons.length;
       const riskyPlace = locationBoxes[agent.position]?.effects?.some(effect => ["river_risk", "unsafe_quiet", "low_visibility", "safety_low"].includes(effect.type));
       const hasEmergency = agent.eventQueue?.some(event => ["emergency", "health"].includes(event.type));
       const fragile = Math.max(1, (age.healthFragility + age.safetyFragility) / 2);
       const healthZeroDeathMinutes = agent.ageStage === "elder" ? 720 : agent.ageStage === "child" || agent.ageStage === "teen" ? 1080 : 1440;
+      const elapsedMinutes = Math.max(0, Number(minutesPassed) || 0);
+      const canAccountThisClock = elapsedMinutes > 0 && agent.terminalState.lastMortalityClock !== world.clock;
 
       if (reasons.length) {
         agent.terminalState.since ??= world.clock;
-        agent.terminalState.criticalMinutes += Math.max(1, minutesPassed) * fragile;
+        if (canAccountThisClock) {
+          agent.terminalState.criticalMinutes += elapsedMinutes * fragile;
+          agent.terminalState.lastMortalityClock = world.clock;
+        }
         agent.terminalState.lastReasons = reasons;
       } else {
-        agent.terminalState.criticalMinutes = Math.max(0, agent.terminalState.criticalMinutes - Math.max(1, minutesPassed) * 2);
+        if (canAccountThisClock) {
+          agent.terminalState.criticalMinutes = Math.max(0, agent.terminalState.criticalMinutes - elapsedMinutes * 2);
+          agent.terminalState.lastMortalityClock = world.clock;
+        }
         agent.terminalState.lastReasons = [];
         agent.terminalState.since = null;
         if (agent.lifeStatus === "critical") {
@@ -2756,20 +2766,36 @@
         adjustNeeds(agent, { hunger: 12, health: 1, stress: 1 });
         pushRecord("濒危稳定", `${agent.name}先获得最低限度的食物补充，暂时阻止饥饿继续恶化。`, "survival", [agent.id]);
       }
-      if ((needs.health ?? 100) <= 0 && agent.position === "clinic") {
-        adjustNeeds(agent, { health: 8, safety: 4, stress: 2 });
-        pushRecord("濒危救治", `${agent.name}在诊所被基础救治稳定下来。`, "survival", [agent.id]);
+      const clinicStaffAvailable = clinicCareAvailableFor(agent);
+      const needsEmergencyCare = (needs.health ?? 100) <= 10 || (needs.hunger ?? 100) <= 5 || (needs.stress ?? 100) <= 5;
+      if (clinicStaffAvailable && needsEmergencyCare && agent.terminalState.lastClinicCareAt !== world.clock) {
+        adjustNeeds(agent, {
+          hunger: (needs.hunger ?? 100) <= 5 ? 12 : 0,
+          health: (needs.health ?? 100) <= 10 ? 12 : 4,
+          safety: 6,
+          stress: (needs.stress ?? 100) <= 5 ? 6 : 2,
+          comfort: 3
+        });
+        agent.terminalState.lastClinicCareAt = world.clock;
+        pushRecord("濒危救治", `${agent.name}在诊所有真实医护在场，获得最低限度急救、补液或护理，生命状态暂时稳住。`, "survival", [agent.id]);
       }
 
+      reasons = mortalityReasons(agent);
+      terminalCount = reasons.length;
+      agent.terminalState.lastReasons = reasons;
+      const latestNeeds = agent.needs || {};
       let cause = "";
-      if ((needs.safety ?? 100) <= 0 && (riskyPlace || hasEmergency) && agent.terminalState.criticalMinutes >= 180) cause = "安全风险失控";
-      else if ((needs.health ?? 100) <= 0 && (needs.safety ?? 100) <= 0 && agent.terminalState.criticalMinutes >= 360) cause = "健康与安全同时归零";
-      else if ((needs.health ?? 100) <= 0 && agent.terminalState.criticalMinutes >= healthZeroDeathMinutes) cause = "健康归零且未及时救治";
-      else if ((needs.hunger ?? 100) <= 0 && (needs.health ?? 100) <= 5 && agent.terminalState.criticalMinutes >= 2880) cause = "长期饥饿拖垮健康";
-      else if (terminalCount >= 3 && (needs.health ?? 100) <= 5 && agent.terminalState.criticalMinutes >= 720) cause = "多项生命状态同时崩溃";
+      if ((latestNeeds.safety ?? 100) <= 0 && (riskyPlace || hasEmergency) && agent.terminalState.criticalMinutes >= 180) cause = "安全风险失控";
+      else if ((latestNeeds.health ?? 100) <= 0 && (latestNeeds.safety ?? 100) <= 0 && agent.terminalState.criticalMinutes >= 360) cause = "健康与安全同时归零";
+      else if ((latestNeeds.health ?? 100) <= 0 && agent.terminalState.criticalMinutes >= healthZeroDeathMinutes) cause = "健康归零且未及时救治";
+      else if ((latestNeeds.hunger ?? 100) <= 0 && (latestNeeds.health ?? 100) <= 5 && agent.terminalState.criticalMinutes >= 2880) cause = "长期饥饿拖垮健康";
+      else if (terminalCount >= 3 && (latestNeeds.health ?? 100) <= 5 && agent.terminalState.criticalMinutes >= 720) cause = "多项生命状态同时崩溃";
 
       if (cause) markAgentDead(agent, cause);
-      else if (source) pushLog("生命状态", `${agent.name}濒危：${reasons.join("、")}，由${source}触发。`);
+      else if (source && reasons.length && agent.terminalState.lastMortalityLogClock !== world.clock) {
+        agent.terminalState.lastMortalityLogClock = world.clock;
+        pushLog("生命状态", `${agent.name}濒危：${reasons.join("、")}，由${source}触发。`);
+      }
     }
 
     function evaluateMortality(minutesPassed = 0, source = "状态系统") {
@@ -3119,6 +3145,12 @@
       return false;
     }
 
+    function clinicCareAvailableFor(agent) {
+      if (!agent || agent.position !== "clinic") return false;
+      const staff = locationStaff("clinic");
+      return staff.some(item => item.id !== agent.id) || isStaffForPlace(agent, "clinic");
+    }
+
     function applyBasicLifeMaintenance(minutesPassed) {
       const now = currentTime();
       const mealWindow = [7, 12, 18].includes(now.h);
@@ -3129,6 +3161,7 @@
         const slot = `${now.day}-${now.h}-${agent.id}`;
         const needs = agent.needs || {};
         const canUseFoodHere = foodAvailableAt(agent);
+        const canUseClinicCare = clinicCareAvailableFor(agent);
 
         if (mealWindow && canUseFoodHere && !rules.inClass && !agent.movement && (agent.needs?.hunger ?? 100) < 75 && !world.basicLifeDone[`meal-${slot}`]) {
           adjustNeeds(agent, { hunger: 24, comfort: 3, stress: 2 });
@@ -3144,17 +3177,606 @@
           pushRecord("基础求生", `${agent.name}先找到能入口的东西垫住，暂时避免饥饿继续拖垮健康。`, "survival", [agent.id]);
         }
 
-        if ((agent.needs?.health ?? 100) <= 10 && agent.position === "clinic" && !world.basicLifeDone[`clinic-${slot}`]) {
-          adjustNeeds(agent, { health: 10, safety: 5, stress: 4 });
-          agent.currentTask = "基础救治";
+        if (canUseClinicCare && ((agent.needs?.health ?? 100) <= 25 || (agent.needs?.hunger ?? 100) <= 5 || (agent.needs?.stress ?? 100) <= 5) && !world.basicLifeDone[`clinic-${slot}`]) {
+          adjustNeeds(agent, {
+            hunger: (agent.needs?.hunger ?? 100) <= 5 ? 12 : 0,
+            health: (agent.needs?.health ?? 100) <= 25 ? 12 : 3,
+            safety: 6,
+            stress: (agent.needs?.stress ?? 100) <= 5 ? 8 : 3,
+            comfort: 3
+          });
+          agent.currentTask = "基础急救";
           world.basicLifeDone[`clinic-${slot}`] = true;
-          pushRecord("基础救治", `${agent.name}在诊所获得基础处理，生命状态暂时稳住。`, "survival", [agent.id]);
+          pushRecord("基础救治", `${agent.name}在诊所有可用医护或护理条件，先获得最低限度急救、补液或照护。`, "survival", [agent.id]);
         }
       });
 
       if (Object.keys(world.basicLifeDone).length > 600) {
         const keep = Object.entries(world.basicLifeDone).slice(-300);
         world.basicLifeDone = Object.fromEntries(keep);
+      }
+    }
+
+    function serviceTypesForPlace(placeId) {
+      const place = places.find(item => item.id === placeId) || {};
+      const text = `${place.id || ""} ${place.name || ""}`;
+      const types = [];
+      if (/clinic|hospital|health|诊所|医院|卫生|医务|药房/.test(text)) types.push("medical");
+      if (/school|class|edu|学校|小学|中学|学院|教室|培训/.test(text)) types.push("education");
+      if (/store|shop|market|breakfast|restaurant|mall|小卖部|商店|超市|市场|早餐|餐|饭店|摊/.test(text)) types.push("commerce");
+      if (/office|gov|service|bank|company|镇政府|政府|办事|社区|窗口|银行|公司/.test(text)) types.push("office");
+      if (/police|guard|security|派出所|警务|保安|安保/.test(text)) types.push("safety");
+      return [...new Set(types)];
+    }
+
+    function professionCapabilities(agent) {
+      const text = `${agent?.job || ""} ${agent?.currentTask || ""}`;
+      const capabilities = [];
+      if (/医生|护士|医护|护理|药剂|诊所|卫生|中医|急救/.test(text)) capabilities.push("medical");
+      if (/老师|教师|校长|教务|辅导|班主任|助教/.test(text)) capabilities.push("education");
+      if (/店主|老板|店员|售货|收银|服务员|早餐店|小卖部|摊主|营业员/.test(text)) capabilities.push("commerce");
+      if (/公务|窗口|镇政府|职员|会计|社区|志愿|主任|办事|文员|管理员/.test(text)) capabilities.push("office");
+      if (/保安|警察|民警|安保|巡逻|安全员/.test(text)) capabilities.push("safety");
+      return [...new Set(capabilities)];
+    }
+
+    function professionRoleLabels(type) {
+      const map = {
+        medical: ["医生", "护士", "医护", "护理"],
+        education: ["老师", "班主任", "教务"],
+        commerce: ["店主", "店员", "售货员", "收银员", "服务员"],
+        office: ["窗口人员", "职员", "社区工作人员"],
+        safety: ["保安", "警务人员"]
+      };
+      return map[type] || [];
+    }
+
+    function professionActionType(type) {
+      return {
+        medical: "treat",
+        education: "teach",
+        commerce: "sell",
+        office: "process",
+        safety: "protect"
+      }[type] || "observe";
+    }
+
+    function professionTypeLabel(type) {
+      return {
+        medical: "医疗",
+        education: "教育",
+        commerce: "交易",
+        office: "办事",
+        safety: "安全"
+      }[type] || "职业";
+    }
+
+    function professionActionLabel(type) {
+      return {
+        medical: "看诊处理",
+        education: "学习处理",
+        commerce: "店内服务",
+        office: "窗口办理",
+        safety: "安全处理"
+      }[type] || "职业服务";
+    }
+
+    function professionServiceCooldown(type) {
+      return { medical: 90, education: 180, commerce: 90, office: 180, safety: 90 }[type] || 120;
+    }
+
+    function isProfessionalCandidate(agent, placeId, type, targetId = "") {
+      if (!agent || isDeadAgent(agent) || agent.id === targetId || agent.position !== placeId || agent.movement) return false;
+      const capabilities = professionCapabilities(agent);
+      if (!capabilities.includes(type)) return false;
+      const placeTypes = serviceTypesForPlace(placeId);
+      return placeTypes.includes(type) || isStaffForPlace(agent, placeId) || capabilities.length > 0;
+    }
+
+    function professionalCandidatesForRequest(request) {
+      return world.agents
+        .filter(agent => isProfessionalCandidate(agent, request.place, request.type, request.targetAgentId))
+        .map(agent => ({
+          id: agent.id,
+          name: agent.name,
+          job: agent.job,
+          currentTask: agent.currentTask,
+          capabilities: professionCapabilities(agent),
+          needs: agent.needs,
+          emotionVector: agent.emotionVector
+        }));
+    }
+
+    function professionRequestSeverity(agent, type) {
+      const needs = agent.needs || {};
+      if (type === "medical") {
+        const health = 100 - Number(needs.health ?? 100);
+        const hunger = Math.max(0, 45 - Number(needs.hunger ?? 100)) * 1.15;
+        const stress = Math.max(0, 35 - Number(needs.stress ?? 100)) * 0.85;
+        const critical = agent.lifeStatus === "critical" ? 30 : 0;
+        return Math.round(clamp(health + hunger + stress + critical, 35, 100));
+      }
+      if (type === "education") {
+        const duty = 100 - Number(needs.responsibility ?? 100);
+        const stress = Math.max(0, 45 - Number(needs.stress ?? 100)) * 0.45;
+        return Math.round(clamp(duty + stress, 25, 85));
+      }
+      if (type === "commerce") {
+        const hunger = 100 - Number(needs.hunger ?? 100);
+        const comfort = Math.max(0, 55 - Number(needs.comfort ?? 100)) * 0.4;
+        return Math.round(clamp(hunger + comfort, 25, 80));
+      }
+      if (type === "office") {
+        const duty = 100 - Number(needs.responsibility ?? 100);
+        const stress = Math.max(0, 50 - Number(needs.stress ?? 100)) * 0.35;
+        return Math.round(clamp(duty + stress, 25, 85));
+      }
+      if (type === "safety") {
+        return Math.round(clamp(100 - Number(needs.safety ?? 100), 30, 100));
+      }
+      return 40;
+    }
+
+    function professionRequestSummary(agent, type, severity) {
+      const place = placeName(agent.position);
+      if (type === "medical") {
+        return `${agent.name}在${place}需要医疗处理，健康${Math.round(agent.needs?.health ?? 100)}、饱腹${Math.round(agent.needs?.hunger ?? 100)}、抗压${Math.round(agent.needs?.stress ?? 100)}。`;
+      }
+      if (type === "education") return `${agent.name}在${place}需要老师处理学习或课堂责任，职责${Math.round(agent.needs?.responsibility ?? 100)}。`;
+      if (type === "commerce") return `${agent.name}在${place}需要真实在场店员/店主完成购买或餐食服务，饱腹${Math.round(agent.needs?.hunger ?? 100)}。`;
+      if (type === "office") return `${agent.name}在${place}需要窗口或办事人员处理事务，职责${Math.round(agent.needs?.responsibility ?? 100)}。`;
+      if (type === "safety") return `${agent.name}在${place}需要安全岗位协助，安全${Math.round(agent.needs?.safety ?? 100)}。`;
+      return `${agent.name}在${place}出现${professionTypeLabel(type)}服务请求，严重度${severity}。`;
+    }
+
+    function shouldCreateProfessionRequest(agent, type) {
+      if (!agent || isDeadAgent(agent) || agent.movement || agent.isSleeping) return false;
+      const needs = agent.needs || {};
+      const text = `${agent.currentTask || ""} ${(agent.eventQueue || []).map(event => `${event.title || ""}${event.reason || ""}`).join(" ")}`;
+      if (type === "medical") {
+        return agent.lifeStatus === "critical" || (needs.health ?? 100) <= 55 || (needs.hunger ?? 100) <= 10 || (needs.stress ?? 100) <= 10 || /看诊|急救|诊所|医院|不舒服|生病|复诊/.test(text);
+      }
+      if (type === "education") {
+        return /学生|小学生|高中生|初中生/.test(agent.job || "") && ((needs.responsibility ?? 100) <= 55 || /上课|作业|补课|老师|迟到|请假/.test(text));
+      }
+      if (type === "commerce") {
+        return (needs.hunger ?? 100) <= 70 || /买|购买|采购|吃|早餐|午餐|晚饭|排队|结账/.test(text);
+      }
+      if (type === "office") {
+        return (needs.responsibility ?? 100) <= 55 || /办事|登记|申请|投诉|窗口|缴费|证明|交接/.test(text);
+      }
+      if (type === "safety") {
+        return (needs.safety ?? 100) <= 55 || /危险|避险|求助|摔|冲突|迷路/.test(text);
+      }
+      return false;
+    }
+
+    function professionServiceRequestKey(agent, type, placeId) {
+      return `${type}|${placeId}|${agent.id}`;
+    }
+
+    function openProfessionRequestFor(agent, type, placeId) {
+      return (world.professionServiceRequests || []).find(request =>
+        request.targetAgentId === agent.id &&
+        request.type === type &&
+        request.place === placeId &&
+        request.status !== "handled" &&
+        request.status !== "cancelled"
+      );
+    }
+
+    function recentHandledProfessionRequest(agent, type, placeId) {
+      const cooldown = professionServiceCooldown(type);
+      return (world.professionServiceRequests || []).some(request =>
+        request.targetAgentId === agent.id &&
+        request.type === type &&
+        request.place === placeId &&
+        request.status === "handled" &&
+        world.clock - Number(request.handledAt ?? request.updatedAt ?? request.createdAt ?? 0) < cooldown
+      );
+    }
+
+    function enqueueProfessionRequestNotice(request) {
+      const candidates = professionalCandidatesForRequest(request);
+      const knownBy = new Set([request.targetAgentId, ...(request.knownBy || [])]);
+      candidates.forEach(candidate => {
+        knownBy.add(candidate.id);
+        const staff = world.agents.find(agent => agent.id === candidate.id);
+        if (staff) {
+          enqueueAgentEvent(staff, {
+            type: "profession_service_request",
+            title: `${request.targetName}需要${professionTypeLabel(request.type)}服务`,
+            reason: request.summary,
+            requestId: request.id,
+            createdAt: world.clock
+          });
+        }
+      });
+      request.knownBy = [...knownBy].slice(0, 20);
+    }
+
+    function syncProfessionServiceRequests() {
+      world.professionServiceRequests ||= [];
+      world.professionServiceDone ||= {};
+      const created = [];
+      world.agents.forEach(agent => {
+        if (!agent || isDeadAgent(agent) || agent.movement) return;
+        const serviceTypes = serviceTypesForPlace(agent.position);
+        serviceTypes.forEach(type => {
+          if (!shouldCreateProfessionRequest(agent, type)) return;
+          if (openProfessionRequestFor(agent, type, agent.position)) return;
+          if (recentHandledProfessionRequest(agent, type, agent.position)) return;
+          const severity = professionRequestSeverity(agent, type);
+          const request = {
+            id: `service-${world.clock}-${agent.id}-${type}-${Math.random().toString(16).slice(2)}`,
+            type,
+            place: agent.position,
+            placeName: placeName(agent.position),
+            targetAgentId: agent.id,
+            targetName: agent.name,
+            targetJob: agent.job,
+            severity,
+            status: "open",
+            requiredRoles: professionRoleLabels(type),
+            assignedTo: "",
+            knownBy: [agent.id],
+            createdAt: world.clock,
+            updatedAt: world.clock,
+            summary: professionRequestSummary(agent, type, severity),
+            result: "",
+            source: "local_detector"
+          };
+          enqueueProfessionRequestNotice(request);
+          world.professionServiceRequests.unshift(request);
+          created.push(request);
+        });
+      });
+      if (created.length) {
+        pushRecord("职业服务请求", `生成 ${created.length} 个真实在场服务请求：${created.slice(0, 4).map(item => `${item.targetName}/${professionTypeLabel(item.type)}`).join("、")}。`, "profession");
+      }
+      world.professionServiceRequests = world.professionServiceRequests
+        .filter(request => request.status !== "cancelled")
+        .sort((a, b) => Number(b.updatedAt || b.createdAt || 0) - Number(a.updatedAt || a.createdAt || 0))
+        .slice(0, 120);
+    }
+
+    function professionServicePayload() {
+      const requests = (world.professionServiceRequests || [])
+        .filter(request => request.status !== "handled" && request.status !== "cancelled")
+        .filter(request => world.clock - Number(request.createdAt || 0) <= 1440)
+        .map(request => {
+          const target = world.agents.find(agent => agent.id === request.targetAgentId);
+          if (!target) return null;
+          const professionalCandidates = professionalCandidatesForRequest(request);
+          if (request.status === "blocked" && !professionalCandidates.length && world.clock - Number(request.updatedAt || request.createdAt || 0) < 60) return null;
+          return {
+            ...request,
+            professionalCandidates,
+            target: agentSummary(target),
+            locationPopulation: locationPopulation(request.place, request.targetAgentId),
+            locationRuntimeState: world.locationRuntime?.[request.place] || null,
+            locationAgentState: locationBoxes[request.place]?.agentState || null
+          };
+        })
+        .filter(Boolean);
+      return {
+        time: currentTime().text,
+        virtualMinute: world.clock,
+        townRhythm: townRhythm(),
+        weatherBox: world.weatherBox,
+        locations: places.map(place => ({ id: place.id, name: place.name, serviceTypes: serviceTypesForPlace(place.id) })),
+        locationAgentSummary: locationAgentSummaryPayload(),
+        locationRuntime: world.locationRuntime || {},
+        requests,
+        recentHandled: (world.professionServiceRequests || [])
+          .filter(request => request.status === "handled")
+          .slice(0, 20)
+          .map(request => ({
+            id: request.id,
+            type: request.type,
+            place: request.place,
+            targetAgentId: request.targetAgentId,
+            assignedTo: request.assignedTo,
+            result: request.result,
+            handledAt: request.handledAt
+          })),
+        agents: world.agents.filter(agent => !isDeadAgent(agent)).map(agent => ({
+          id: agent.id,
+          name: agent.name,
+          job: agent.job,
+          position: agent.position,
+          currentTask: agent.currentTask,
+          lifeStatus: agent.lifeStatus || "alive",
+          capabilities: professionCapabilities(agent),
+          needs: agent.needs,
+          emotionVector: agent.emotionVector
+        }))
+      };
+    }
+
+    function localProfessionServiceAssignments(requests) {
+      return (requests || []).map(request => {
+        const candidates = professionalCandidatesForRequest(request);
+        const professional = candidates[0];
+        if (!professional) {
+          return {
+            requestId: request.id,
+            professionalId: "",
+            actionType: "observe",
+            priority: request.severity,
+            status: "blocked",
+            reason: `${placeName(request.place)}没有真实在场的${professionRoleLabels(request.type).join("/") || "职业人员"}。`
+          };
+        }
+        return {
+          requestId: request.id,
+          professionalId: professional.id,
+          actionType: professionActionType(request.type),
+          priority: request.severity,
+          summary: `${professional.name}处理${request.targetName}的${professionTypeLabel(request.type)}请求。`,
+          targetNeedDelta: defaultProfessionTargetNeedDelta(request),
+          targetEmotionDelta: defaultProfessionTargetEmotionDelta(request),
+          professionalNeedDelta: defaultProfessionProfessionalNeedDelta(request),
+          professionalEmotionDelta: { tired: request.severity >= 75 ? 3 : 1, anxious: request.severity >= 80 ? 2 : 0, calm: request.severity >= 80 ? -1 : 0 },
+          followupEvent: defaultProfessionFollowup(request),
+          status: "handled",
+          reason: "本地职业服务兜底"
+        };
+      });
+    }
+
+    function defaultProfessionTargetNeedDelta(request) {
+      const target = world.agents.find(agent => agent.id === request.targetAgentId);
+      const needs = target?.needs || {};
+      if (request.type === "medical") {
+        return {
+          health: request.severity >= 80 ? 18 : 12,
+          hunger: (needs.hunger ?? 100) <= 20 ? 10 : 0,
+          safety: 8,
+          stress: 8,
+          comfort: 5
+        };
+      }
+      if (request.type === "education") return { responsibility: 10, stress: 4, comfort: 2 };
+      if (request.type === "commerce") return { hunger: /早餐|餐|饭|store|小卖部|早餐/.test(`${request.placeName || ""}${request.place || ""}`) ? 18 : 8, comfort: 4, stress: 3 };
+      if (request.type === "office") return { responsibility: 9, stress: 5, comfort: 2 };
+      if (request.type === "safety") return { safety: 14, stress: 6, comfort: 3 };
+      return { comfort: 3, stress: 2 };
+    }
+
+    function defaultProfessionTargetEmotionDelta(request) {
+      if (request.type === "medical") return { anxious: -8, tired: -2, hopeful: 5, calm: 5 };
+      if (request.type === "education") return { anxious: -3, curious: 4, hopeful: 3, calm: 2 };
+      if (request.type === "commerce") return { anxious: -2, happy: 3, calm: 2 };
+      if (request.type === "office") return { anxious: -4, hopeful: 2, calm: 3 };
+      if (request.type === "safety") return { anxious: -6, calm: 5, hopeful: 2 };
+      return { calm: 2 };
+    }
+
+    function defaultProfessionProfessionalNeedDelta(request) {
+      const load = request.severity >= 80 ? -4 : -2;
+      if (request.type === "medical") return { responsibility: 5, stress: load, comfort: -1 };
+      if (request.type === "education") return { responsibility: 4, stress: -1 };
+      if (request.type === "commerce") return { responsibility: 3, stress: -1 };
+      if (request.type === "office") return { responsibility: 4, stress: -1 };
+      if (request.type === "safety") return { responsibility: 5, stress: -2 };
+      return { responsibility: 2 };
+    }
+
+    function defaultProfessionFollowup(request) {
+      if (request.type === "medical") return request.severity >= 75 ? "需要继续观察，必要时复诊或联系家人。" : "完成基础处理，后续留意身体反应。";
+      if (request.type === "education") return "留下课堂/学习跟进提示。";
+      if (request.type === "commerce") return "完成当前店内服务。";
+      if (request.type === "office") return "留下事务办理进度。";
+      if (request.type === "safety") return "确认当前安全风险已被看见。";
+      return "职业服务已处理。";
+    }
+
+    function clampServiceNeedDelta(type, delta = {}, role = "target") {
+      const keys = ["hunger", "hygiene", "health", "social", "responsibility", "stress", "comfort", "safety"];
+      const cap = role === "professional" ? 8 : (type === "medical" ? 22 : type === "safety" ? 16 : 14);
+      return Object.fromEntries(keys.map(key => [key, clamp(Number(delta[key] || 0), -cap, cap)]).filter(([, value]) => value !== 0));
+    }
+
+    function clampServiceEmotionDelta(delta = {}) {
+      const keys = ["happy", "anxious", "angry", "sad", "tired", "lonely", "hopeful", "calm", "curious"];
+      return Object.fromEntries(keys.map(key => [key, clamp(Number(delta[key] || 0), -10, 10)]).filter(([, value]) => value !== 0));
+    }
+
+    function mergeDelta(base = {}, extra = {}) {
+      const keys = new Set([...Object.keys(base || {}), ...Object.keys(extra || {})]);
+      return Object.fromEntries([...keys].map(key => [key, Number(base[key] || 0) + Number(extra[key] || 0)]).filter(([, value]) => value !== 0));
+    }
+
+    function normalizeProfessionAssignment(raw, request) {
+      const local = localProfessionServiceAssignments([request])[0] || {};
+      const status = ["handled", "assigned", "blocked"].includes(raw?.status) ? raw.status : local.status;
+      const professionalId = String(raw?.professionalId || local.professionalId || "");
+      return {
+        requestId: String(raw?.requestId || request.id),
+        professionalId,
+        actionType: String(raw?.actionType || local.actionType || professionActionType(request.type)).slice(0, 24),
+        priority: clamp(Number(raw?.priority ?? local.priority ?? request.severity), 0, 100),
+        summary: sanitizeGlobalSocialText(String(raw?.summary || local.summary || "")).slice(0, 140),
+        targetNeedDelta: clampServiceNeedDelta(request.type, mergeDelta(defaultProfessionTargetNeedDelta(request), raw?.targetNeedDelta || {}), "target"),
+        targetEmotionDelta: clampServiceEmotionDelta(mergeDelta(defaultProfessionTargetEmotionDelta(request), raw?.targetEmotionDelta || {})),
+        professionalNeedDelta: clampServiceNeedDelta(request.type, mergeDelta(defaultProfessionProfessionalNeedDelta(request), raw?.professionalNeedDelta || {}), "professional"),
+        professionalEmotionDelta: clampServiceEmotionDelta(raw?.professionalEmotionDelta || local.professionalEmotionDelta || {}),
+        followupEvent: sanitizeGlobalSocialText(String(raw?.followupEvent || local.followupEvent || defaultProfessionFollowup(request))).slice(0, 120),
+        status,
+        reason: sanitizeGlobalSocialText(String(raw?.reason || local.reason || "")).slice(0, 120)
+      };
+    }
+
+    function applyProfessionBlocked(request, assignment, reason) {
+      const target = world.agents.find(agent => agent.id === request.targetAgentId);
+      request.status = "blocked";
+      request.updatedAt = world.clock;
+      request.result = reason;
+      request.assignedTo = assignment.professionalId || "";
+      if (target) {
+        enqueueAgentEvent(target, {
+          type: "profession_service_blocked",
+          title: `${professionTypeLabel(request.type)}服务暂时受阻`,
+          reason,
+          requestId: request.id,
+          createdAt: world.clock
+        });
+      }
+      const box = locationBoxes[request.place];
+      if (box?.agentState) {
+        box.agentState.pressure = clamp((box.agentState.pressure || 0) + 2, 0, 100);
+        box.agentState.serviceLoad = clamp((box.agentState.serviceLoad || 0) + 4, 0, 100);
+      }
+    }
+
+    function applyProfessionAssigned(request, assignment, target, professional) {
+      request.status = "assigned";
+      request.assignedTo = professional.id;
+      request.updatedAt = world.clock;
+      request.result = assignment.reason || assignment.followupEvent || `${professional.name}已接手${target.name}的${professionTypeLabel(request.type)}请求。`;
+      request.knownBy = [...new Set([...(request.knownBy || []), target.id, professional.id])].slice(0, 20);
+      enqueueAgentEvent(professional, {
+        type: "profession_service_assigned",
+        title: `接手${target.name}的请求`,
+        reason: request.result,
+        requestId: request.id,
+        createdAt: world.clock
+      });
+      enqueueAgentEvent(target, {
+        type: "profession_service_waiting",
+        title: `${professionTypeLabel(request.type)}请求已被接手`,
+        reason: request.result,
+        requestId: request.id,
+        createdAt: world.clock
+      });
+      pushRecord("职业服务接手", request.result, "profession");
+    }
+
+    function applyProfessionHandled(request, assignment, target, professional) {
+      const targetNeed = assignment.targetNeedDelta || {};
+      const targetEmotion = assignment.targetEmotionDelta || {};
+      const professionalNeed = assignment.professionalNeedDelta || {};
+      const professionalEmotion = assignment.professionalEmotionDelta || {};
+      adjustNeeds(target, targetNeed);
+      adjustEmotion(target, targetEmotion);
+      adjustNeeds(professional, professionalNeed);
+      adjustEmotion(professional, professionalEmotion);
+      target.currentTask = `${professionActionLabel(request.type)}后观察`;
+      professional.currentTask = `处理${professionTypeLabel(request.type)}服务`;
+      const resultText = assignment.summary || `${professional.name}在${placeName(request.place)}处理了${target.name}的${professionTypeLabel(request.type)}请求。`;
+      request.status = "handled";
+      request.assignedTo = professional.id;
+      request.updatedAt = world.clock;
+      request.handledAt = world.clock;
+      request.result = assignment.followupEvent || resultText;
+      request.knownBy = [...new Set([...(request.knownBy || []), target.id, professional.id, ...localWitnessIds(request.place, "")])].slice(0, 20);
+      addMemory(target, request.severity >= 75 ? "emotional" : "short", `${currentTime().text}，${professional.name}在${placeName(request.place)}帮我处理了${professionTypeLabel(request.type)}请求：${request.result}`, request.severity >= 75 ? 5 : 3);
+      addMemory(professional, "short", `${currentTime().text}，我处理了${target.name}的${professionTypeLabel(request.type)}请求。`, 3);
+      enqueueAgentEvent(target, {
+        type: "profession_service_result",
+        title: `${professionTypeLabel(request.type)}服务完成`,
+        reason: request.result,
+        requestId: request.id,
+        createdAt: world.clock
+      });
+      enqueueAgentEvent(professional, {
+        type: "profession_service_handled",
+        title: `已处理${target.name}的请求`,
+        reason: resultText,
+        requestId: request.id,
+        createdAt: world.clock
+      });
+      spreadKnowledge(`${target.name}在${placeName(request.place)}接受了${professionTypeLabel(request.type)}服务`, professional.id, request.knownBy);
+      const box = locationBoxes[request.place];
+      if (box?.agentState) {
+        box.agentState.serviceLoad = clamp((box.agentState.serviceLoad || 0) - 6, 0, 100);
+        box.agentState.pressure = clamp((box.agentState.pressure || 0) - 3, 0, 100);
+        box.agentState.morale = clamp((box.agentState.morale || 0) + 1, 0, 100);
+      }
+      updateMortalityState(target, 0, "职业服务");
+      updateMortalityState(professional, 0, "职业服务");
+      pushRecord("职业服务", resultText, "profession");
+    }
+
+    function applyProfessionService(result, payload) {
+      const requestsById = new Map((world.professionServiceRequests || []).map(request => [request.id, request]));
+      const payloadRequests = new Map((payload?.requests || []).map(request => [request.id, request]));
+      const rawAssignments = Array.isArray(result?.assignments) ? result.assignments : [];
+      const normalized = rawAssignments
+        .map(raw => {
+          const request = requestsById.get(raw?.requestId) || payloadRequests.get(raw?.requestId);
+          return request ? normalizeProfessionAssignment(raw, request) : null;
+        })
+        .filter(Boolean)
+        .sort((a, b) => Number(b.priority || 0) - Number(a.priority || 0));
+      const handledIds = new Set();
+      normalized.forEach(assignment => {
+        if (handledIds.has(assignment.requestId)) return;
+        const request = requestsById.get(assignment.requestId);
+        if (!request || request.status === "handled" || request.status === "cancelled") return;
+        const target = world.agents.find(agent => agent.id === request.targetAgentId);
+        if (!target || isDeadAgent(target)) {
+          request.status = "cancelled";
+          request.result = "目标角色已不存在或已死亡，服务请求取消。";
+          request.updatedAt = world.clock;
+          return;
+        }
+        if (target.position !== request.place || target.movement) {
+          applyProfessionBlocked(request, assignment, `${target.name}已经不在${placeName(request.place)}，服务请求等待重新确认。`);
+          return;
+        }
+        const professional = world.agents.find(agent => agent.id === assignment.professionalId);
+        if (assignment.status === "blocked" || !professional) {
+          applyProfessionBlocked(request, assignment, assignment.reason || "没有可用职业人员。");
+          return;
+        }
+        if (!isProfessionalCandidate(professional, request.place, request.type, target.id)) {
+          applyProfessionBlocked(request, assignment, `${professional?.name || assignment.professionalId}不是当前地点真实可用的${professionTypeLabel(request.type)}人员。`);
+          return;
+        }
+        if (assignment.status === "assigned") {
+          applyProfessionAssigned(request, assignment, target, professional);
+          handledIds.add(assignment.requestId);
+          return;
+        }
+        applyProfessionHandled(request, assignment, target, professional);
+        handledIds.add(assignment.requestId);
+      });
+      (Array.isArray(result?.logs) ? result.logs : []).slice(0, 3).forEach(log => {
+        const title = String(log.title || "职业服务").slice(0, 30);
+        const body = sanitizeGlobalSocialText(String(log.body || "")).slice(0, 160);
+        if (body) pushLog(title, body);
+      });
+      world.professionServiceRequests = (world.professionServiceRequests || [])
+        .filter(request => request.status !== "cancelled")
+        .sort((a, b) => Number(b.updatedAt || b.createdAt || 0) - Number(a.updatedAt || a.createdAt || 0))
+        .slice(0, 120);
+    }
+
+    async function runProfessionServiceAgent() {
+      syncProfessionServiceRequests();
+      const payload = professionServicePayload();
+      if (!payload.requests.length) return;
+      const localAssignments = localProfessionServiceAssignments(payload.requests);
+      if (!world.config.aiEnabled) {
+        applyProfessionService({ assignments: localAssignments }, payload);
+        return;
+      }
+      try {
+        const batchResults = await aiAgentBatches("professionServiceAgent", payload, "requests");
+        const merged = mergeBatchArrays(batchResults, ["assignments"]);
+        const covered = new Set((merged.assignments || []).map(item => item.requestId));
+        const safetyFallback = localAssignments.filter(item => {
+          const request = payload.requests.find(req => req.id === item.requestId);
+          return request && !covered.has(item.requestId) && (request.severity >= 75 || request.type === "medical");
+        });
+        applyProfessionService({ assignments: [...(merged.assignments || []), ...safetyFallback], logs: merged.logs || [] }, payload);
+        pushRecord("职业服务 Agent", `ProfessionServiceAgent 检查 ${payload.requests.length} 个请求，AI 返回 ${merged.assignments?.length || 0} 个处理建议。`, "profession");
+      } catch (error) {
+        if (error?.type === "ai_retry_cancelled") throw error;
+        pushLog("ProfessionServiceAgent 失败", error.message);
+        applyProfessionService({ assignments: localAssignments }, payload);
       }
     }
 
@@ -3801,6 +4423,8 @@
       locationDailyPlans: {},
       locationRuntime: {},
       processRuntime: { updates: [], logs: [], updatedAt: 0 },
+      professionServiceRequests: [],
+      professionServiceDone: {},
       socialPatterns: { households: [], groups: [], pairs: [], notes: [], updatedAt: 0 },
       eventImpacts: [],
       informationFlow: [],
@@ -3841,6 +4465,7 @@
     let townEntered = false;
     let setupCreateInProgress = false;
     let setupBootstrapInProgress = false;
+    let frontendRetryEpoch = 0;
 
     function resetLocationBoxes() {
       locationBoxes = Object.fromEntries(places.map(place => [place.id, locationBoxes[place.id] || makeLocationBox(place)]));
@@ -3941,6 +4566,51 @@
       };
     }
 
+    function repairMortalityOvercountDeaths(agents, clock) {
+      const currentClock = Number.isFinite(Number(clock)) ? Number(clock) : 0;
+      const repairedDay = Math.max(1, Math.floor(currentClock / 1440) + 1);
+      const staffAt = placeId => agents.some(agent => {
+        if (!agent || agent.position !== placeId || agent.lifeStatus === "dead") return false;
+        const text = `${agent.job || ""} ${agent.currentTask || ""}`;
+        return staffKeywordsForPlace(placeId).some(keyword => text.includes(keyword));
+      });
+      agents.forEach(agent => {
+        if (agent.lifeStatus !== "dead" || agent.position !== "clinic") return;
+        if (!/长期饥饿|多项生命状态|健康归零/.test(String(agent.deathCause || ""))) return;
+        const terminal = agent.terminalState || {};
+        const since = Number(terminal.since ?? agent.deathAt ?? currentClock);
+        const elapsed = Math.max(0, currentClock - since);
+        const critical = Number(terminal.criticalMinutes || 0);
+        const looksOvercounted = critical > elapsed * 1.5 + 120;
+        if (!looksOvercounted || !staffAt("clinic")) return;
+        agent.lifeStatus = "critical";
+        agent.deathAt = null;
+        agent.deathCause = "";
+        agent.currentTask = "基础急救";
+        agent.needs ||= initialNeeds(agent.job);
+        agent.needs.hunger = Math.max(agent.needs.hunger ?? 0, 12);
+        agent.needs.health = Math.max(agent.needs.health ?? 0, 12);
+        agent.needs.stress = Math.max(agent.needs.stress ?? 0, 8);
+        agent.needs.comfort = Math.max(agent.needs.comfort ?? 0, 6);
+        agent.needs.safety = Math.max(agent.needs.safety ?? 0, 80);
+        agent.terminalState = {
+          ...terminal,
+          criticalMinutes: Math.min(critical, Math.max(0, elapsed)),
+          lastReasons: mortalityReasons(agent),
+          repairedFromOvercount: true,
+          repairedAt: currentClock
+        };
+        agent.memory ||= { short: [], long: [], emotional: [], secret: [], rumor: [] };
+        agent.memory.emotional ||= [];
+        agent.memory.emotional.unshift({
+          text: "系统修正：此前因濒危时间重复累计产生的死亡记录改为濒危急救状态。",
+          strength: 80,
+          importance: 5,
+          day: repairedDay
+        });
+      });
+    }
+
     function restoreLocationBoxes(saved = {}) {
       resetLocationBoxes();
       Object.entries(saved || {}).forEach(([id, box]) => {
@@ -3964,6 +4634,7 @@
       let loadedAgents = Array.isArray(saved.agents) ? saved.agents.map(normalizeLoadedAgent) : [];
       if (saved.needScale !== NEED_SCALE_VERSION) loadedAgents.forEach(migrateNeedsToVitalScale);
       loadedAgents = ensureRealAgentNames(loadedAgents);
+      repairMortalityOvercountDeaths(loadedAgents, saved.clock);
       const resetSeedData = ensureRealSeedNames(resetSeedDataFromSavedWorld(saved, loadedAgents));
       const seedData = ensureRealSeedNames(Array.isArray(saved.seedData) && saved.seedData.length ? saved.seedData.map(normalizeSeed) : resetSeedData);
       const startClock = Number.isFinite(Number(saved.startClock)) ? Number(saved.startClock) : (Number.isFinite(Number(saved.clock)) ? Number(saved.clock) : 8 * 60);
@@ -4002,6 +4673,8 @@
         locationDailyPlans: saved.locationDailyPlans || {},
         locationRuntime: saved.locationRuntime || {},
         processRuntime: saved.processRuntime || { updates: [], logs: [], updatedAt: 0 },
+        professionServiceRequests: Array.isArray(saved.professionServiceRequests) ? saved.professionServiceRequests : [],
+        professionServiceDone: saved.professionServiceDone || {},
         socialPatterns: saved.socialPatterns || { households: [], groups: [], pairs: [], notes: [], updatedAt: 0 },
         eventImpacts: Array.isArray(saved.eventImpacts) ? saved.eventImpacts : [],
         informationFlow: Array.isArray(saved.informationFlow) ? saved.informationFlow : [],
@@ -4670,31 +5343,25 @@
       const concurrency = Math.min(batches.length, effectiveAiRequestConcurrency());
       setSetupProgress(`人物批次：${batches.length} 批并行，最多 ${concurrency} 个请求`, 28, true);
       let done = 0;
-      const results = await runLimitedParallel(batches, concurrency, async item => {
-        try {
-          const result = await ai("setupAgentBatchAgent", {
-            premise: byId("setupPrompt").value,
-            blueprint: {
-              roleMix: blueprint.roleMix,
-              relationshipPlan: blueprint.relationshipPlan,
-              targetAgentCount,
-              targetLocationCount: setupPlaces.length
-            },
-            places: setupPlaces.map(place => ({ id: place.id, name: place.name, capacity: place.capacity })),
-            slots: item.batchSlots,
-            existingAgents: seedRows,
-            usedNames: seedRows.map(seed => seed.name).filter(Boolean),
-            aiBatch: { index: item.batchIndex + 1, total: batches.length, size: item.batchSlots.length }
-          });
-          return { batchIndex: item.batchIndex, slots: item.batchSlots, result };
-        } catch (error) {
-          pushLog("人物批次 AI 兜底", `第 ${item.batchIndex + 1} 批：${error.message}`);
-          return { batchIndex: item.batchIndex, slots: item.batchSlots, result: { agents: fallbackSetupBatchAgents(item.batchSlots, setupPlaces), logs: [] } };
-        } finally {
-          done += 1;
-          setSetupProgress(`人物批次完成 ${done}/${batches.length}`, 28 + Math.round(done / Math.max(1, batches.length) * 28), true);
-        }
-      });
+      const results = await runDeferredRetryParallel(batches, concurrency, async item => {
+        const result = await aiOnce("setupAgentBatchAgent", {
+          premise: byId("setupPrompt").value,
+          blueprint: {
+            roleMix: blueprint.roleMix,
+            relationshipPlan: blueprint.relationshipPlan,
+            targetAgentCount,
+            targetLocationCount: setupPlaces.length
+          },
+          places: setupPlaces.map(place => ({ id: place.id, name: place.name, capacity: place.capacity })),
+          slots: item.batchSlots,
+          existingAgents: seedRows,
+          usedNames: seedRows.map(seed => seed.name).filter(Boolean),
+          aiBatch: { index: item.batchIndex + 1, total: batches.length, size: item.batchSlots.length }
+        });
+        done += 1;
+        setSetupProgress(`人物批次完成 ${done}/${batches.length}`, 28 + Math.round(done / Math.max(1, batches.length) * 28), true);
+        return { batchIndex: item.batchIndex, slots: item.batchSlots, result };
+      }, { label: "建镇人物批次" });
       return {
         rows: mergeSetupAgentRows(results, slots, setupPlaces, targetAgentCount),
         batches: results
@@ -5066,12 +5733,72 @@
       return results;
     }
 
+    function sleep(ms) {
+      return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    function makeFrontendRetryCancelledError() {
+      const error = new Error("前端 Agent 单位重试已停止");
+      error.type = "ai_retry_cancelled";
+      return error;
+    }
+
+    function retryUnitLabel(item, index) {
+      const agentIds = item?.batchAgents?.map(agent => agent.name || agent.id)
+        || item?.batchPlaces?.map(place => place.name || place.id)
+        || item?.agents?.map(agent => agent.name || agent.id)
+        || item?.batch?.map(entry => entry.agentId || entry.queueId)
+        || item?.map?.(entry => entry.agentId || entry.queueId)
+        || [];
+      const label = agentIds.filter(Boolean).slice(0, 3).join("、");
+      return label || `单位${index + 1}`;
+    }
+
+    async function runDeferredRetryParallel(items, limit, worker, options = {}) {
+      const results = new Array(items.length);
+      let pending = items.map((item, index) => ({ item, index, attempts: 0 }));
+      let round = 1;
+      const retryMs = Number(options.retryMs || 1000);
+      const epoch = frontendRetryEpoch;
+      while (pending.length) {
+        if (epoch !== frontendRetryEpoch) throw makeFrontendRetryCancelledError();
+        const roundItems = pending;
+        pending = [];
+        const settled = await runLimitedParallel(roundItems, limit, async unit => {
+          try {
+            return { ok: true, unit, value: await worker(unit.item, unit.index, unit.attempts + 1, round) };
+          } catch (error) {
+            return { ok: false, unit, error };
+          }
+        });
+        settled.forEach(item => {
+          if (item.ok) {
+            results[item.unit.index] = item.value;
+            return;
+          }
+          if (epoch !== frontendRetryEpoch || item.error?.type === "ai_retry_cancelled") throw makeFrontendRetryCancelledError();
+          pending.push({ ...item.unit, attempts: item.unit.attempts + 1, lastError: item.error });
+        });
+        if (pending.length) {
+          const sample = pending.slice(0, 4).map(unit => `${retryUnitLabel(unit.item, unit.index)}#${unit.attempts}`).join("、");
+          pushLog(
+            "Agent 单位重试",
+            `${options.label || "AI"} 第 ${round} 轮完成，${pending.length}/${roundItems.length} 个单位失败；等待其它单位完成后 ${retryMs}ms 再重试：${sample}。`
+          );
+          await sleep(retryMs);
+          round += 1;
+        }
+      }
+      return results;
+    }
+
     async function aiAgentBatches(task, payload, agentKey = "agents") {
       const agents = Array.isArray(payload?.[agentKey]) ? payload[agentKey] : [];
       if (!agents.length) return [];
       const batchSize = judgementBatchSize();
       if (agents.length <= batchSize) {
-        return [{ batchIndex: 0, agents, result: await ai(task, payload) }];
+        const [result] = await runDeferredRetryParallel([payload], 1, batchPayload => aiOnce(task, batchPayload), { label: taskLabel(task) });
+        return [{ batchIndex: 0, agents, result }];
       }
       const batches = chunkList(agents, batchSize).map((batchAgents, batchIndex) => ({ batchAgents, batchIndex }));
       const concurrency = Math.min(batches.length, effectiveAiRequestConcurrency());
@@ -5080,7 +5807,7 @@
         `${taskLabel(task)}：${agents.length} 项拆成 ${batches.length} 批，每批最多 ${batchSize} 项，并发上限 ${concurrency}。`,
         "ai_batch"
       );
-      return runLimitedParallel(batches, concurrency, async item => {
+      return runDeferredRetryParallel(batches, concurrency, async item => {
         const batchPayload = {
           ...payload,
           [agentKey]: item.batchAgents,
@@ -5096,9 +5823,9 @@
         return {
           batchIndex: item.batchIndex,
           agents: item.batchAgents,
-          result: await ai(task, batchPayload)
+          result: await aiOnce(task, batchPayload)
         };
-      });
+      }, { label: taskLabel(task) });
     }
 
     function pickKeys(source = {}, ids = new Set()) {
@@ -5110,7 +5837,8 @@
       if (!placeItems.length) return [];
       const batchSize = judgementBatchSize();
       if (placeItems.length <= batchSize) {
-        return [{ batchIndex: 0, places: placeItems, result: await ai(task, payload) }];
+        const [result] = await runDeferredRetryParallel([payload], 1, batchPayload => aiOnce(task, batchPayload), { label: taskLabel(task) });
+        return [{ batchIndex: 0, places: placeItems, result }];
       }
       const batches = chunkList(placeItems, batchSize).map((batchPlaces, batchIndex) => ({ batchPlaces, batchIndex }));
       const concurrency = Math.min(batches.length, effectiveAiRequestConcurrency());
@@ -5119,7 +5847,7 @@
         `${taskLabel(task)}：${placeItems.length} 个地点拆成 ${batches.length} 批，每批最多 ${batchSize} 个，并发上限 ${concurrency}。`,
         "ai_batch"
       );
-      return runLimitedParallel(batches, concurrency, async item => {
+      return runDeferredRetryParallel(batches, concurrency, async item => {
         const ids = new Set(item.batchPlaces.map(place => place.id));
         const batchPayload = {
           ...payload,
@@ -5141,9 +5869,9 @@
         return {
           batchIndex: item.batchIndex,
           places: item.batchPlaces,
-          result: await ai(task, batchPayload)
+          result: await aiOnce(task, batchPayload)
         };
-      });
+      }, { label: taskLabel(task) });
     }
 
     function mergeBatchArrays(batchResults, arrayKeys) {
@@ -5184,7 +5912,7 @@
       const map = {
         breakfast: ["早餐店", "店主", "老板", "帮工", "服务员", "店员"],
         store: ["小卖部", "店主", "老板", "售货", "店员"],
-        clinic: ["医生", "护士", "药剂", "诊所"],
+        clinic: ["医生", "护士", "医护", "护理", "药剂", "诊所", "值班"],
         school: ["老师", "校长", "教务"],
         office: ["上班族", "职员", "主管", "办公室"],
         apartment: [],
@@ -5757,7 +6485,24 @@
       if (!impacts.length) return [];
       if (!world.config.aiEnabled) return applyInformationPropagation(fallbackInformationPropagation(impacts), impacts, "local");
       try {
-        const result = await ai("informationPropagationAgent", informationPropagationPayload(impacts));
+        const batchSize = judgementBatchSize();
+        const batches = chunkList(impacts, batchSize);
+        const concurrency = Math.min(batches.length, effectiveAiRequestConcurrency());
+        if (batches.length > 1) {
+          pushRecord("信息传播分批", `${impacts.length} 条事件影响拆成 ${batches.length} 批，每批最多 ${batchSize} 条，并发上限 ${concurrency}。`, "ai_batch");
+        }
+        const batchResults = await runDeferredRetryParallel(batches, concurrency, async (batch, batchIndex) => ({
+          result: await aiOnce("informationPropagationAgent", {
+            ...informationPropagationPayload(batch),
+            propagationBatch: {
+              index: batchIndex + 1,
+              total: batches.length,
+              size: batch.length,
+              totalImpacts: impacts.length
+            }
+          })
+        }), { label: "信息传播" });
+        const result = mergeBatchArrays(batchResults, ["informationFlows"]);
         return applyInformationPropagation(result, impacts, "AI");
       } catch (error) {
         pushLog("信息传播 AI 兜底", error.message);
@@ -5828,8 +6573,8 @@
       };
     }
 
-    function relationshipDynamicsPayload(impacts = [], flows = []) {
-      const pairs = relationshipCandidatePairs(impacts, flows);
+    function relationshipDynamicsPayload(impacts = [], flows = [], pairsOverride = null) {
+      const pairs = Array.isArray(pairsOverride) ? pairsOverride : relationshipCandidatePairs(impacts, flows);
       return {
         time: currentTime().text,
         virtualMinute: world.clock,
@@ -5901,7 +6646,24 @@
       world.relationshipDynamicsDone[key] = true;
       if (!world.config.aiEnabled) return applyRelationshipDynamics(fallbackRelationshipDynamics(pairs), pairs, "local");
       try {
-        const result = await ai("relationshipDynamicsAgent", relationshipDynamicsPayload(impacts, flows));
+        const batchSize = judgementBatchSize();
+        const batches = chunkList(pairs, batchSize);
+        const concurrency = Math.min(batches.length, effectiveAiRequestConcurrency());
+        if (batches.length > 1) {
+          pushRecord("关系惯性分批", `${pairs.length} 对关系拆成 ${batches.length} 批，每批最多 ${batchSize} 对，并发上限 ${concurrency}。`, "ai_batch");
+        }
+        const batchResults = await runDeferredRetryParallel(batches, concurrency, async (batch, batchIndex) => ({
+          result: await aiOnce("relationshipDynamicsAgent", {
+            ...relationshipDynamicsPayload(impacts, flows, batch),
+            relationshipBatch: {
+              index: batchIndex + 1,
+              total: batches.length,
+              size: batch.length,
+              totalPairs: pairs.length
+            }
+          })
+        }), { label: "关系惯性" });
+        const result = mergeBatchArrays(batchResults, ["pairDynamics"]);
         return applyRelationshipDynamics(result, pairs, "AI");
       } catch (error) {
         pushLog("关系惯性 AI 兜底", error.message);
@@ -6087,6 +6849,56 @@
       };
     }
 
+    function idsFromSocialProcessInputs(impacts = [], flows = [], dynamics = []) {
+      return new Set([
+        ...impacts.flatMap(impact => [impact.sourceAgentId, ...(impact.directKnownBy || []), ...(impact.affectedAgents || []).map(item => item.agentId)]),
+        ...flows.flatMap(flow => [flow.source, ...(flow.knownBy || []), ...(flow.transmissions || []).flatMap(item => [item.from, item.to])]),
+        ...dynamics.flatMap(item => [item.from, item.to])
+      ].filter(Boolean));
+    }
+
+    function socialProcessBatchInputs(impacts = [], flows = [], dynamics = [], batchSize = judgementBatchSize()) {
+      const batches = [];
+      const usedDynamicKeys = new Set();
+      const dynamicKey = item => [item.from, item.to].sort().join("|");
+      const relatedImpactsFor = ids => impacts.filter(impact =>
+        ids.has(impact.sourceAgentId) ||
+        (impact.directKnownBy || []).some(id => ids.has(id)) ||
+        (impact.affectedAgents || []).some(item => ids.has(item.agentId))
+      );
+      const relatedFlowsFor = ids => flows.filter(flow =>
+        ids.has(flow.source) ||
+        (flow.knownBy || []).some(id => ids.has(id)) ||
+        (flow.transmissions || []).some(item => ids.has(item.from) || ids.has(item.to))
+      );
+      chunkList(flows, batchSize).forEach(flowBatch => {
+        const ids = idsFromSocialProcessInputs([], flowBatch, []);
+        const relatedDynamics = dynamics.filter(item => {
+          const related = ids.has(item.from) || ids.has(item.to);
+          if (related) usedDynamicKeys.add(dynamicKey(item));
+          return related;
+        });
+        batches.push({
+          impacts: relatedImpactsFor(ids),
+          flows: flowBatch,
+          dynamics: relatedDynamics
+        });
+      });
+      const remainingDynamics = dynamics.filter(item => !usedDynamicKeys.has(dynamicKey(item)));
+      chunkList(remainingDynamics, batchSize).forEach(dynamicBatch => {
+        const ids = idsFromSocialProcessInputs([], [], dynamicBatch);
+        batches.push({
+          impacts: relatedImpactsFor(ids),
+          flows: relatedFlowsFor(ids).slice(0, batchSize),
+          dynamics: dynamicBatch
+        });
+      });
+      if (!batches.length) {
+        chunkList(impacts, batchSize).forEach(impactBatch => batches.push({ impacts: impactBatch, flows: [], dynamics: [] }));
+      }
+      return batches.length ? batches : [{ impacts, flows, dynamics }];
+    }
+
     async function runSocialProcessAgent(impacts = [], flows = [], dynamics = []) {
       const key = `social-${currentTime().day}-${Math.floor((world.clock % 1440) / 60)}`;
       if (world.socialProcessDone[key]) return [];
@@ -6094,7 +6906,25 @@
       const fallback = fallbackSocialProcesses(impacts, flows, dynamics);
       if (!world.config.aiEnabled) return applySocialProcesses(fallback, "local");
       try {
-        const result = await ai("socialProcessAgent", socialProcessPayload(impacts, flows, dynamics));
+        const batchSize = judgementBatchSize();
+        const batches = socialProcessBatchInputs(impacts, flows, dynamics, batchSize);
+        const concurrency = Math.min(batches.length, effectiveAiRequestConcurrency());
+        if (batches.length > 1) {
+          pushRecord("社交流程分批", `${batches.length} 个事件/信息/关系簇并发检查，每批最多约 ${batchSize} 条主线，并发上限 ${concurrency}。`, "ai_batch");
+        }
+        const batchResults = await runDeferredRetryParallel(batches, concurrency, async (batch, batchIndex) => ({
+          result: await aiOnce("socialProcessAgent", {
+            ...socialProcessPayload(batch.impacts, batch.flows, batch.dynamics),
+            socialProcessBatch: {
+              index: batchIndex + 1,
+              total: batches.length,
+              impacts: batch.impacts.length,
+              flows: batch.flows.length,
+              dynamics: batch.dynamics.length
+            }
+          })
+        }), { label: "社交流程" });
+        const result = mergeBatchArrays(batchResults, ["socialProcesses"]);
         const applied = applySocialProcesses(result, "AI");
         return applied.length ? applied : applySocialProcesses(fallback, "local");
       } catch (error) {
@@ -6139,6 +6969,14 @@
       }
       return data;
     }
+    async function aiOnce(task, payload) {
+      return api("/api/ai/once", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ task, payload })
+      });
+    }
+
     async function ai(task, payload) {
       return api("/api/ai", {
         method: "POST",
@@ -6147,22 +6985,38 @@
       });
     }
 
+    async function cancelAiRetryRequests() {
+      frontendRetryEpoch += 1;
+      try {
+        await api("/api/ai/cancel", { method: "POST" }, CONFIG_TIMEOUT_MS);
+      } catch {}
+    }
+
     function setAiBackoff(error) {
+      const messageText = String(error?.message || "");
+      if (error?.type === "ai_retry_cancelled") {
+        world.aiBackoffUntil = 0;
+        pushLog("AI 重试已停止", "已手动暂停，当前等待中的 AI 重试已取消。");
+        render();
+        return false;
+      }
       world.aiFailureStreak += 1;
-      const milliseconds = 300;
+      const milliseconds = 1000;
       world.aiBackoffUntil = Date.now() + milliseconds;
       const last = world.logs[0];
-      const message = `${error.message}。${milliseconds < 1000 ? `${milliseconds} 毫秒` : `${Math.round(milliseconds / 1000)} 秒`}后再尝试调度。`;
+      const message = `连续错误 ${world.aiFailureStreak} 次：${messageText}。${milliseconds < 1000 ? `${milliseconds} 毫秒` : `${Math.round(milliseconds / 1000)} 秒`}后继续重试，手动暂停才会停止。`;
       if (!(last?.title === "AI 暂时退避" && last?.body === message && Date.now() - (last.realAt || 0) < 3000)) {
         pushLog("AI 暂时退避", message);
         if (world.logs[0]) world.logs[0].realAt = Date.now();
       }
       render();
+      return true;
     }
 
     function isRecoverableNetworkError(error) {
       const message = String(error?.message || "");
       return ["upstream_error", "invalid_json", "timeout", "key_pool_unavailable"].includes(error?.type)
+        || /too\s*many\s*requests|rate[_\s-]*limit|rate\s*limited|请求过多|限流|频率/i.test(message)
         || message.includes("Failed to fetch")
         || message.includes("Load failed")
         || message.includes("NetworkError")
@@ -6298,6 +7152,21 @@
           place: item.place,
           history: item.history.slice(-2)
         })),
+        professionServices: (world.professionServiceRequests || [])
+          .filter(request => request.targetAgentId === agent.id || request.assignedTo === agent.id || (request.knownBy || []).includes(agent.id))
+          .slice(0, 4)
+          .map(request => ({
+            id: request.id,
+            type: request.type,
+            place: request.place,
+            targetAgentId: request.targetAgentId,
+            targetName: request.targetName,
+            status: request.status,
+            severity: request.severity,
+            assignedTo: request.assignedTo,
+            summary: request.summary,
+            result: request.result
+          })),
         socialGroups: (world.socialStructures?.groups || []).filter(group => group.members.includes(agent.id)).slice(0, 4),
         currentLocationInstitution: world.locationInstitutions?.[agent.position] || null,
         currentLocationRuntime: world.locationRuntime?.[agent.position] || null,
@@ -6360,6 +7229,19 @@
           dueDay: item.dueDay,
           knownBy: item.knownBy
         })).slice(0, 12),
+        professionServiceRequests: (world.professionServiceRequests || [])
+          .filter(request => request.status !== "handled" && request.status !== "cancelled")
+          .slice(0, 20)
+          .map(request => ({
+            id: request.id,
+            type: request.type,
+            place: request.place,
+            targetAgentId: request.targetAgentId,
+            targetName: request.targetName,
+            severity: request.severity,
+            status: request.status,
+            assignedTo: request.assignedTo
+          })),
         knowledgeFlow: world.knowledgeFlow.slice(0, 10),
         unresolvedEventChains: world.eventChains.filter(chain => chain.status === "open").slice(0, 8),
         publicEvents: world.publicEvents.slice(0, 6),
@@ -6408,6 +7290,7 @@
             locationEffects: summary.locationEffects,
             visibleAgents: summary.visibleAgents,
             activeObligations: summary.activeObligations,
+            professionServices: summary.professionServices,
             visibleKnowledge: summary.visibleKnowledge,
             memorySummary: summary.memorySummary,
             currentLocationPopulation: locationPopulation(agent.position, agent.id),
@@ -6512,7 +7395,7 @@
         `${payload.agents.length} 个角色拆成 ${batches.length} 批，每批最多 ${batchSize} 人；5 类判断共 ${requests.length} 个请求，并发上限 ${concurrency}。`,
         "judgement"
       );
-      const results = await runLimitedParallel(requests, concurrency, async item => {
+      const results = await runDeferredRetryParallel(requests, concurrency, async item => {
         const batchPayload = {
           ...payload,
           agents: item.agents,
@@ -6523,8 +7406,8 @@
             totalAgents: payload.agents.length
           }
         };
-        return { ...item, result: await ai(item.task, batchPayload) };
-      });
+        return { ...item, result: await aiOnce(item.task, batchPayload) };
+      }, { label: "行动前判断" });
       results.forEach(item => item.apply(item.result));
       pushRecord("判断 Agent", `需求意图/场景规则/危机分诊/知识边界/后果判断完成 ${payload.agents.length} 个角色的分批并行动作前判断。`, "judgement");
     }
@@ -6558,6 +7441,12 @@
         agent: agentSummary(agent),
         processRuntimeHint: (world.processRuntime?.updates || []).find(item => item.agentId === agent.id) || null,
         socialPattern: socialPatternForAgent(agent),
+        professionServices: (world.professionServiceRequests || [])
+          .filter(request => request.targetAgentId === agent.id || request.assignedTo === agent.id || (request.knownBy || []).includes(agent.id))
+          .slice(0, 4),
+        currentLocationServiceRequests: (world.professionServiceRequests || [])
+          .filter(request => request.place === agent.position && request.status !== "cancelled")
+          .slice(0, 8),
         eventQueue: agent.eventQueue.slice(0, 4),
         unresolvedEventChains: world.eventChains
           .filter(chain => chain.status === "open" && chain.participants.includes(agent.id))
@@ -8779,11 +9668,11 @@
       if (batches.length > 1) {
         pushRecord("ObligationAgent 分批", `${successful.length} 个行动结果拆成 ${batches.length} 批，每批最多 ${batchSize} 个，并发上限 ${concurrency}。`, "ai_batch");
       }
-      const batchResults = await runLimitedParallel(batches, concurrency, async batch => {
+      const batchResults = await runDeferredRetryParallel(batches, concurrency, async batch => {
         const ids = new Set(batch.flatMap(item => [item.queueId, item.agentId].filter(Boolean)));
         const batchActions = actions.filter(action => ids.has(action.id) || ids.has(action.agentId));
-        return { result: await ai("obligationAgent", obligationExtractPayload(batchActions, batch, timePassages)) };
-      });
+        return { result: await aiOnce("obligationAgent", obligationExtractPayload(batchActions, batch, timePassages)) };
+      }, { label: "承诺 Agent" });
       const result = mergeBatchArrays(batchResults, ["obligations", "relationHints"]);
       applyAiObligations(Array.isArray(result.obligations) ? result.obligations : [], "承诺 Agent");
       applyRelationHints(Array.isArray(result.relationHints) ? result.relationHints : []);
@@ -8945,11 +9834,11 @@
       if (batches.length > 1) {
         pushRecord("MultiDimensionalStateAgent 分批", `${successful.length} 个行动结果拆成 ${batches.length} 批，每批最多 ${batchSize} 个，并发上限 ${concurrency}。`, "ai_batch");
       }
-      const batchResults = await runLimitedParallel(batches, concurrency, async batch => {
+      const batchResults = await runDeferredRetryParallel(batches, concurrency, async batch => {
         const ids = new Set(batch.flatMap(item => [item.queueId, item.agentId].filter(Boolean)));
         const batchActions = actions.filter(action => ids.has(action.id) || ids.has(action.agentId));
-        return { result: await ai("multiDimensionalStateAgent", multiDimensionalStatePayload(batchActions, batch, timePassages)) };
-      });
+        return { result: await aiOnce("multiDimensionalStateAgent", multiDimensionalStatePayload(batchActions, batch, timePassages)) };
+      }, { label: "多维状态" });
       const result = mergeBatchArrays(batchResults, ["agentUpdates", "locationImpacts"]);
       result._actedPlaces = [...new Set(successful.flatMap(item => {
         const agent = world.agents.find(agentItem => agentItem.id === item.agentId);
@@ -9016,7 +9905,7 @@
       if (batches.length > 1) {
         pushRecord("Scheduler 分批", `${payload.agents.length} 个角色拆成 ${batches.length} 批，每批最多 ${batchSize} 人，并发上限 ${concurrency}。`, "scheduler");
       }
-      const results = await runLimitedParallel(batches, concurrency, async item => {
+      const results = await runDeferredRetryParallel(batches, concurrency, async item => {
         const batchPayload = {
           ...payload,
           agents: item.agents,
@@ -9028,8 +9917,8 @@
             totalAgents: payload.agents.length
           }
         };
-        return { ...item, result: await ai("scheduler", batchPayload) };
-      });
+        return { ...item, result: await aiOnce("scheduler", batchPayload) };
+      }, { label: "Scheduler" });
       const candidates = results
         .flatMap(item => (Array.isArray(item.result?.candidates) ? item.result.candidates : [])
           .filter(candidate => item.ids.has(candidate.agentId)))
@@ -9703,25 +10592,25 @@
         agentId: item.agentId,
         payload: actionPayload(item)
       }));
-      const batchSize = judgementBatchSize();
-      const batches = chunkList(items, batchSize);
-      const concurrency = Math.min(batches.length, effectiveActionBatchConcurrency(batchSize));
-      if (batches.length > 1) {
-        pushRecord("AgentAction 分批", `${items.length} 个行动拆成 ${batches.length} 批，每批最多 ${batchSize} 个，批并发 ${concurrency}，真实请求上限约 ${concurrency * batchSize}。`, "ai_batch");
+      const concurrency = Math.min(items.length, effectiveAiRequestConcurrency());
+      if (items.length > 1) {
+        pushRecord("AgentAction 单位并发", `${items.length} 个角色行动按 Agent 单位并发，请求上限 ${concurrency}；失败角色会等本轮其它角色跑完后再重试。`, "ai_batch");
       }
-      const batchResponses = await runLimitedParallel(batches, concurrency, async batchItems => api("/api/actions/batch", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ items: batchItems })
-      }));
-      const results = batchResponses.flatMap(response => Array.isArray(response.results) ? response.results : []);
-      const failures = results.filter(item => !item.ok);
-      if (failures.length) {
-        const first = failures[0].error || {};
-        const error = new Error(`${failures.length} 个 AgentAction 失败：${first.message || "unknown error"}`);
-        error.type = first.type || "batch_action_error";
-        throw error;
-      }
+      const results = await runDeferredRetryParallel(items, concurrency, async item => {
+        const response = await api("/api/actions/batch", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ items: [item] })
+        });
+        const result = Array.isArray(response.results) ? response.results[0] : null;
+        if (!result?.ok) {
+          const failure = result?.error || {};
+          const error = new Error(failure.message || "agentAction failed");
+          error.type = failure.type || "batch_action_error";
+          throw error;
+        }
+        return result;
+      }, { label: "AgentAction" });
       const timePassages = await runTimePassageAgent(active, results);
       const settlement = await runStateSettlementAgent(active, results, timePassages);
       const actionEvents = [];
@@ -9780,6 +10669,8 @@
         locationDailyPlans: JSON.parse(JSON.stringify(world.locationDailyPlans || {})),
         locationRuntime: JSON.parse(JSON.stringify(world.locationRuntime || {})),
         processRuntime: JSON.parse(JSON.stringify(world.processRuntime || { updates: [], logs: [], updatedAt: 0 })),
+        professionServiceRequests: JSON.parse(JSON.stringify(world.professionServiceRequests || [])),
+        professionServiceDone: JSON.parse(JSON.stringify(world.professionServiceDone || {})),
         socialPatterns: JSON.parse(JSON.stringify(world.socialPatterns || { households: [], groups: [], pairs: [], notes: [], updatedAt: 0 })),
         eventImpacts: JSON.parse(JSON.stringify(world.eventImpacts || [])),
         informationFlow: JSON.parse(JSON.stringify(world.informationFlow || [])),
@@ -9823,7 +10714,10 @@
           runLocationRuntimeAgent(),
           runSocialPatternAgent()
         ]);
-        await runProcessManagerAgent();
+        await Promise.all([
+          runProcessManagerAgent(),
+          runProfessionServiceAgent()
+        ]);
         await runJudgementAgents();
         await runScheduler();
         const actions = world.actionQueue.splice(0, effectiveMaxActions());
@@ -9880,6 +10774,8 @@
         world.locationDailyPlans = snapshot.locationDailyPlans;
         world.locationRuntime = snapshot.locationRuntime;
         world.processRuntime = snapshot.processRuntime;
+        world.professionServiceRequests = snapshot.professionServiceRequests;
+        world.professionServiceDone = snapshot.professionServiceDone;
         world.socialPatterns = snapshot.socialPatterns;
         world.eventImpacts = snapshot.eventImpacts;
         world.informationFlow = snapshot.informationFlow;
@@ -9912,11 +10808,7 @@
         });
         world.records = world.records.slice(0, snapshot.recordsLength);
         world.logs = world.logs.slice(0, snapshot.logsLength);
-        if (isRecoverableNetworkError(error)) {
-          setAiBackoff(error);
-        } else {
-          pushLog("循环错误", error.message);
-        }
+        setAiBackoff(error);
       } finally {
         world.cycleInProgress = false;
       }
@@ -9933,12 +10825,12 @@
       try {
         await cycle();
       } catch (error) {
-        if (isRecoverableNetworkError(error)) setAiBackoff(error);
-        else pushLog("循环错误", error.message);
+        setAiBackoff(error);
         render();
       }
       if (world.running && world.config.schedulerIntervalMs > 0) {
-        world.loopTimer = setTimeout(runAutoLoop, world.config.schedulerIntervalMs);
+        const nextDelay = inAiBackoff() ? Math.max(0, world.aiBackoffUntil - Date.now()) : world.config.schedulerIntervalMs;
+        world.loopTimer = setTimeout(runAutoLoop, nextDelay);
       }
     }
 
@@ -10413,14 +11305,14 @@
         { name: "天气/地点事件/地点每日", mode: "天气后并行", type: "parallel", split: `Weather 全局；之后 LocationEvent ${placeBatches} 批 + LocationDaily ${placeBatches} 批并行`, effect: "刷新日期、天气、地点可见小事件、地点承诺种子和地点今日重点。" },
         { name: "地点链", mode: "全局", type: "serial", split: "等待 LocationDaily 完成后推进 LocationChain", effect: "推进学校、诊所、小卖部等连续事件链。" },
         { name: "地点运行/社会模式", mode: "并行", type: "parallel", split: `LocationRuntime ${placeBatches} 批；SocialPattern 全局`, effect: "读取地点链，更新地点是否营业、真实在场岗位、队列、风险和社会压力背景。" },
-        { name: "过程管理", mode: "分批", type: "batched", split: `activeProcess 按 ${batchSize} 个一批`, effect: "优先推进未完成过程，决定等待、阻塞、继续或可再次调度。" },
+        { name: "过程管理/职业服务", mode: "并行分批", type: "parallel", split: `ProcessManager 按 ${batchSize} 个过程一批；ProfessionService 按 ${batchSize} 个真实服务请求一批`, effect: "同时推进未完成过程和职业服务请求；职业人员只处理同地点真实在场请求，并回写双方事件/记忆。" },
         { name: "行动前判断", mode: "5类并行分批", type: "batched", split: `5 个判断 Agent × ${agentBatches} 批`, effect: "计算需求意图、场景规则、危机、知识边界和后果限制。" },
         { name: "Scheduler", mode: "分批合并", type: "batched", split: `${agentBatches} 批候选，按优先级合并`, effect: "只选谁该行动和行动类型，不直接改变世界。" },
         { name: "AgentAction", mode: "行动分批", type: "batched", split: `最多 ${actionLimit} 个 Action，约 ${actionBatches} 批；批并发 ${actionBatchConcurrency}，真实请求约 ${actionBatchConcurrency * batchSize}`, effect: "每个被调度角色生成一个小行动或推进一个过程片段。" },
         { name: "TimePassage", mode: "行动分批", type: "batched", split: `按 ${batchSize} 个行动一批`, effect: "判断本轮耗时、余时轻量活动、是否完成；未完成则留下 activeProcess 下回合继续。" },
         { name: "WorldGuard", mode: "本地硬审查", type: "serial", split: "行动前后各审一次", effect: "检查知识边界、地点、工作人员、全镇广播、死亡/复活、未完成行动和隐藏 NPC；不合法则删除或降级。" },
         { name: "状态提交", mode: "行动分批", type: "batched", split: `StateSettlement 按 ${batchSize} 个行动一批`, effect: "AI 给补丁建议，仍需本地 WorldGuard/Reducer 审查后才改需求、情绪、记忆、关系。" },
-        { name: "事件影响/传播/社交流程", mode: "分批+串行", type: "batched", split: `EventImpact 按 ${batchSize} 个事件；InformationPropagation 汇总；RelationshipDynamics 慢变量；SocialProcess 流程`, effect: "判断事件牵动谁、消息怎样传播、关系趋势如何漂移，以及是否形成误会/冲突/澄清。" },
+        { name: "事件影响/传播/社交流程", mode: "分批并发+依赖串行", type: "batched", split: `EventImpact 按事件分批；InformationPropagation 按影响分批；RelationshipDynamics 按关系对分批；SocialProcess 按事件/信息/关系簇分批`, effect: "每一层内部并发，层与层保持因果顺序：先事件影响，再有限传播，再关系惯性，最后形成误会/冲突/澄清流程。" },
         { name: "后置 Agent", mode: "并行+分批", type: "parallel", split: "MultiDimensional / Obligation 分批；Reporter 汇总", effect: "结算多维状态、承诺债务、关系提示和日志摘要。" },
         { name: "时间推进", mode: "串行", type: "serial", split: `${world.config.virtualMinutesPerPulse || 0} 虚拟分钟`, effect: "推进时钟、睡眠、移动、基础生理、地点影响和死亡检查。" },
         { name: "TimeDecay", mode: "角色分批", type: "batched", split: `${agentBatches} 批个体调制`, effect: "在本地生理时钟后做因人而异的轻量修正。" },
@@ -10899,6 +11791,7 @@
     async function openSettings(message = "") {
       if (world.running) {
         world.running = false;
+        void cancelAiRetryRequests();
         scheduleLoop();
         render();
       }
@@ -11106,7 +11999,16 @@
         render();
         return;
       }
-      world.running = !world.running;
+      const nextRunning = !world.running;
+      world.running = nextRunning;
+      if (!nextRunning) {
+        world.aiBackoffUntil = 0;
+        if (world.loopTimer) clearTimeout(world.loopTimer);
+        world.loopTimer = null;
+        void cancelAiRetryRequests();
+      } else {
+        clearAiBackoff();
+      }
       scheduleLoop();
       render();
     });

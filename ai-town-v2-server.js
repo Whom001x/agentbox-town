@@ -10,7 +10,7 @@ const AI_TIMEOUT_MS = Number(process.env.AI_TOWN_TIMEOUT_MS || 180000);
 const MAX_REQUEST_BODY_BYTES = Number(process.env.AI_TOWN_MAX_REQUEST_BODY_BYTES || 10_000_000);
 const DEFAULT_MAX_CONCURRENT_PER_KEY = Number(process.env.AI_TOWN_MAX_CONCURRENT_PER_KEY || 20);
 const MAX_ACTIONS_HARD_LIMIT = 200;
-const AI_RETRY_DELAY_MS = Number(process.env.AI_TOWN_RETRY_DELAY_MS || 300);
+const AI_RETRY_DELAY_MS = Number(process.env.AI_TOWN_RETRY_DELAY_MS || 1000);
 
 const aiConfig = {
   apiKeys: (process.env.AI_TOWN_API_KEYS || process.env.AI_TOWN_API_KEY || process.env.OPENAI_API_KEY || "")
@@ -37,13 +37,17 @@ const metrics = {
   lastTask: "",
   lastDurationMs: 0,
   lastError: "",
-  lastStatus: "idle"
+  lastStatus: "idle",
+  continuousErrors: 0
 };
 let keyCursor = 0;
 let keyHealth = [];
 let metricsEpoch = 0;
 let callSeq = 0;
+let aiContinuousErrors = 0;
+let aiRetryEpoch = 0;
 const callLogs = [];
+const activeAiControllers = new Set();
 
 function ensureSaveDir() {
   fs.mkdirSync(SAVE_DIR, { recursive: true });
@@ -102,10 +106,35 @@ function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+function makeAiRetryCancelledError() {
+  const error = new Error("AI 重试已手动停止");
+  error.status = 499;
+  error.type = "ai_retry_cancelled";
+  return error;
+}
+
+function cancelAiRetries(reason = "手动停止 AI 重试") {
+  aiRetryEpoch += 1;
+  aiContinuousErrors = 0;
+  metrics.continuousErrors = 0;
+  metrics.lastStatus = "cancelled";
+  metrics.lastError = reason;
+  activeAiControllers.forEach(controller => controller.abort());
+  activeAiControllers.clear();
+}
+
+async function delayUnlessCancelled(ms, retryEpoch) {
+  await delay(ms);
+  if (retryEpoch !== aiRetryEpoch) throw makeAiRetryCancelledError();
+}
+
 function isRetryableAiError(error) {
   const message = String(error?.message || "");
   if (isPermanentAiError(error)) return false;
   return ["upstream_error", "timeout", "key_pool_unavailable"].includes(error?.type)
+    || error?.status === 429
+    || /too\s*many\s*requests|rate[_\s-]*limit|rate\s*limited|请求过多|限流|频率/i.test(message)
+    || /fetch failed|econnrefused|econnreset|enotfound|socket hang up|network/i.test(message)
     || message.includes("temporarily unavailable")
     || message.includes("Upstream")
     || message.includes("timeout")
@@ -156,6 +185,8 @@ function resetMetrics() {
   metrics.lastDurationMs = 0;
   metrics.lastError = "";
   metrics.lastStatus = "idle";
+  metrics.continuousErrors = 0;
+  aiContinuousErrors = 0;
   keyHealth.forEach(item => {
     item.success = 0;
     item.failure = 0;
@@ -350,6 +381,7 @@ function modelForTask(task, payload) {
   if (task === "locationChainAgent") return aiConfig.moduleModels.locationChainAgent || aiConfig.moduleModels.locationDailyAgent || aiConfig.moduleModels.locationInstitutionAgent || aiConfig.moduleModels.heaven || aiConfig.model;
   if (task === "locationRuntimeAgent") return aiConfig.moduleModels.locationRuntimeAgent || aiConfig.moduleModels.locationInstitutionAgent || aiConfig.moduleModels.heaven || aiConfig.model;
   if (task === "processManagerAgent") return aiConfig.moduleModels.processManagerAgent || aiConfig.moduleModels.stateSettlementAgent || aiConfig.moduleModels.agentAction || aiConfig.moduleModels.heaven || aiConfig.model;
+  if (task === "professionServiceAgent") return aiConfig.moduleModels.professionServiceAgent || aiConfig.moduleModels.locationRuntimeAgent || aiConfig.moduleModels.stateSettlementAgent || aiConfig.moduleModels.review || aiConfig.model;
   if (task === "socialPatternAgent") return aiConfig.moduleModels.socialPatternAgent || aiConfig.moduleModels.socialStructureAgent || aiConfig.moduleModels.relation || aiConfig.moduleModels.memory || aiConfig.model;
   if (task === "eventImpactAgent") return aiConfig.moduleModels.eventImpactAgent || aiConfig.moduleModels.relation || aiConfig.moduleModels.memory || aiConfig.moduleModels.review || aiConfig.model;
   if (task === "informationPropagationAgent") return aiConfig.moduleModels.informationPropagationAgent || aiConfig.moduleModels.eventImpactAgent || aiConfig.moduleModels.memory || aiConfig.moduleModels.relation || aiConfig.model;
@@ -440,6 +472,9 @@ function publicMetrics() {
   const effectiveKeyCount = aiEnabled ? Math.max(1, aiConfig.apiKeys.length) : 0;
   return {
     ...metrics,
+    continuousErrors: aiContinuousErrors,
+    maxContinuousErrors: null,
+    retryMode: "until_manual_stop",
     model: aiConfig.model,
     aiEnabled,
     hasApiKey: aiConfig.apiKeys.length > 0,
@@ -602,6 +637,7 @@ function writeJudgementFiles(saveFolder, world = {}) {
   writeJsonFile(path.join(agDir, "location-daily.json"), world.locationDailyPlans || {});
   writeJsonFile(path.join(agDir, "location-chains.json"), world.locationChains || []);
   writeJsonFile(path.join(agDir, "location-runtime.json"), world.locationRuntime || {});
+  writeJsonFile(path.join(agDir, "profession-services.json"), world.professionServiceRequests || []);
   writeJsonFile(path.join(agDir, "event-impacts.json"), world.eventImpacts || []);
   writeJsonFile(path.join(agDir, "information-flow.json"), world.informationFlow || []);
   writeJsonFile(path.join(agDir, "relationship-dynamics.json"), world.relationshipDynamics || { pairs: [], notes: [], updatedAt: 0 });
@@ -767,6 +803,7 @@ function fallbackJson(task) {
   if (task === "locationChainAgent") return { locationChains: [], logs: [] };
   if (task === "locationRuntimeAgent") return { locations: [], logs: [] };
   if (task === "processManagerAgent") return { processUpdates: [], logs: [] };
+  if (task === "professionServiceAgent") return { assignments: [], logs: [] };
   if (task === "socialPatternAgent") return { householdPatterns: [], groupPatterns: [], pairPatterns: [], logs: [] };
   if (task === "eventImpactAgent") return { eventImpacts: [], logs: [] };
   if (task === "informationPropagationAgent") return { informationFlows: [], logs: [] };
@@ -865,7 +902,7 @@ function systemPrompt(task) {
     "visibleKnowledge 是严格知识边界；只能使用其中的信息，不要使用全局日志、别人记忆或未公开信息。",
     "移动不能瞬移；如果要去新地点，只能提出 newLocation，由系统按路线处理。",
     "信息不能瞬间全镇知道；只能通过 KnowledgeFlow、同地点观察、直接交谈传播。",
-    "严格遵守模块权限：SocialStructureAgent 只能生成社会结构，SocialEmbeddingAgent 只能补齐已有角色的住所/邻里/群组/初始熟人落点，LocationInstitutionAgent 只能生成地点制度，LocationDailyAgent 只能生成地点今日重点，LocationRuntimeAgent 只能判断地点此刻运行态，ProcessManagerAgent 只能管理已有未完成过程，SocialPatternAgent 只能判断长期社会模式，EventImpactAgent 只能判断已发生事件牵动谁，InformationPropagationAgent 只能判断信息如何有限传播，RelationshipDynamicsAgent 只能判断关系慢变量和小幅漂移，NeedIntentAgent 只能判断动机，ContextRuleAgent 只能判断场景规则，CrisisTriageAgent 只能判断危机打断建议，KnowledgeJudgeAgent 只能判断知识边界，OutcomeJudgeAgent 只能判断后果分数/去向/后续要求，FamilySyncAgent 只能判断家庭晚间同步，Scheduler 只能选人，AgentAction 只能给单个角色一个小行动，WeatherAgent 只能写天气，LocationEventAgent 只能写地点可见小事件，TimeDecayAgent 只能做生理微调，ObligationAgent 只能抽取承诺，StateSettlementAgent 只能给已发生行动提出状态补丁建议，MultiDimensionalStateAgent 只能结算已发生行动的状态影响，DailyPlanner/SelfNarrative/PersonalityConsistency 只能在 0 点做日计划、自我叙事和人格锚点。",
+    "严格遵守模块权限：SocialStructureAgent 只能生成社会结构，SocialEmbeddingAgent 只能补齐已有角色的住所/邻里/群组/初始熟人落点，LocationInstitutionAgent 只能生成地点制度，LocationDailyAgent 只能生成地点今日重点，LocationRuntimeAgent 只能判断地点此刻运行态，ProcessManagerAgent 只能管理已有未完成过程，ProfessionServiceAgent 只能把已有真实服务请求分配给同地点真实在场职业人员并提出小幅服务结果建议，SocialPatternAgent 只能判断长期社会模式，EventImpactAgent 只能判断已发生事件牵动谁，InformationPropagationAgent 只能判断信息如何有限传播，RelationshipDynamicsAgent 只能判断关系慢变量和小幅漂移，NeedIntentAgent 只能判断动机，ContextRuleAgent 只能判断场景规则，CrisisTriageAgent 只能判断危机打断建议，KnowledgeJudgeAgent 只能判断知识边界，OutcomeJudgeAgent 只能判断后果分数/去向/后续要求，FamilySyncAgent 只能判断家庭晚间同步，Scheduler 只能选人，AgentAction 只能给单个角色一个小行动，WeatherAgent 只能写天气，LocationEventAgent 只能写地点可见小事件，TimeDecayAgent 只能做生理微调，ObligationAgent 只能抽取承诺，StateSettlementAgent 只能给已发生行动提出状态补丁建议，MultiDimensionalStateAgent 只能结算已发生行动的状态影响，DailyPlanner/SelfNarrative/PersonalityConsistency 只能在 0 点做日计划、自我叙事和人格锚点。",
     "LocationChainAgent 只能管理已有地点里的连续事件链阶段、可见范围和地点约束；SocialProcessAgent 只能管理已确认事件引发的误会、冲突、隐瞒、澄清、和解流程。二者都不能创造角色行动、隐藏 NPC、全镇广播或未公开事实。",
     "任何 Agent 都不能替其他模块提前完成职责：不能跨模块生成死亡、复活、传送、全镇广播、全局记忆、隐藏 NPC、未发生行动、未公开事实、未在场互动或大规模剧情推进。",
     "权限白名单优先于叙事合理性：即使某件事看起来合理，只要不属于当前 Agent 的输出权限，就必须不写。",
@@ -918,6 +955,9 @@ function systemPrompt(task) {
   }
   if (task === "processManagerAgent") {
     return `${common}\n你是 ProcessManagerAgent。你的权限只有检查已有 activeProcess 是否应该继续、等待、阻塞或轻微推进。你不能创建新行动，不能替 AgentAction 完成行动，不能声明已经到达/已经治疗/已经买到/已经请假，不能移动角色，不能改需求/情绪/关系/记忆。你只能输出过程阶段、轻微进度建议、阻塞原因、下次可调度窗口和优先级提示。`;
+  }
+  if (task === "professionServiceAgent") {
+    return `${common}\n你是 ProfessionServiceAgent，职业服务分配器。你的权限只有处理 payload.requests 中已经存在的真实服务请求：医疗、教育、店内交易、窗口办事、安全协助。你只能从 request.professionalCandidates 中选择同地点真实在场职业人员；不能创造医生、护士、老师、店员、老板、窗口人员、病人、顾客或路人。你可以建议 handled/blocked/assigned 和小幅 targetNeedDelta/targetEmotionDelta/professionalNeedDelta，但最终会被本地审查限幅。你不能移动角色，不能判死/复活，不能让全镇知道，不能替 AgentAction 生成新行动，不能处理 payload.requests 外的事项。病人/学生/顾客/办事人不需要主动行动时，职业人员也可以处理请求，但必须有真实在场职业人员和同地点事实。`;
   }
   if (task === "socialPatternAgent") {
     return `${common}\n你是 SocialPatternAgent。你的权限只有低频判断已有家庭、群体、关系对中的长期模式：家庭压力、照护负担、群体凝聚/张力、关系模式。你不能创建新关系对象，不能生成行动、记忆、承诺或事件，不能让角色凭空知道全局信息。输出只作为 Scheduler 和 AgentAction 的背景提示。`;
@@ -1294,6 +1334,29 @@ function userPrompt(task, payload) {
         "priorityHint 1-10，只给 Scheduler 的优先级提示；不能直接调度角色",
         "reason 只解释过程管理依据，不要写未发生行为或他人回应",
         "如果没有需要更新的过程，返回空 processUpdates"
+      ],
+      world: payload
+    });
+  }
+  if (task === "professionServiceAgent") {
+    return JSON.stringify({
+      instruction: "返回 JSON：{\"assignments\":[{\"requestId\":\"\",\"professionalId\":\"\",\"actionType\":\"treat|teach|sell|process|protect|observe\",\"priority\":80,\"summary\":\"\",\"targetNeedDelta\":{\"hunger\":0,\"hygiene\":0,\"health\":0,\"social\":0,\"responsibility\":0,\"stress\":0,\"comfort\":0,\"safety\":0},\"targetEmotionDelta\":{\"happy\":0,\"anxious\":0,\"angry\":0,\"sad\":0,\"tired\":0,\"lonely\":0,\"hopeful\":0,\"calm\":0,\"curious\":0},\"professionalNeedDelta\":{\"hunger\":0,\"hygiene\":0,\"health\":0,\"social\":0,\"responsibility\":0,\"stress\":0,\"comfort\":0,\"safety\":0},\"professionalEmotionDelta\":{\"happy\":0,\"anxious\":0,\"angry\":0,\"sad\":0,\"tired\":0,\"lonely\":0,\"hopeful\":0,\"calm\":0,\"curious\":0},\"followupEvent\":\"\",\"status\":\"handled|assigned|blocked\",\"reason\":\"\"}],\"logs\":[{\"title\":\"\",\"body\":\"\"}]}。",
+      constraints: [
+        "requestId 必须来自 payload.requests.id",
+        "professionalId 必须来自该 request.professionalCandidates.id；如果没有候选人员，status 必须 blocked 且 professionalId 为空",
+        "只能处理 payload.requests 中已有请求，不能新增请求、不能新增角色、不能引用 payload 外的人",
+        "必须同地点：职业人员必须真实在 request.place，不能远程处理、赶来处理或假设隐藏人员",
+        "医疗请求只能由 medical 候选处理；教育只能由 education 候选处理；交易只能由 commerce 候选处理；窗口办事只能由 office 候选处理；安全只能由 safety 候选处理",
+        "status=handled 表示职业人员在本轮完成了小颗粒服务，例如基础看诊、课堂提醒、结账/取餐、窗口登记、安全确认；不能写重大手术、复杂手续完全办完、长期问题解决",
+        "status=assigned 只表示职业人员接手/排队，不能给明显恢复收益；status=blocked 表示缺岗、忙不过来、地点关闭、信息不足或不符合制度",
+        "targetNeedDelta/professionalNeedDelta 是建议变化，不是最终提交；普通服务 -8 到 8，医疗/安全最多 -18 到 18",
+        "需求是养成状态条：正数表示恢复/满足，负数表示消耗/恶化；health/hunger/safety/stress 等不能一次拉满",
+        "targetEmotionDelta/professionalEmotionDelta 建议 -8 到 8；不要让所有人强烈情绪化",
+        "summary 只写已被请求和真实职业人员处理的事实，不写全镇知道、家人已经知道、未来结果或他人内心",
+        "followupEvent 是给当事人/职业人员 eventQueue 的短提示，例如 继续观察、课后再问、稍后取件、窗口待复核；不是新行动命令",
+        "不能移动角色，不能判死/复活，不能治愈一切，不能创建记忆/关系/承诺，不能替 Scheduler 或 AgentAction 选择下一步",
+        "没有把握就返回 blocked 或空 assignments",
+        "字段短，不要 Markdown，不要换行"
       ],
       world: payload
     });
@@ -1740,7 +1803,7 @@ function userPrompt(task, payload) {
   return JSON.stringify(payload);
 }
 
-async function callAi(task, payload) {
+async function callAi(task, payload, retryEpoch = aiRetryEpoch) {
   const selectedKey = nextApiKey();
   if (!selectedKey) {
     const permanentBlocked = allKeysPermanentlyUnavailable();
@@ -1777,7 +1840,12 @@ async function callAi(task, payload) {
   metrics.lastStatus = `running:${keyLabel}:${selectedModel}`;
   metrics.lastError = "";
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
+  activeAiControllers.add(controller);
+  let timeoutExpired = false;
+  const timeout = setTimeout(() => {
+    timeoutExpired = true;
+    controller.abort();
+  }, AI_TIMEOUT_MS);
   try {
     const headers = { "content-type": "application/json" };
     if (selectedKey.key) headers.authorization = `Bearer ${selectedKey.key}`;
@@ -1821,18 +1889,27 @@ async function callAi(task, payload) {
     callLog.durationMs = Date.now() - started;
     return parsed;
   } catch (error) {
+    const handledError = !timeoutExpired && controller.signal.aborted && retryEpoch !== aiRetryEpoch
+      ? makeAiRetryCancelledError()
+      : error;
     if (epoch === metricsEpoch) {
-      metrics.failure += 1;
-      metrics.lastStatus = `failed:${keyLabel}`;
-      metrics.lastError = error.message.slice(0, 240);
-      if (trackedKey) markKeyFailure(selectedKey.index, error, Date.now() - started);
+      if (handledError.type === "ai_retry_cancelled") {
+        metrics.lastStatus = `cancelled:${keyLabel}`;
+        metrics.lastError = handledError.message.slice(0, 240);
+      } else {
+        metrics.failure += 1;
+        metrics.lastStatus = `failed:${keyLabel}`;
+        metrics.lastError = handledError.message.slice(0, 240);
+        if (trackedKey) markKeyFailure(selectedKey.index, handledError, Date.now() - started);
+      }
     }
-    callLog.status = "failed";
+    callLog.status = handledError.type === "ai_retry_cancelled" ? "cancelled" : "failed";
     callLog.durationMs = Date.now() - started;
-    callLog.error = error.message.slice(0, 240);
-    throw error;
+    callLog.error = handledError.message.slice(0, 240);
+    throw handledError;
   } finally {
     clearTimeout(timeout);
+    activeAiControllers.delete(controller);
     if (epoch === metricsEpoch) {
       metrics.inFlight = Math.max(0, metrics.inFlight - 1);
       if (trackedKey) keyHealth[selectedKey.index].inFlight = Math.max(0, keyHealth[selectedKey.index].inFlight - 1);
@@ -1843,11 +1920,18 @@ async function callAi(task, payload) {
 
 async function callAiWithRetry(task, payload) {
   let attempt = 1;
+  const retryEpoch = aiRetryEpoch;
   while (true) {
+    if (retryEpoch !== aiRetryEpoch) throw makeAiRetryCancelledError();
     try {
-      return await callAi(task, payload);
+      const result = await callAi(task, payload, retryEpoch);
+      aiContinuousErrors = 0;
+      metrics.continuousErrors = 0;
+      return result;
     } catch (error) {
-      if (!isRetryableAiError(error)) throw error;
+      if (retryEpoch !== aiRetryEpoch || error?.type === "ai_retry_cancelled") throw makeAiRetryCancelledError();
+      aiContinuousErrors += 1;
+      metrics.continuousErrors = aiContinuousErrors;
       pushCallLog({
         task,
         model: modelForTask(task, payload),
@@ -1856,10 +1940,10 @@ async function callAiWithRetry(task, payload) {
         agentName: payload?.agent?.name || "",
         status: "retry_wait",
         durationMs: AI_RETRY_DELAY_MS,
-        error: `attempt ${attempt} failed: ${error.message.slice(0, 180)}`
+        error: `全局连续错误 ${aiContinuousErrors}；本请求第 ${attempt} 次失败：${error.message.slice(0, 180)}。将持续重试直到手动停止`
       });
       attempt += 1;
-      await delay(AI_RETRY_DELAY_MS);
+      await delayUnlessCancelled(AI_RETRY_DELAY_MS, retryEpoch);
     }
   }
 }
@@ -1901,6 +1985,21 @@ async function handleApi(req, res) {
     resetMetrics();
     callLogs.length = 0;
     send(res, 200, publicMetrics());
+    return;
+  }
+  if (apiPath === "/api/ai/cancel" && req.method === "POST") {
+    cancelAiRetries();
+    pushCallLog({
+      task: "manual",
+      model: aiConfig.model,
+      keyIndex: 0,
+      agentId: "",
+      agentName: "",
+      status: "cancelled",
+      durationMs: 0,
+      error: "手动停止：已取消当前 AI 重试"
+    });
+    send(res, 200, { ok: true, metrics: publicMetrics() });
     return;
   }
   if (apiPath === "/api/saves" && req.method === "GET") {
@@ -1968,12 +2067,23 @@ async function handleApi(req, res) {
     }
     return;
   }
+  if (apiPath === "/api/ai/once" && req.method === "POST") {
+    try {
+      const raw = await readBody(req);
+      const body = JSON.parse(raw || "{}");
+      const result = await callAi(body.task, body.payload || {});
+      send(res, 200, result);
+    } catch (error) {
+      send(res, error.status || 500, { error: { message: error.message, type: error.type || "internal_error" } });
+    }
+    return;
+  }
   if (apiPath === "/api/actions/batch" && req.method === "POST") {
     try {
       const raw = await readBody(req);
       const body = JSON.parse(raw || "{}");
       const items = Array.isArray(body.items) ? body.items : [];
-      const results = await Promise.allSettled(items.map(item => callAiWithRetry("agentAction", item.payload || {})));
+      const results = await Promise.allSettled(items.map(item => callAi("agentAction", item.payload || {})));
       send(res, 200, {
         results: results.map((result, index) => {
           const item = items[index] || {};
