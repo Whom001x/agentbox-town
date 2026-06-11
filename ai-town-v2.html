@@ -10990,9 +10990,17 @@
       }
     }
 
+    function runtimeProgressText(progress) {
+      if (!progress || !progress.phase || progress.phase === "idle") return "";
+      const percent = Number.isFinite(Number(progress.percent)) ? `${Math.round(Number(progress.percent))}%` : "";
+      const task = progress.currentTask || progress.phase;
+      return `${progress.phase}${percent ? ` | ${percent}` : ""}${task ? ` | ${task}` : ""}`;
+    }
+
     async function refreshRuntimeStatus() {
       try {
         runtimeStatusCache = await api("/api/runtime/status", {}, CONFIG_TIMEOUT_MS);
+        const progressText = runtimeProgressText(runtimeStatusCache.progress);
         byId("runtimeState").textContent = runtimeStatusCache.state && runtimeStatusCache.state !== "stopped"
           ? `${runtimeStatusCache.state}:${runtimeStatusCache.slot || "-"}`
           : "未运行";
@@ -11001,6 +11009,13 @@
           byId("managerRuntimeText").textContent = runtimeStatusCache.running
             ? `后台状态：${runtimeStatusCache.state || "running"} ${runtimeStatusCache.slot || "未知存档"}｜PID ${runtimeStatusCache.pid || "-"}`
             : `后台状态：${runtimeStatusCache.state || "未运行"}${runtimeStatusCache.slot ? ` ${runtimeStatusCache.slot}` : ""}`;
+        }
+        if (progressText && runtimeStatusCache.state && runtimeStatusCache.state !== "stopped") {
+          byId("runtimeState").textContent = `${runtimeStatusCache.state}:${runtimeStatusCache.slot || "-"} | ${progressText}`;
+          byId("runtimeState").title = `PID ${runtimeStatusCache.pid || "-"} | ${progressText} | ${runtimeStatusCache.runtimeUrl || ""}`;
+          if (byId("managerRuntimeText")) {
+            byId("managerRuntimeText").textContent = `后台状态：${runtimeStatusCache.state || "running"} ${runtimeStatusCache.slot || "未知存档"} | PID ${runtimeStatusCache.pid || "-"} | ${progressText}`;
+          }
         }
       } catch {
         byId("runtimeState").textContent = "未知";

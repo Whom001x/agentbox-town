@@ -59,6 +59,94 @@ let runtimeState = "stopped";
 let runtimeLastMessage = "";
 let runtimeEngine = "node-core-v1";
 let runtimeTimer = null;
+let runtimeProgress = {
+  running: false,
+  slot: "",
+  phase: "idle",
+  phaseIndex: 0,
+  phaseTotal: 0,
+  percent: 0,
+  currentTask: "",
+  currentAgent: "",
+  completed: [],
+  startedAt: "",
+  updatedAt: "",
+  lastError: ""
+};
+
+function resetRuntimeProgress(slot = "", phase = "idle") {
+  runtimeProgress = {
+    running: false,
+    slot,
+    phase,
+    phaseIndex: 0,
+    phaseTotal: 0,
+    percent: 0,
+    currentTask: "",
+    currentAgent: "",
+    completed: [],
+    startedAt: "",
+    updatedAt: new Date().toISOString(),
+    lastError: ""
+  };
+}
+
+function beginRuntimeProgress(slot, phaseTotal) {
+  runtimeProgress = {
+    running: true,
+    slot,
+    phase: "starting",
+    phaseIndex: 0,
+    phaseTotal,
+    percent: 1,
+    currentTask: "starting",
+    currentAgent: "",
+    completed: [],
+    startedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    lastError: ""
+  };
+}
+
+function updateRuntimeProgress(phase, detail = {}) {
+  const nextIndex = Math.max(runtimeProgress.phaseIndex, Number(detail.phaseIndex || runtimeProgress.phaseIndex || 0));
+  runtimeProgress = {
+    ...runtimeProgress,
+    running: true,
+    phase,
+    phaseIndex: nextIndex,
+    percent: Math.max(runtimeProgress.percent || 0, Math.min(99, Math.round((nextIndex / Math.max(1, runtimeProgress.phaseTotal || 1)) * 100))),
+    currentTask: detail.currentTask || phase,
+    currentAgent: detail.currentAgent || "",
+    updatedAt: new Date().toISOString()
+  };
+}
+
+function completeRuntimeProgress(message = "completed") {
+  runtimeProgress = {
+    ...runtimeProgress,
+    running: false,
+    phase: "completed",
+    phaseIndex: runtimeProgress.phaseTotal,
+    percent: 100,
+    currentTask: message,
+    currentAgent: "",
+    completed: [...(runtimeProgress.completed || []), message].slice(-20),
+    updatedAt: new Date().toISOString()
+  };
+}
+
+function failRuntimeProgress(error) {
+  runtimeProgress = {
+    ...runtimeProgress,
+    running: false,
+    phase: "failed",
+    currentTask: "failed",
+    currentAgent: "",
+    lastError: error?.message || String(error || "unknown error"),
+    updatedAt: new Date().toISOString()
+  };
+}
 
 function ensureSaveDir() {
   fs.mkdirSync(SAVE_DIR, { recursive: true });
@@ -637,6 +725,78 @@ function writeAgentFolders(saveFolder, agents = []) {
   });
 }
 
+function writeCharacterFolders(saveFolder, agents = []) {
+  const charactersDir = path.join(saveFolder, "characters");
+  if (fs.existsSync(charactersDir)) fs.rmSync(assertInsideSaveDir(charactersDir), { recursive: true, force: true });
+  ensureDir(charactersDir);
+  writeJsonFile(path.join(charactersDir, "index.json"), agents.map(agent => ({
+    id: agent.id,
+    name: agent.name,
+    job: agent.job,
+    ageYears: agent.ageYears,
+    position: agent.position,
+    lifeStatus: agent.lifeStatus || "alive"
+  })));
+  agents.forEach(agent => {
+    const characterDir = path.join(charactersDir, safeSaveName(`${agent.id || "agent"}-${agent.name || ""}`));
+    const judgementsDir = path.join(characterDir, "judgements");
+    ensureDir(judgementsDir);
+    writeJsonFile(path.join(characterDir, "info.json"), agentInfoSnapshot(agent));
+    writeJsonFile(path.join(characterDir, "state.json"), agentStateSnapshot(agent));
+    writeJsonFile(path.join(characterDir, "memory.json"), {
+      id: agent.id,
+      name: agent.name,
+      memory: agent.memory || { short: [], long: [], emotional: [], secret: [], rumor: [] },
+      knownFacts: agent.knownFacts || [],
+      memorySummary: agent.memorySummary || ""
+    });
+    const judgements = agentJudgementSnapshot(agent);
+    Object.entries(judgements).forEach(([key, value]) => {
+      if (["id", "name"].includes(key)) return;
+      writeJsonFile(path.join(judgementsDir, `${key}.json`), { id: agent.id, name: agent.name, [key]: value || null });
+    });
+  });
+}
+
+function writeWorldTables(saveFolder, world = {}) {
+  const tableSpecs = [
+    ["places", Array.isArray(world.places) ? world.places : []],
+    ["events", {
+      records: Array.isArray(world.records) ? world.records.slice(0, 500) : [],
+      eventImpacts: Array.isArray(world.eventImpacts) ? world.eventImpacts : [],
+      informationFlows: Array.isArray(world.informationFlows) ? world.informationFlows : [],
+      socialProcesses: Array.isArray(world.socialProcesses) ? world.socialProcesses : []
+    }],
+    ["relations", {
+      relationshipDynamics: Array.isArray(world.relationshipDynamics) ? world.relationshipDynamics : [],
+      households: Array.isArray(world.households) ? world.households : [],
+      groups: Array.isArray(world.groups) ? world.groups : []
+    }],
+    ["runtime", {
+      locationRuntimeState: world.locationRuntimeState || null,
+      processRuntimeState: world.processRuntimeState || null,
+      professionServiceState: world.professionServiceState || null,
+      socialPatterns: world.socialPatterns || null,
+      dailyAgentState: world.dailyAgentState || null,
+      progress: runtimeProgress
+    }]
+  ];
+  tableSpecs.forEach(([folder, data]) => {
+    const dir = path.join(saveFolder, folder);
+    if (fs.existsSync(dir)) fs.rmSync(assertInsideSaveDir(dir), { recursive: true, force: true });
+    ensureDir(dir);
+    if (Array.isArray(data)) {
+      writeJsonFile(path.join(dir, "index.json"), data);
+      data.forEach(item => {
+        const id = safeSaveName(item?.id || item?.eventId || item?.title || "item");
+        writeJsonFile(path.join(dir, `${id}.json`), item);
+      });
+    } else {
+      Object.entries(data || {}).forEach(([key, value]) => writeJsonFile(path.join(dir, `${key}.json`), value));
+    }
+  });
+}
+
 function writeJudgementFiles(saveFolder, world = {}) {
   const agDir = path.join(saveFolder, "ag-judgements");
   if (fs.existsSync(agDir)) fs.rmSync(assertInsideSaveDir(agDir), { recursive: true, force: true });
@@ -675,6 +835,8 @@ function writeFolderSave(slot, payload) {
   });
   writeJsonFile(path.join(saveFolder, "location-boxes.json"), payload.locationBoxes || {});
   writeAgentFolders(saveFolder, Array.isArray(payload.world?.agents) ? payload.world.agents : []);
+  writeCharacterFolders(saveFolder, Array.isArray(payload.world?.agents) ? payload.world.agents : []);
+  writeWorldTables(saveFolder, payload.world || {});
   writeJudgementFiles(saveFolder, payload.world || {});
 }
 
@@ -751,14 +913,34 @@ function nodeRuntimeNeedPressure(agent) {
 
 function nodeRuntimeCandidates(world) {
   const agents = Array.isArray(world?.agents) ? world.agents : [];
-  const maxActions = Math.max(1, Math.min(MAX_ACTIONS_HARD_LIMIT, Number(world?.config?.maxActionsPerCycle || aiConfig.maxActionsPerCycle || 3)));
+  const keyCapacity = Math.max(1, (aiConfig.apiKeys.length || (isLocalAiBaseUrl(aiConfig.baseUrl) ? 1 : 0)) * Math.max(1, Number(aiConfig.maxConcurrentPerKey || 1)));
+  const maxActions = Math.max(1, Math.min(MAX_ACTIONS_HARD_LIMIT, keyCapacity, Number(world?.config?.maxActionsPerCycle || aiConfig.maxActionsPerCycle || 3)));
   return agents
     .filter(agent => agent && agent.id && agent.lifeStatus !== "dead")
     .map(agent => ({ agent, pressure: nodeRuntimeNeedPressure(agent) }))
     .filter(item => item.pressure >= 18 || item.agent.activeProcess || (Array.isArray(item.agent.eventQueue) && item.agent.eventQueue.length))
     .sort((a, b) => b.pressure - a.pressure)
-    .slice(0, Math.max(maxActions * 2, maxActions))
     .map(item => nodeRuntimeAgentBrief(item.agent));
+}
+
+function nodeRuntimeCounters(world) {
+  world.nodeRuntimeCounters ||= { tick: 0, context: 0, post: 0, saveSplit: 0 };
+  return world.nodeRuntimeCounters;
+}
+
+function nodeRuntimeSchedulePolicy(world, dueAgents) {
+  const counters = nodeRuntimeCounters(world);
+  const mode = world?.config?.nodeRuntimeMode || "balanced";
+  const forceFull = mode === "full";
+  const light = mode === "light";
+  const hasEvents = dueAgents.some(agent => Array.isArray(agent.eventQueue) && agent.eventQueue.length);
+  return {
+    mode,
+    runContext: forceFull || !world.locationRuntimeState || counters.tick % (light ? 6 : 3) === 0 || hasEvents,
+    runPreJudgement: true,
+    runPost: forceFull || hasEvents || counters.tick % (light ? 4 : 2) === 0,
+    runDaily: true
+  };
 }
 
 function nodeRuntimeVisibleAgents(world, agent) {
@@ -951,6 +1133,61 @@ function nodeRuntimeAdjustEmotion(agent, changes = {}, limit = 8) {
     agent.emotionVector[key] = Math.max(0, Math.min(100, before + nodeRuntimeClampDelta(value, -limit, limit)));
   });
   agent.emotions = agent.emotionVector;
+}
+
+function nodeRuntimeGuardAction(world, agent, aiResult) {
+  const action = aiResult?.action || {};
+  const guarded = { ...aiResult, action: { ...action } };
+  const text = `${action.type || ""} ${action.summary || ""} ${action.currentTask || ""}`;
+  const visible = nodeRuntimeVisibleAgents(world, agent);
+  const hasStaff = visible.some(item => /医生|护士|老师|店员|老板|职员|工作人员|医护/.test(String(item.job || "")));
+  const otherCount = visible.length;
+  const cnStaff = /医生|护士|老师|店员|老板|职员|工作人员|医护|收银|服务员/;
+  const cnSocial = /聊天|交谈|询问|寒暄|讨论|安慰|陪伴|社交|谈话/;
+  const cnForbidden = /死亡|死了|复活|全镇|所有人都知道|大家都知道|瞬间到达|立刻到达|凭空知道|上帝视角|系统|调度|队列/;
+  const visibleHasStaff = hasStaff || visible.some(item => cnStaff.test(String(item.job || "")));
+  if (!visibleHasStaff && cnStaff.test(text)) {
+    guarded.action.summary = "当前地点没有可见的对应工作人员，先维持当前状态并观察下一步机会。";
+    guarded.action.currentTask = "观察等待";
+    guarded.action.type = "wait";
+    guarded.action.newLocation = "";
+  }
+  if (otherCount === 0 && cnSocial.test(text)) {
+    guarded.action.summary = "周围没有可交谈的人，先独自整理思路。";
+    guarded.action.currentTask = "独自整理思路";
+    guarded.action.type = "wait";
+    guarded.action.relationChanges = [];
+  }
+  if (cnForbidden.test(text)) {
+    guarded.action.summary = "行动内容越权，角色只能做当前地点内可见、可执行的小动作。";
+    guarded.action.currentTask = "维持当前安排";
+    guarded.action.type = "wait";
+    guarded.action.newLocation = "";
+    guarded.action.newEvents = [];
+  }
+  if (guarded.action.newLocation && !(world.places || []).some(place => place.id === guarded.action.newLocation)) {
+    guarded.action.newLocation = "";
+  }
+  if (!hasStaff && /医生|护士|老师|店员|老板|服务员|收银|工作人员/.test(text)) {
+    guarded.action.summary = "没有合适的在场工作人员，先维持当前状态并观察下一步机会。";
+    guarded.action.currentTask = "观察等待";
+    guarded.action.type = "wait";
+    guarded.action.newLocation = "";
+  }
+  if (otherCount === 0 && /聊天|交谈|寒暄|询问|social|talk/.test(text)) {
+    guarded.action.summary = "周围没有可交谈的人，先独自整理思路。";
+    guarded.action.currentTask = "独自整理思路";
+    guarded.action.type = "wait";
+    guarded.action.relationChanges = [];
+  }
+  if (/死亡|复活|全镇|所有人都知道|瞬间到达/.test(text)) {
+    guarded.action.summary = "行动内容越权，角色只做当前地点内可见的小动作。";
+    guarded.action.currentTask = "维持当前安排";
+    guarded.action.type = "wait";
+    guarded.action.newLocation = "";
+    guarded.action.newEvents = [];
+  }
+  return guarded;
 }
 
 function nodeRuntimeTimePassagePayload(world, actionItems) {
@@ -1261,6 +1498,9 @@ async function nodeRuntimeRunDailyAgents(world) {
 
 async function runNodeRuntimeStep(slot) {
   const safeSlot = safeSaveName(slot || runtimeSlot || listSaves()[0]?.slot || "autosave");
+  beginRuntimeProgress(safeSlot, 11);
+  try {
+  updateRuntimeProgress("load", { phaseIndex: 1, currentTask: "load save" });
   const payload = readSavePayload(safeSlot);
   if (!payload) {
     const error = new Error(`Save not found: ${safeSlot}`);
@@ -1269,39 +1509,59 @@ async function runNodeRuntimeStep(slot) {
   }
   const world = payload.world || payload;
   const beforeClock = Number(world.clock || 0);
+  const counters = nodeRuntimeCounters(world);
+  counters.tick = Number(counters.tick || 0) + 1;
   const dueAgents = nodeRuntimeCandidates(world);
+  const policy = nodeRuntimeSchedulePolicy(world, dueAgents);
+  updateRuntimeProgress("candidates", { phaseIndex: 2, currentTask: `${dueAgents.length} candidates` });
   if (dueAgents.length) {
-    await nodeRuntimeRunLocationAndProcessAgents(world, dueAgents);
-    await nodeRuntimeRunPreJudgement(world, dueAgents);
+    if (policy.runContext) {
+      updateRuntimeProgress("context-agents", { phaseIndex: 3, currentTask: "context agents" });
+      await nodeRuntimeRunLocationAndProcessAgents(world, dueAgents);
+      counters.context = Number(counters.context || 0) + 1;
+    }
+    if (policy.runPreJudgement) {
+      updateRuntimeProgress("pre-judgement", { phaseIndex: 4, currentTask: "pre judgement agents" });
+      await nodeRuntimeRunPreJudgement(world, dueAgents);
+    }
+    updateRuntimeProgress("scheduler", { phaseIndex: 5, currentTask: "scheduler" });
     const scheduled = await callAiWithRetry("scheduler", nodeRuntimeSchedulerPayload(world, dueAgents));
     const selected = Array.isArray(scheduled?.candidates) ? scheduled.candidates : [];
     const maxActions = Math.max(1, Math.min(MAX_ACTIONS_HARD_LIMIT, Number(world?.config?.maxActionsPerCycle || aiConfig.maxActionsPerCycle || 3)));
     const byId = new Map((world.agents || []).map(agent => [agent.id, agent]));
+    updateRuntimeProgress("agent-actions", { phaseIndex: 6, currentTask: `${Math.min(selected.length, maxActions)} action calls` });
     const actionCalls = selected
       .filter(item => byId.has(item.agentId))
       .slice(0, maxActions)
       .map((candidate, index) => {
         const agent = byId.get(candidate.agentId);
         return callAiWithRetry("agentAction", nodeRuntimeActionPayload(world, agent, candidate))
-          .then(result => ({ status: "fulfilled", queueId: `node-${world.clock || 0}-${agent.id}-${index}`, agent, candidate, result }))
+          .then(result => ({ status: "fulfilled", queueId: `node-${world.clock || 0}-${agent.id}-${index}`, agent, candidate, result: nodeRuntimeGuardAction(world, agent, result) }))
           .catch(error => ({ status: "rejected", agent, candidate, error }));
       });
     const actionResults = await Promise.all(actionCalls);
     const successfulActions = actionResults.filter(item => item.status === "fulfilled");
     if (successfulActions.length) {
+      updateRuntimeProgress("time-passage", { phaseIndex: 7, currentTask: `${successfulActions.length} actions` });
       const passages = await nodeRuntimeRunTimePassage(world, successfulActions);
       successfulActions.forEach(item => {
         item.timePassage = passages.find(passage => passage.queueId === item.queueId || passage.agentId === item.agent.id) || null;
       });
+      updateRuntimeProgress("state-settlement", { phaseIndex: 8, currentTask: `${successfulActions.length} settlements` });
       const patches = await nodeRuntimeRunStateSettlement(world, successfulActions);
+      updateRuntimeProgress("apply-actions", { phaseIndex: 9, currentTask: "apply guarded actions" });
       successfulActions.forEach(item => {
         nodeRuntimeApplyAction(world, item.agent, item.result, item.timePassage, nodeRuntimeFindPatch(patches, item));
       });
-      await nodeRuntimeRunPostAgents(world, successfulActions, patches);
+      if (policy.runPost) {
+        updateRuntimeProgress("post-agents", { phaseIndex: 10, currentTask: "post agents" });
+        await nodeRuntimeRunPostAgents(world, successfulActions, patches);
+        counters.post = Number(counters.post || 0) + 1;
+      }
       world.logs ||= [];
       world.logs.unshift({
         title: "Node AI Action Chain",
-        body: `Scheduler selected ${selected.length}; AgentAction ${successfulActions.length}; TimePassage ${passages.length}; StateSettlement ${patches.length}`,
+        body: `Scheduler selected ${selected.length}; AgentAction ${successfulActions.length}; TimePassage ${passages.length}; StateSettlement ${patches.length}; policy=${policy.mode}`,
         type: "node_runtime",
         time: nodeRuntimeClockText(world),
         clock: world.clock || 0,
@@ -1320,14 +1580,27 @@ async function runNodeRuntimeStep(slot) {
       });
     });
   }
+  updateRuntimeProgress("node-core", { phaseIndex: 10, currentTask: "advance world clock" });
   const result = nodeStepPayload(payload);
-  if (nodeRuntimeIsMidnightCross(beforeClock, result.payload?.world?.clock || 0)) {
+  if (policy.runDaily && nodeRuntimeIsMidnightCross(beforeClock, result.payload?.world?.clock || 0)) {
+    updateRuntimeProgress("daily-agents", { phaseIndex: 10, currentTask: "daily agents" });
     await nodeRuntimeRunDailyAgents(result.payload.world);
   }
+  updateRuntimeProgress("save", { phaseIndex: 11, currentTask: "write save files" });
+  const resultWorld = result.payload?.world || result.payload;
+  const resultCounters = nodeRuntimeCounters(resultWorld);
+  resultCounters.saveSplit = Number(resultCounters.saveSplit || 0) + 1;
   writeRuntimePayload(safeSlot, result.payload);
   runtimeSlot = safeSlot;
+  runtimeLastMessage = `Node tick completed: ${result.summary.clockText}`;
+  completeRuntimeProgress(`tick ${result.summary.clockText}`);
   runtimeLastMessage = `Node tick 完成：${result.summary.clockText}`;
+  runtimeLastMessage = `Node tick completed: ${result.summary.clockText}`;
   return result.summary;
+  } catch (error) {
+    failRuntimeProgress(error);
+    throw error;
+  }
 }
 
 function markKeySuccess(index, durationMs) {
@@ -1401,6 +1674,7 @@ function runtimeStatus() {
     slot: runtimeSlot,
     startedAt: runtimeStartedAt ? new Date(runtimeStartedAt).toISOString() : "",
     message: runtimeLastMessage,
+    progress: runtimeProgress,
     controller: "node-runtime-controller",
     computeEngine: runtimeEngine,
     monitorUrl: `http://localhost:${PORT}/ai-town-monitor.html`,
@@ -1423,6 +1697,7 @@ function stopRuntime() {
   killRuntimeProcess();
   runtimeSlot = "";
   runtimeState = "stopped";
+  resetRuntimeProgress("", "stopped");
   runtimeLastMessage = "后台运行已停止";
 }
 
@@ -1431,6 +1706,7 @@ function pauseRuntime() {
   killRuntimeProcess();
   runtimeSlot = slot;
   runtimeState = "paused";
+  resetRuntimeProgress(slot, "paused");
   runtimeLastMessage = "后台运行已暂停";
 }
 
@@ -2813,6 +3089,10 @@ async function handleApi(req, res) {
   }
   if (apiPath === "/api/runtime/status" && req.method === "GET") {
     send(res, 200, runtimeStatus());
+    return;
+  }
+  if (apiPath === "/api/runtime/progress" && req.method === "GET") {
+    send(res, 200, runtimeProgress);
     return;
   }
   if (apiPath === "/api/runtime/start" && req.method === "POST") {

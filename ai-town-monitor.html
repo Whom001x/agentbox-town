@@ -85,6 +85,11 @@
       return `第${day}天 ${String(Math.floor(minute / 60)).padStart(2, "0")}:${String(minute % 60).padStart(2, "0")}`;
     };
     const selectedSlot = () => document.getElementById("saveSelect").value;
+    const progressText = progress => {
+      if (!progress || !progress.phase || progress.phase === "idle") return "-";
+      const percent = Number.isFinite(Number(progress.percent)) ? `${Math.round(Number(progress.percent))}%` : "";
+      return `${progress.phase}${percent ? ` | ${percent}` : ""}${progress.currentTask ? ` | ${progress.currentTask}` : ""}`;
+    };
     async function refresh() {
       const [savesData, metrics, runtime, calls] = await Promise.all([
         api("/api/saves"),
@@ -108,6 +113,7 @@
         <div>PID：${runtime.pid || "-"}</div>
         <div>存档：${runtime.slot || "-"}</div>
         <div>说明：${runtime.message || "-"}</div>
+        <div>进度：${progressText(runtime.progress)}</div>
         <div>控制器：${runtime.controller || "-"}｜计算：${runtime.computeEngine || "-"}</div>
         <div>AI 请求：${metrics.inFlight || 0}｜成功 ${metrics.success || 0}｜失败 ${metrics.failure || 0}</div>
         <div>模型：${metrics.model || "-"}</div>
