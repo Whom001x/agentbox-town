@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AgentBox Town 显示端</title>
+  <style>
+    :root { color-scheme: light; --line:#d9e1ea; --text:#17202a; --muted:#607080; --bg:#f6f8fb; --panel:#fff; --accent:#2764d8; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: "Microsoft YaHei", system-ui, sans-serif; background: var(--bg); color: var(--text); }
+    header { display: flex; gap: 12px; align-items: center; justify-content: space-between; padding: 14px 18px; border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 2; }
+    h1 { font-size: 18px; margin: 0; }
+    button, select { border: 1px solid var(--line); background: #fff; border-radius: 6px; padding: 8px 10px; font: inherit; }
+    button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+    main { display: grid; grid-template-columns: 320px 1fr; gap: 14px; padding: 14px; }
+    section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
+    h2 { font-size: 15px; margin: 0 0 10px; }
+    .stats { display: grid; grid-template-columns: repeat(4, minmax(120px, 1fr)); gap: 10px; }
+    .stat { border: 1px solid var(--line); border-radius: 8px; padding: 10px; background: #fbfcfe; }
+    .stat b { display: block; font-size: 20px; margin-top: 4px; }
+    .muted { color: var(--muted); font-size: 12px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 10px; }
+    .agent { border: 1px solid var(--line); border-radius: 8px; padding: 10px; background: #fff; }
+    .agent strong { display: block; font-size: 14px; }
+    .bar { height: 6px; background: #e8eef6; border-radius: 99px; overflow: hidden; margin-top: 4px; }
+    .bar span { display: block; height: 100%; background: var(--accent); }
+    .places { display: grid; gap: 6px; }
+    .place { display: flex; justify-content: space-between; border-bottom: 1px solid #eef2f7; padding: 6px 0; }
+    .log { max-height: 260px; overflow: auto; display: grid; gap: 6px; }
+    .log div { border-bottom: 1px solid #eef2f7; padding-bottom: 6px; }
+    @media (max-width: 900px) { main { grid-template-columns: 1fr; } .stats { grid-template-columns: repeat(2, 1fr); } }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>AgentBox Town 显示端</h1>
+      <div class="muted" id="subtitle">只显示后台存档，不参与计算</div>
+    </div>
+    <div>
+      <select id="saveSelect"></select>
+      <button class="primary" id="startBtn">启动后台</button>
+      <button id="stopBtn">停止后台</button>
+    </div>
+  </header>
+  <main>
+    <aside>
+      <section>
+        <h2>后台状态</h2>
+        <div id="runtimeBox" class="muted">读取中...</div>
+      </section>
+      <section style="margin-top:14px">
+        <h2>地点分布</h2>
+        <div class="places" id="placesBox"></div>
+      </section>
+      <section style="margin-top:14px">
+        <h2>调用日志</h2>
+        <div class="log" id="callsBox"></div>
+      </section>
+    </aside>
+    <div>
+      <section>
+        <h2>小镇概览</h2>
+        <div class="stats" id="statsBox"></div>
+      </section>
+      <section style="margin-top:14px">
+        <h2>角色状态</h2>
+        <div class="grid" id="agentsBox"></div>
+      </section>
+    </div>
+  </main>
+  <script>
+    const api = async (url, options = {}) => {
+      const res = await fetch(url, { cache: "no-store", ...options });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error?.message || data?.error || res.statusText);
+      return data;
+    };
+    const fmtClock = world => {
+      const clock = Number(world?.clock || 0);
+      const day = Math.floor(clock / 1440) + 1;
+      const minute = clock % 1440;
+      return `第${day}天 ${String(Math.floor(minute / 60)).padStart(2, "0")}:${String(minute % 60).padStart(2, "0")}`;
+    };
+    const selectedSlot = () => document.getElementById("saveSelect").value;
+    async function refresh() {
+      const [savesData, metrics, runtime, calls] = await Promise.all([
+        api("/api/saves"),
+        api("/api/metrics"),
+        api("/api/runtime/status"),
+        api("/api/calls")
+      ]);
+      const select = document.getElementById("saveSelect");
+      const previous = select.value;
+      select.innerHTML = (savesData.saves || []).map(save => `<option value="${save.slot}">${save.name}｜${save.agentCount}人｜${save.clockText}</option>`).join("");
+      if (previous && [...select.options].some(item => item.value === previous)) select.value = previous;
+      const slot = selectedSlot() || savesData.saves?.[0]?.slot;
+      const payload = slot ? await api(`/api/saves/${encodeURIComponent(slot)}`) : { world: {} };
+      const world = payload.world || {};
+      const agents = world.agents || [];
+      const alive = agents.filter(a => a.lifeStatus !== "dead").length;
+      const critical = agents.filter(a => a.lifeStatus === "critical").length;
+      document.getElementById("subtitle").textContent = `${payload.meta?.name || slot || "无存档"}｜${fmtClock(world)}｜${agents.length} 人`;
+      document.getElementById("runtimeBox").innerHTML = `
+        <div>状态：<b>${runtime.running ? "后台运行中" : "未运行"}</b></div>
+        <div>PID：${runtime.pid || "-"}</div>
+        <div>存档：${runtime.slot || "-"}</div>
+        <div>AI 请求：${metrics.inFlight || 0}｜成功 ${metrics.success || 0}｜失败 ${metrics.failure || 0}</div>
+        <div>模型：${metrics.model || "-"}</div>
+      `;
+      document.getElementById("statsBox").innerHTML = [
+        ["总人数", agents.length],
+        ["存活", alive],
+        ["濒危", critical],
+        ["当前任务", world.actionQueue?.length || 0],
+        ["家庭", world.socialStructures?.households?.length || 0],
+        ["群组", world.socialStructures?.groups?.length || 0],
+        ["事件", world.records?.length || 0],
+        ["AI进行中", metrics.inFlight || 0]
+      ].map(([k,v]) => `<div class="stat"><span class="muted">${k}</span><b>${v}</b></div>`).join("");
+      const placeCounts = {};
+      agents.forEach(agent => { placeCounts[agent.position || agent.place || "未知"] = (placeCounts[agent.position || agent.place || "未知"] || 0) + 1; });
+      document.getElementById("placesBox").innerHTML = Object.entries(placeCounts).sort((a,b)=>b[1]-a[1]).slice(0, 24).map(([k,v]) => `<div class="place"><span>${k}</span><b>${v}</b></div>`).join("");
+      document.getElementById("agentsBox").innerHTML = agents.slice(0, 80).map(agent => {
+        const health = Math.round(agent.needs?.health ?? 0);
+        const hunger = Math.round(agent.needs?.hunger ?? 0);
+        return `<div class="agent">
+          <strong>${agent.name} <span class="muted">${agent.ageYears || agent.age || ""}岁｜${agent.job || ""}</span></strong>
+          <div class="muted">${agent.position || ""}｜${agent.currentTask || ""}</div>
+          <div class="muted">健康 ${health}</div><div class="bar"><span style="width:${health}%"></span></div>
+          <div class="muted">饱腹 ${hunger}</div><div class="bar"><span style="width:${hunger}%"></span></div>
+        </div>`;
+      }).join("");
+      document.getElementById("callsBox").innerHTML = (calls.calls || []).slice(0, 20).map(call => `<div><b>${call.task}</b>｜${call.status}｜Key ${call.keyIndex || "-"}<br><span class="muted">${call.error || `${call.durationMs || 0}ms`}</span></div>`).join("");
+    }
+    document.getElementById("startBtn").onclick = async () => {
+      await api("/api/runtime/start", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ slot: selectedSlot() }) });
+      await refresh();
+    };
+    document.getElementById("stopBtn").onclick = async () => {
+      await api("/api/runtime/stop", { method: "POST" });
+      await refresh();
+    };
+    document.getElementById("saveSelect").onchange = refresh;
+    refresh().catch(error => { document.getElementById("runtimeBox").textContent = error.message; });
+    setInterval(() => refresh().catch(() => {}), 3000);
+  </script>
+</body>
+</html>

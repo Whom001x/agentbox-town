@@ -2,6 +2,7 @@ const http = require("http");
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
+const { spawn } = require("child_process");
 
 const PORT = Number(process.env.AI_TOWN_V2_PORT || 8788);
 const HOST = String(process.env.AI_TOWN_V2_HOST || "0.0.0.0");
@@ -50,6 +51,9 @@ let aiContinuousErrors = 0;
 let aiRetryEpoch = 0;
 const callLogs = [];
 const activeAiControllers = new Set();
+let runtimeProcess = null;
+let runtimeStartedAt = 0;
+let runtimeSlot = "";
 
 function ensureSaveDir() {
   fs.mkdirSync(SAVE_DIR, { recursive: true });
@@ -726,6 +730,73 @@ function lanUrls(port) {
     urls.push(`http://${item.address}:${port}`);
   });
   return urls;
+}
+
+function findBrowserExecutable() {
+  const candidates = [
+    process.env.AI_TOWN_BROWSER,
+    "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+    "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
+    "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+    "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe"
+  ].filter(Boolean);
+  return candidates.find(item => fs.existsSync(item)) || "";
+}
+
+function runtimeStatus() {
+  const running = Boolean(runtimeProcess && runtimeProcess.exitCode === null && !runtimeProcess.killed);
+  return {
+    running,
+    pid: running ? runtimeProcess.pid : 0,
+    slot: runtimeSlot,
+    startedAt: runtimeStartedAt ? new Date(runtimeStartedAt).toISOString() : "",
+    monitorUrl: `http://localhost:${PORT}/ai-town-monitor.html`,
+    runtimeUrl: runtimeSlot ? `http://127.0.0.1:${PORT}/?runtime=1&autostart=1&slot=${encodeURIComponent(runtimeSlot)}` : ""
+  };
+}
+
+function stopRuntime() {
+  if (runtimeProcess && runtimeProcess.exitCode === null && !runtimeProcess.killed) {
+    runtimeProcess.kill();
+  }
+  runtimeProcess = null;
+  runtimeStartedAt = 0;
+  runtimeSlot = "";
+}
+
+function startRuntime(slot = "") {
+  if (runtimeProcess && runtimeProcess.exitCode === null && !runtimeProcess.killed) return runtimeStatus();
+  const browser = findBrowserExecutable();
+  if (!browser) {
+    const error = new Error("No Edge/Chrome executable found. Set AI_TOWN_BROWSER to a Chromium browser path.");
+    error.status = 500;
+    throw error;
+  }
+  const saves = listSaves();
+  const chosenSlot = safeSaveName(slot || saves[0]?.slot || "autosave");
+  const runtimeUrl = `http://127.0.0.1:${PORT}/?runtime=1&autostart=1&slot=${encodeURIComponent(chosenSlot)}`;
+  const userDataDir = path.join(os.tmpdir(), "agentbox-town-runtime-profile");
+  runtimeProcess = spawn(browser, [
+    "--headless=new",
+    "--disable-gpu",
+    "--disable-background-timer-throttling",
+    "--disable-renderer-backgrounding",
+    "--disable-features=CalculateNativeWinOcclusion",
+    `--user-data-dir=${userDataDir}`,
+    runtimeUrl
+  ], {
+    stdio: "ignore",
+    windowsHide: true
+  });
+  runtimeProcess.unref();
+  runtimeStartedAt = Date.now();
+  runtimeSlot = chosenSlot;
+  runtimeProcess.on("exit", () => {
+    runtimeProcess = null;
+    runtimeStartedAt = 0;
+    runtimeSlot = "";
+  });
+  return runtimeStatus();
 }
 
 function readBody(req) {
@@ -1993,6 +2064,25 @@ async function handleApi(req, res) {
   }
   if (apiPath === "/api/metrics" && req.method === "GET") {
     send(res, 200, publicMetrics());
+    return;
+  }
+  if (apiPath === "/api/runtime/status" && req.method === "GET") {
+    send(res, 200, runtimeStatus());
+    return;
+  }
+  if (apiPath === "/api/runtime/start" && req.method === "POST") {
+    try {
+      const raw = await readBody(req);
+      const body = JSON.parse(raw || "{}");
+      send(res, 200, startRuntime(body.slot || ""));
+    } catch (error) {
+      send(res, error.status || 500, { error: { message: error.message, type: "runtime_start_error" } });
+    }
+    return;
+  }
+  if (apiPath === "/api/runtime/stop" && req.method === "POST") {
+    stopRuntime();
+    send(res, 200, runtimeStatus());
     return;
   }
   if (apiPath === "/api/calls" && req.method === "GET") {

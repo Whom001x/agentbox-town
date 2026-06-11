@@ -12109,10 +12109,23 @@
       await refreshSaves().catch(error => {
         byId("saveDirectoryText").textContent = error.message;
       });
-      if (saveListCache[0]) {
-        await loadArchive(saveListCache[0].slot, false).catch(error => {
+      const params = new URLSearchParams(window.location.search);
+      const runtimeMode = params.get("runtime") === "1";
+      const runtimeSlot = params.get("slot") || saveListCache[0]?.slot || "";
+      if (runtimeMode) {
+        document.title = "AgentBox Town Runtime";
+        byId("managerBackdrop").hidden = true;
+        byId("saveDirectoryText").textContent = "后台运行模式：此页面只负责计算循环。";
+      }
+      if (runtimeSlot) {
+        await loadArchive(runtimeSlot, runtimeMode).catch(error => {
           byId("saveDirectoryText").textContent = `读取最新存档失败：${error.message}`;
         });
+      }
+      if (runtimeMode && params.get("autostart") === "1" && world.config.aiEnabled) {
+        world.running = true;
+        clearAiBackoff();
+        scheduleLoop();
       }
       await refreshMetrics();
       await refreshWhenSourceChanged();

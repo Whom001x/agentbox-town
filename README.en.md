@@ -145,6 +145,13 @@ LAN access:
 - Open that LAN URL from a phone or another computer on the same Wi-Fi
 - If it does not open, Windows Firewall is usually blocking it; allow Node.js on private networks or allow TCP port `8788`
 
+Display and background runtime:
+
+- Main UI: `http://localhost:8788/`, with full editing, settings, and simulation controls
+- Display UI: `http://localhost:8788/ai-town-monitor.html`, which only reads saves and call status without running the simulation loop
+- The display UI's start button launches a headless Edge process on the host to run the selected save in the background
+- The stop button stops only that background runtime process; it does not delete saves
+
 On first launch, configure your AI base URL, model, and API keys in the app settings.
 
 Local AI is supported when the server exposes an OpenAI-compatible `/v1/chat/completions` API:
