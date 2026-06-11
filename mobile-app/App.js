@@ -1,7 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
-  Dimensions,
   Modal,
   NativeModules,
   Pressable,
@@ -11,7 +10,8 @@ import {
   StyleSheet,
   Text,
   TextInput,
-  View
+  View,
+  useWindowDimensions
 } from "react-native";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 
@@ -102,8 +102,8 @@ function useTownApi(initialBaseUrl) {
 }
 
 export default function App() {
-  const { width, height } = Dimensions.get("window");
-  const landscape = width > height;
+  const { height } = useWindowDimensions();
+  const landscape = true;
   const { baseUrl, setBaseUrl, request } = useTownApi(defaultServer);
   const [serverInput, setServerInput] = useState(defaultServer);
   const [saves, setSaves] = useState([]);
@@ -253,11 +253,11 @@ export default function App() {
   }
 
   const mapPlaces = places.length ? places : [{ id: "town", name: "小镇", x: 50, y: 50 }];
-  const mapHeight = landscape ? height - 26 : Math.max(440, height - 210);
+  const mapHeight = height;
 
   return (
     <SafeAreaView style={styles.root}>
-      <StatusBar barStyle="light-content" />
+      <StatusBar hidden />
       <View style={styles.cityBackdrop} />
       {!payload ? (
         <StartScreen
@@ -304,6 +304,7 @@ export default function App() {
             showPeople={() => setDrawer({ type: "people", title: "角色", item: null })}
             showPlaces={() => setDrawer({ type: "places", title: "地点", item: null })}
             showEvents={() => setDrawer({ type: "events", title: "事件", item: null })}
+            showRelations={() => setDrawer({ type: "relations", title: "关系", item: null })}
             showControl={() => setDrawer({ type: "control", title: "控制", item: null })}
           />
           <View style={styles.peopleBadge}>
@@ -477,7 +478,7 @@ function SidePanel({ events, agents, runtime, landscape, openAgent }) {
   );
 }
 
-function BottomBar({ slot, saves, loadSlot, showPeople, showPlaces, showEvents, showControl }) {
+function BottomBar({ showPeople, showPlaces, showEvents, showRelations, showControl }) {
   return (
     <View style={styles.bottomBar}>
       <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.bottomItems}>
@@ -485,14 +486,8 @@ function BottomBar({ slot, saves, loadSlot, showPeople, showPlaces, showEvents, 
         <ActionButton icon="people" label="角色" onPress={showPeople} />
         <ActionButton icon="business" label="地点" onPress={showPlaces} />
         <ActionButton icon="newspaper" label="事件" onPress={showEvents} />
+        <ActionButton icon="git-network" label="关系" onPress={showRelations} />
         <ActionButton icon="settings" label="控制" onPress={showControl} />
-      </ScrollView>
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.saveTabs}>
-        {saves.slice(0, 8).map(save => (
-          <Pressable key={save.slot} style={[styles.saveTab, save.slot === slot && styles.saveTabActive]} onPress={() => loadSlot(save.slot)}>
-            <Text style={styles.saveTabText} numberOfLines={1}>{save.name || save.slot}</Text>
-          </Pressable>
-        ))}
       </ScrollView>
     </View>
   );
@@ -607,6 +602,23 @@ function DrawerBody({
         <Text style={styles.listText}>{event.body || event.summary || event.text || ""}</Text>
       </View>
     ));
+  }
+
+  if (drawer.type === "relations") {
+    const pairs = Array.isArray(agents[0]?.relationshipDynamics) ? agents[0].relationshipDynamics : [];
+    const socialPairs = agents.flatMap(agent => Object.entries(agent.relationshipMatrix || {}).slice(0, 2).map(([targetId, value]) => ({
+      from: agent.name,
+      to: agents.find(item => item.id === targetId)?.name || targetId,
+      value
+    }))).slice(0, 60);
+    return socialPairs.length ? socialPairs.map((pair, index) => (
+      <View key={`${pair.from}-${pair.to}-${index}`} style={styles.listRow}>
+        <Text style={styles.listTitle}>{pair.from} - {pair.to}</Text>
+        <Text style={styles.listText}>关系强度：{Math.round(Number(pair.value || 0))}</Text>
+      </View>
+    )) : (
+      <Text style={styles.emptyText}>暂无关系数据</Text>
+    );
   }
 
   if (drawer.type === "control") {
@@ -759,16 +771,15 @@ const styles = StyleSheet.create({
   },
   topHud: {
     position: "absolute",
-    top: 12,
-    right: 12,
-    minWidth: 220,
-    maxWidth: "60%",
-    minHeight: 64,
-    borderRadius: 20,
+    top: 10,
+    right: 14,
+    width: 300,
+    minHeight: 54,
+    borderRadius: 18,
     borderWidth: 1,
     borderColor: palette.line,
     backgroundColor: palette.panel,
-    padding: 10,
+    padding: 8,
     flexDirection: "row",
     alignItems: "center",
     gap: 10
@@ -792,9 +803,9 @@ const styles = StyleSheet.create({
     gap: 8
   },
   roundButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 14,
+    width: 38,
+    height: 38,
+    borderRadius: 13,
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: "rgba(255,255,255,0.1)",
@@ -846,10 +857,10 @@ const styles = StyleSheet.create({
   },
   sidePanel: {
     position: "absolute",
-    right: 12,
-    top: 88,
-    width: 250,
-    maxHeight: "58%",
+    right: 14,
+    top: 76,
+    width: 278,
+    maxHeight: 300,
     borderRadius: 20,
     borderWidth: 1,
     borderColor: palette.line,
@@ -903,22 +914,22 @@ const styles = StyleSheet.create({
   },
   bottomBar: {
     position: "absolute",
-    left: 12,
-    right: 12,
-    bottom: 12,
+    left: "22%",
+    right: "22%",
+    bottom: 10,
     borderRadius: 22,
     borderWidth: 1,
     borderColor: palette.line,
     backgroundColor: "rgba(8, 18, 29, 0.92)",
-    padding: 8
+    padding: 7
   },
   bottomItems: {
     gap: 8,
     paddingRight: 4
   },
   actionButton: {
-    minWidth: 76,
-    minHeight: 58,
+    minWidth: 72,
+    minHeight: 52,
     borderRadius: 16,
     alignItems: "center",
     justifyContent: "center",

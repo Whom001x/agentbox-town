@@ -3,7 +3,7 @@
     "name": "小镇观察器",
     "slug": "agentbox-town-mobile",
     "version": "0.1.0",
-    "orientation": "default",
+    "orientation": "landscape",
     "userInterfaceStyle": "dark",
     "scheme": "agentboxtown",
     "assetBundlePatterns": [
