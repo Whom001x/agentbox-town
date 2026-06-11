@@ -785,6 +785,113 @@ function nodeRuntimeSchedulerPayload(world, dueAgents) {
   };
 }
 
+function nodeRuntimeWorldContext(world, agents = null) {
+  const selectedAgents = agents || (world.agents || []).filter(agent => agent?.id && agent.lifeStatus !== "dead").slice(0, 80).map(nodeRuntimeAgentBrief);
+  return {
+    time: nodeRuntimeClockText(world),
+    virtualMinute: world.clock || 0,
+    calendar: world.weatherBox?.calendar || {},
+    weatherBox: world.weatherBox || {},
+    agents: selectedAgents,
+    places: Array.isArray(world.places) ? world.places.map(place => ({ id: place.id, name: place.name, type: place.type || "", visible: place.visible || [] })).slice(0, 160) : [],
+    recentRecords: Array.isArray(world.records) ? world.records.slice(0, 18) : [],
+    recentLogs: Array.isArray(world.logs) ? world.logs.slice(0, 12) : [],
+    households: Array.isArray(world.households) ? world.households.slice(0, 80) : [],
+    groups: Array.isArray(world.groups) ? world.groups.slice(0, 80) : [],
+    locationRuntimeState: world.locationRuntimeState || null,
+    socialPatterns: world.socialPatterns || null,
+    eventImpacts: world.eventImpacts || [],
+    informationFlows: world.informationFlows || [],
+    relationshipDynamics: world.relationshipDynamics || [],
+    socialProcesses: world.socialProcesses || [],
+    simulationLevel: "node-core-v1"
+  };
+}
+
+function nodeRuntimeCompactItem(item = {}, maxText = 180) {
+  if (!item || typeof item !== "object") return item;
+  const compact = {};
+  Object.entries(item).forEach(([key, value]) => {
+    if (Array.isArray(value)) compact[key] = value.slice(0, 8);
+    else if (value && typeof value === "object") compact[key] = nodeRuntimeCompactItem(value, Math.max(80, Math.floor(maxText / 2)));
+    else compact[key] = typeof value === "string" ? value.slice(0, maxText) : value;
+  });
+  return compact;
+}
+
+async function nodeRuntimeRunLocationAndProcessAgents(world, dueAgents) {
+  const activeProcessAgents = (world.agents || []).filter(agent => agent?.activeProcess && agent.lifeStatus !== "dead").slice(0, 40).map(nodeRuntimeAgentBrief);
+  const requests = (world.agents || [])
+    .filter(agent => agent?.lifeStatus !== "dead")
+    .filter(agent => /候诊|等待|求助|问诊|结账|上课|请假|复核|服务/.test(String(agent.currentTask || "") + " " + JSON.stringify(agent.eventQueue || [])))
+    .slice(0, 40)
+    .map(agent => {
+      const place = nodeRuntimePlaceId(world, agent);
+      const visible = nodeRuntimeVisibleAgents(world, agent);
+      return {
+        id: `req-${world.clock || 0}-${agent.id}`,
+        agentId: agent.id,
+        place,
+        summary: agent.currentTask || "",
+        professionalCandidates: visible.filter(item => /医生|护士|老师|店员|老板|职员|工作人员|医护/.test(String(item.job || ""))).map(item => ({ id: item.id, name: item.name, job: item.job }))
+      };
+    });
+  const tasks = [
+    callAiWithRetry("locationRuntimeAgent", nodeRuntimeWorldContext(world, dueAgents)).then(result => ({ task: "locationRuntimeAgent", result })),
+    activeProcessAgents.length
+      ? callAiWithRetry("processManagerAgent", { ...nodeRuntimeWorldContext(world, activeProcessAgents), activeProcesses: activeProcessAgents.map(agent => ({ agentId: agent.id, activeProcess: agent.activeProcess })) }).then(result => ({ task: "processManagerAgent", result }))
+      : Promise.resolve({ task: "processManagerAgent", result: null }),
+    requests.length
+      ? callAiWithRetry("professionServiceAgent", { ...nodeRuntimeWorldContext(world, dueAgents), requests }).then(result => ({ task: "professionServiceAgent", result }))
+      : Promise.resolve({ task: "professionServiceAgent", result: null }),
+    callAiWithRetry("socialPatternAgent", nodeRuntimeWorldContext(world, dueAgents)).then(result => ({ task: "socialPatternAgent", result }))
+  ];
+  const results = await Promise.all(tasks);
+  results.forEach(({ task, result }) => {
+    if (!result) return;
+    if (task === "locationRuntimeAgent") world.locationRuntimeState = nodeRuntimeCompactItem(result.locations || result);
+    if (task === "processManagerAgent") world.processRuntimeState = nodeRuntimeCompactItem(result.processUpdates || result);
+    if (task === "professionServiceAgent") world.professionServiceState = nodeRuntimeCompactItem(result.assignments || result);
+    if (task === "socialPatternAgent") world.socialPatterns = nodeRuntimeCompactItem(result);
+  });
+  world.logs ||= [];
+  world.logs.unshift({
+    title: "Node Context Agents",
+    body: `LocationRuntime / ProcessManager / ProfessionService / SocialPattern completed`,
+    type: "node_runtime",
+    time: nodeRuntimeClockText(world),
+    clock: world.clock || 0,
+    source: "node-runtime-context"
+  });
+}
+
+async function nodeRuntimeRunPreJudgement(world, dueAgents) {
+  if (!dueAgents.length) return;
+  const payload = nodeRuntimeWorldContext(world, dueAgents);
+  const [intent, context, crisis, knowledge, outcome] = await Promise.all([
+    callAiWithRetry("needIntentAgent", payload),
+    callAiWithRetry("contextRuleAgent", payload),
+    callAiWithRetry("crisisTriageAgent", payload),
+    callAiWithRetry("knowledgeJudgeAgent", payload),
+    callAiWithRetry("outcomeJudgeAgent", payload)
+  ]);
+  const byId = new Map((world.agents || []).map(agent => [agent.id, agent]));
+  (intent.agentIntents || []).forEach(item => { if (byId.has(item.agentId)) byId.get(item.agentId).intentState = { ...item, time: nodeRuntimeClockText(world), source: "node-need-intent" }; });
+  (context.agentContexts || []).forEach(item => { if (byId.has(item.agentId)) byId.get(item.agentId).contextJudgement = { ...item, time: nodeRuntimeClockText(world), source: "node-context-rule" }; });
+  (crisis.triage || []).forEach(item => { if (byId.has(item.agentId)) byId.get(item.agentId).crisisTriage = { ...item, time: nodeRuntimeClockText(world), source: "node-crisis-triage" }; });
+  (knowledge.agentKnowledge || []).forEach(item => { if (byId.has(item.agentId)) byId.get(item.agentId).knowledgeJudgement = { ...item, time: nodeRuntimeClockText(world), source: "node-knowledge-judge" }; });
+  (outcome.agentOutcomes || []).forEach(item => { if (byId.has(item.agentId)) byId.get(item.agentId).outcomeJudgement = { ...item, time: nodeRuntimeClockText(world), source: "node-outcome-judge" }; });
+  world.logs ||= [];
+  world.logs.unshift({
+    title: "Node Pre-Judgement Agents",
+    body: `NeedIntent ${intent.agentIntents?.length || 0}; ContextRule ${context.agentContexts?.length || 0}; CrisisTriage ${crisis.triage?.length || 0}; KnowledgeJudge ${knowledge.agentKnowledge?.length || 0}; OutcomeJudge ${outcome.agentOutcomes?.length || 0}`,
+    type: "node_runtime",
+    time: nodeRuntimeClockText(world),
+    clock: world.clock || 0,
+    source: "node-runtime-prejudge"
+  });
+}
+
 function nodeRuntimeActionPayload(world, agent, candidate = {}) {
   const placeId = nodeRuntimePlaceId(world, agent);
   const place = nodeRuntimePlace(world, placeId);
@@ -1052,6 +1159,106 @@ function nodeRuntimeApplyAction(world, agent, aiResult, timePassage = null, sett
   return action;
 }
 
+async function nodeRuntimeRunPostAgents(world, actionItems, settlementPatches = []) {
+  if (!actionItems.length) return;
+  const actionEvents = actionItems.map(item => ({
+    id: item.queueId,
+    eventId: item.queueId,
+    title: `${item.agent.name} action`,
+    place: nodeRuntimePlaceId(world, item.agent),
+    sourceAgentId: item.agent.id,
+    summary: item.result?.action?.summary || item.agent.currentTask || "",
+    knownBy: [item.agent.id, ...nodeRuntimeVisibleAgents(world, item.agent).map(agent => agent.id)],
+    timePassage: item.timePassage || null,
+    settlementPatch: nodeRuntimeFindPatch(settlementPatches, item)
+  }));
+  const impact = await callAiWithRetry("eventImpactAgent", { ...nodeRuntimeWorldContext(world), actionEvents, events: actionEvents });
+  if (!Array.isArray(world.eventImpacts)) world.eventImpacts = [];
+  world.eventImpacts.unshift(...(impact.eventImpacts || []).slice(0, 12).map(item => ({ ...nodeRuntimeCompactItem(item), at: world.clock || 0, source: "node-event-impact" })));
+  world.eventImpacts = world.eventImpacts.slice(0, 80);
+  const propagationPayload = { ...nodeRuntimeWorldContext(world), eventImpacts: impact.eventImpacts || [] };
+  const [propagation, dynamics, social] = await Promise.all([
+    callAiWithRetry("informationPropagationAgent", propagationPayload),
+    callAiWithRetry("relationshipDynamicsAgent", { ...propagationPayload, informationFlows: world.informationFlows || [] }),
+    callAiWithRetry("socialProcessAgent", { ...propagationPayload, relationshipDynamics: world.relationshipDynamics || [] })
+  ]);
+  if (!Array.isArray(world.informationFlows)) world.informationFlows = [];
+  world.informationFlows.unshift(...(propagation.informationFlows || []).slice(0, 20).map(item => ({ ...nodeRuntimeCompactItem(item), at: world.clock || 0, source: "node-information-propagation" })));
+  world.informationFlows = world.informationFlows.slice(0, 120);
+  if (!Array.isArray(world.relationshipDynamics)) world.relationshipDynamics = [];
+  const relationItems = dynamics.pairDynamics || dynamics.relationshipDynamics || dynamics.relationUpdates || [];
+  world.relationshipDynamics.unshift(...relationItems.slice(0, 20).map(item => ({ ...nodeRuntimeCompactItem(item), at: world.clock || 0, source: "node-relationship-dynamics" })));
+  world.relationshipDynamics = world.relationshipDynamics.slice(0, 120);
+  if (!Array.isArray(world.socialProcesses)) world.socialProcesses = [];
+  const processItems = social.processes || social.socialProcesses || social.updates || [];
+  world.socialProcesses.unshift(...processItems.slice(0, 20).map(item => ({ ...nodeRuntimeCompactItem(item), at: world.clock || 0, source: "node-social-process" })));
+  world.socialProcesses = world.socialProcesses.slice(0, 120);
+  world.logs ||= [];
+  world.logs.unshift({
+    title: "Node Post Agents",
+    body: `EventImpact ${impact.eventImpacts?.length || 0}; InformationPropagation ${propagation.informationFlows?.length || 0}; RelationshipDynamics ${relationItems.length}; SocialProcess ${processItems.length}`,
+    type: "node_runtime",
+    time: nodeRuntimeClockText(world),
+    clock: world.clock || 0,
+    source: "node-runtime-postagents"
+  });
+}
+
+function nodeRuntimeIsMidnightCross(beforeClock, afterClock) {
+  const beforeDay = Math.floor(Number(beforeClock || 0) / 1440);
+  const afterDay = Math.floor(Number(afterClock || 0) / 1440);
+  return afterDay > beforeDay;
+}
+
+async function nodeRuntimeRunDailyAgents(world) {
+  const agents = (world.agents || []).filter(agent => agent?.id && agent.lifeStatus !== "dead").slice(0, 80).map(nodeRuntimeAgentBrief);
+  const payload = nodeRuntimeWorldContext(world, agents);
+  const [socialEmbedding, locationInstitution, locationDaily, locationChain, planner, narrative, personality] = await Promise.all([
+    callAiWithRetry("socialEmbeddingAgent", payload),
+    callAiWithRetry("locationInstitutionAgent", payload),
+    callAiWithRetry("locationDailyAgent", payload),
+    callAiWithRetry("locationChainAgent", payload),
+    callAiWithRetry("dailyPlanner", payload),
+    callAiWithRetry("selfNarrativeAgent", payload),
+    callAiWithRetry("personalityConsistencyAgent", payload)
+  ]);
+  world.dailyAgentState ||= {};
+  world.dailyAgentState.lastRunClock = world.clock || 0;
+  world.dailyAgentState.socialEmbedding = socialEmbedding;
+  world.dailyAgentState.locationInstitution = locationInstitution;
+  world.dailyAgentState.locationDaily = locationDaily;
+  world.dailyAgentState.locationChain = locationChain;
+  world.dailyAgentState.planner = planner;
+  world.dailyAgentState.selfNarrative = narrative;
+  world.dailyAgentState.personality = personality;
+  const byId = new Map((world.agents || []).map(agent => [agent.id, agent]));
+  (planner.agentPlans || []).forEach(item => {
+    const agent = byId.get(item.agentId);
+    if (!agent) return;
+    agent.actionPlan = Array.isArray(item.plans) ? item.plans.slice(0, 4) : agent.actionPlan || [];
+  });
+  (narrative.agentNarratives || narrative.narratives || []).forEach(item => {
+    const agent = byId.get(item.agentId);
+    if (agent && item.selfNarrative) agent.selfNarrative = String(item.selfNarrative).slice(0, 400);
+  });
+  (personality.agentProfiles || personality.profiles || personality.identityUpdates || []).forEach(item => {
+    const agent = byId.get(item.agentId);
+    if (!agent) return;
+    agent.identityCore ||= {};
+    if (item.identityBiases) agent.identityCore.biases = { ...(agent.identityCore.biases || {}), ...item.identityBiases };
+    if (item.decisionBias) agent.personalityProfile = { ...(agent.personalityProfile || {}), decisionBias: String(item.decisionBias).slice(0, 160) };
+  });
+  world.logs ||= [];
+  world.logs.unshift({
+    title: "Node Daily Agents",
+    body: "SocialEmbedding / LocationInstitution / LocationDaily / LocationChain / DailyPlanner / SelfNarrative / PersonalityConsistency completed",
+    type: "node_runtime",
+    time: nodeRuntimeClockText(world),
+    clock: world.clock || 0,
+    source: "node-runtime-daily"
+  });
+}
+
 async function runNodeRuntimeStep(slot) {
   const safeSlot = safeSaveName(slot || runtimeSlot || listSaves()[0]?.slot || "autosave");
   const payload = readSavePayload(safeSlot);
@@ -1061,8 +1268,11 @@ async function runNodeRuntimeStep(slot) {
     throw error;
   }
   const world = payload.world || payload;
+  const beforeClock = Number(world.clock || 0);
   const dueAgents = nodeRuntimeCandidates(world);
   if (dueAgents.length) {
+    await nodeRuntimeRunLocationAndProcessAgents(world, dueAgents);
+    await nodeRuntimeRunPreJudgement(world, dueAgents);
     const scheduled = await callAiWithRetry("scheduler", nodeRuntimeSchedulerPayload(world, dueAgents));
     const selected = Array.isArray(scheduled?.candidates) ? scheduled.candidates : [];
     const maxActions = Math.max(1, Math.min(MAX_ACTIONS_HARD_LIMIT, Number(world?.config?.maxActionsPerCycle || aiConfig.maxActionsPerCycle || 3)));
@@ -1087,6 +1297,7 @@ async function runNodeRuntimeStep(slot) {
       successfulActions.forEach(item => {
         nodeRuntimeApplyAction(world, item.agent, item.result, item.timePassage, nodeRuntimeFindPatch(patches, item));
       });
+      await nodeRuntimeRunPostAgents(world, successfulActions, patches);
       world.logs ||= [];
       world.logs.unshift({
         title: "Node AI Action Chain",
@@ -1110,6 +1321,9 @@ async function runNodeRuntimeStep(slot) {
     });
   }
   const result = nodeStepPayload(payload);
+  if (nodeRuntimeIsMidnightCross(beforeClock, result.payload?.world?.clock || 0)) {
+    await nodeRuntimeRunDailyAgents(result.payload.world);
+  }
   writeRuntimePayload(safeSlot, result.payload);
   runtimeSlot = safeSlot;
   runtimeLastMessage = `Node tick 完成：${result.summary.clockText}`;
@@ -1248,6 +1462,22 @@ async function startRuntime(slot = "", options = {}) {
     runtimeSlot = chosenSlot;
     runtimeEngine = "node-core-v1";
     runtimeStartedAt = Date.now();
+    if (mode === "step") {
+      runtimeState = "stepping";
+      runtimeLastMessage = "Node single step running";
+      runNodeRuntimeStep(chosenSlot)
+        .then(summary => {
+          runtimeState = "paused";
+          runtimeStartedAt = 0;
+          runtimeLastMessage = `Node single step completed: ${summary.clockText}`;
+        })
+        .catch(error => {
+          runtimeState = "paused";
+          runtimeStartedAt = 0;
+          runtimeLastMessage = `Node single step failed: ${error.message}`;
+        });
+      return runtimeStatus();
+    }
     if (mode === "step") {
       runtimeState = "stepping";
       const summary = await runNodeRuntimeStep(chosenSlot);
@@ -2616,6 +2846,9 @@ async function handleApi(req, res) {
       const body = JSON.parse(raw || "{}");
       send(res, 200, await startRuntime(body.slot || runtimeSlot || "", { mode: "step", engine: body.engine || "node-core-v1" }));
     } catch (error) {
+      runtimeState = "paused";
+      runtimeStartedAt = 0;
+      runtimeLastMessage = `Node single step failed: ${error.message}`;
       send(res, error.status || 500, { error: { message: error.message, type: "runtime_step_error" } });
     }
     return;

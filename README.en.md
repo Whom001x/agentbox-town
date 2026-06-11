@@ -26,8 +26,13 @@ Background runtime ownership has moved to Node. `node-core-v1` no longer depends
 - `AgentAction` results are written back to character current tasks, emotions, memories, active processes, movement requests, and action records.
 - `TimePassageAgent` now runs in the Node chain to judge action duration, completion, remaining low-grain activity, and cross-round process state.
 - `StateSettlementAgent` now runs in the Node chain as one small parallel request per action to avoid large JSON failures; local reducers clamp and apply need, emotion, memory, relationship, and settlement-note patches.
+- `NeedIntent / ContextRule / CrisisTriage / KnowledgeJudge / OutcomeJudge` now run in the Node pre-judgement chain.
+- `LocationRuntime / ProcessManager / ProfessionService / SocialPattern` now run in the Node context chain.
+- `EventImpact / InformationPropagation / RelationshipDynamics / SocialProcess` now run in the Node post-action chain, with compacted runtime caches.
+- `SocialEmbedding / LocationInstitution / LocationDaily / LocationChain / DailyPlanner / SelfNarrative / PersonalityConsistency` are connected to the Node midnight settlement chain.
 - After actions are applied, Node core advances virtual time, sleep, physiological decay, basic eating/care, movement arrival, and mortality checks.
 - The background loop is serial: the next round is scheduled only after Scheduler, AgentAction, and Node tick have all completed.
+- The step API returns `stepping` immediately while the full chain continues in the background; status becomes `paused` when the step finishes.
 - Pausing or stopping the background runtime cancels current AI retries so old requests do not keep the backend stuck.
 
 `headless-browser-shim` remains as a compatibility fallback. Later stages can continue moving `NeedIntent / ContextRule / CrisisTriage / KnowledgeJudge / OutcomeJudge`, `StateSettlement`, information propagation, relationship dynamics, and social processes into pure Node.
