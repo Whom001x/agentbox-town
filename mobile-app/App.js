@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
+  Image,
+  ImageBackground,
   Modal,
   NativeModules,
   Pressable,
@@ -14,6 +16,13 @@ import {
   useWindowDimensions
 } from "react-native";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
+
+const assets = {
+  townMap: require("./assets/town-map-bg.png"),
+  miniMap: require("./assets/mini-map-bg.png"),
+  placeMarker: require("./assets/place-marker.png"),
+  eventMarker: require("./assets/event-marker.png")
+};
 
 const palette = {
   bg: "#081018",
@@ -399,7 +408,7 @@ function MiniMap({ places }) {
         <Text style={styles.panelTitle}>小镇地图</Text>
         <Ionicons name="location" size={18} color={palette.ink} />
       </View>
-      <View style={styles.miniMapBody}>
+      <ImageBackground source={assets.miniMap} style={styles.miniMapBody} imageStyle={styles.miniMapImage}>
         {places.slice(0, 40).map(place => (
           <View
             key={place.id}
@@ -409,18 +418,15 @@ function MiniMap({ places }) {
             ]}
           />
         ))}
-      </View>
+      </ImageBackground>
     </View>
   );
 }
 
 function TownMap({ mapHeight, places, boxes, placeAgentCount, openPlace }) {
   return (
-    <View style={[styles.map, { height: mapHeight }]}>
-      <View style={styles.sunGlow} />
-      <View style={[styles.road, styles.roadH]} />
-      <View style={[styles.road, styles.roadV]} />
-      <View style={styles.water} />
+    <ImageBackground source={assets.townMap} style={[styles.map, { height: mapHeight }]} imageStyle={styles.mapImage}>
+      <View style={styles.mapShade} />
       {places.map((place, index) => {
         const count = placeAgentCount(place.id);
         const box = boxes[place.id] || {};
@@ -440,13 +446,14 @@ function TownMap({ mapHeight, places, boxes, placeAgentCount, openPlace }) {
             ]}
             onPress={() => openPlace(place)}
           >
+            <Image source={assets.placeMarker} style={styles.placeMarkerImage} />
             <Text style={styles.placeName} numberOfLines={1}>{place.name || place.id}</Text>
             <Text style={styles.placeCount}>{count} 人</Text>
-            {hasEvent && <View style={styles.eventMark}><Text style={styles.eventMarkText}>!</Text></View>}
+            {hasEvent && <Image source={assets.eventMarker} style={styles.eventMark} />}
           </Pressable>
         );
       })}
-    </View>
+    </ImageBackground>
   );
 }
 
@@ -702,6 +709,13 @@ const styles = StyleSheet.create({
     overflow: "hidden",
     backgroundColor: "#2f543d"
   },
+  mapImage: {
+    resizeMode: "cover"
+  },
+  mapShade: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "rgba(4, 13, 10, 0.08)"
+  },
   sunGlow: {
     position: "absolute",
     left: "34%",
@@ -738,52 +752,60 @@ const styles = StyleSheet.create({
   },
   place: {
     position: "absolute",
-    width: 72,
-    minHeight: 48,
-    marginLeft: -36,
-    marginTop: -24,
-    borderWidth: 1,
-    borderColor: "rgba(255, 237, 178, 0.75)",
-    borderRadius: 12,
-    backgroundColor: "rgba(236, 194, 104, 0.92)",
-    padding: 6,
+    width: 86,
+    height: 76,
+    marginLeft: -43,
+    marginTop: -58,
+    alignItems: "center",
+    justifyContent: "flex-end",
+    paddingHorizontal: 4,
+    paddingBottom: 1,
     shadowColor: "#000",
     shadowOpacity: 0.35,
     shadowRadius: 12,
     elevation: 6
   },
   placeBusy: {
-    backgroundColor: "rgba(237, 152, 80, 0.94)"
+    transform: [{ scale: 1.08 }]
   },
   placeEvent: {
-    borderColor: "#fff2a6",
-    borderWidth: 2
+    transform: [{ scale: 1.08 }]
+  },
+  placeMarkerImage: {
+    position: "absolute",
+    top: 0,
+    width: 62,
+    height: 62,
+    resizeMode: "contain"
   },
   placeName: {
-    color: "#25170b",
+    maxWidth: 82,
+    color: "#fff7df",
     fontWeight: "900",
-    fontSize: 11
+    fontSize: 10,
+    paddingHorizontal: 5,
+    paddingVertical: 1,
+    borderRadius: 999,
+    backgroundColor: "rgba(45, 25, 9, 0.78)",
+    overflow: "hidden"
   },
   placeCount: {
-    color: "#4d3517",
+    color: "#ffe3a1",
     marginTop: 2,
-    fontSize: 10,
-    fontWeight: "700"
+    fontSize: 9,
+    fontWeight: "900",
+    paddingHorizontal: 5,
+    borderRadius: 999,
+    backgroundColor: "rgba(16, 24, 22, 0.72)",
+    overflow: "hidden"
   },
   eventMark: {
     position: "absolute",
-    right: -6,
-    top: -6,
-    width: 17,
-    height: 17,
-    borderRadius: 9,
-    backgroundColor: palette.red,
-    alignItems: "center",
-    justifyContent: "center"
-  },
-  eventMarkText: {
-    color: "#fff",
-    fontWeight: "900"
+    right: 8,
+    top: 0,
+    width: 28,
+    height: 28,
+    resizeMode: "contain"
   },
   topHud: {
     position: "absolute",
@@ -880,6 +902,9 @@ const styles = StyleSheet.create({
   miniMapBody: {
     height: 88,
     backgroundColor: "rgba(56, 94, 60, 0.7)"
+  },
+  miniMapImage: {
+    resizeMode: "cover"
   },
   miniDot: {
     position: "absolute",

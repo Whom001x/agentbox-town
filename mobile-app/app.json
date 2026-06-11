@@ -4,13 +4,18 @@
     "slug": "agentbox-town-mobile",
     "version": "0.1.0",
     "orientation": "landscape",
+    "icon": "./assets/app-icon.png",
     "userInterfaceStyle": "dark",
     "scheme": "agentboxtown",
     "assetBundlePatterns": [
       "**/*"
     ],
     "android": {
-      "package": "com.agentboxtown.mobile"
+      "package": "com.agentboxtown.mobile",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/app-icon.png",
+        "backgroundColor": "#0d1d2c"
+      }
     },
     "ios": {
       "supportsTablet": true,
