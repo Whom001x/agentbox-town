@@ -113,6 +113,7 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState("");
   const [drawer, setDrawer] = useState({ type: "", title: "", item: null });
+  const [eventsExpanded, setEventsExpanded] = useState(false);
 
   const world = payload?.world || {};
   const agents = Array.isArray(world.agents) ? world.agents : [];
@@ -296,6 +297,8 @@ export default function App() {
             runtime={runtime}
             landscape={landscape}
             openAgent={openAgent}
+            expanded={eventsExpanded}
+            toggleExpanded={() => setEventsExpanded(value => !value)}
           />
           <BottomBar
             slot={slot}
@@ -447,21 +450,28 @@ function TownMap({ mapHeight, places, boxes, placeAgentCount, openPlace }) {
   );
 }
 
-function SidePanel({ events, agents, runtime, landscape, openAgent }) {
+function SidePanel({ events, agents, runtime, landscape, openAgent, expanded, toggleExpanded }) {
   const critical = agents.filter(agent => !isDead(agent) && Object.values(agent.needs || {}).some(value => Number(value) <= 20)).slice(0, 3);
+  const visibleEvents = events.slice(0, expanded ? 8 : 3);
   return (
-    <View style={[styles.sidePanel, !landscape && styles.sidePanelPortrait]}>
+    <View style={[styles.sidePanel, expanded && styles.sidePanelExpanded, !landscape && styles.sidePanelPortrait]}>
       <View style={styles.panelHeader}>
         <MaterialCommunityIcons name="bullhorn" size={18} color={palette.ink} />
         <Text style={styles.panelTitle}>小镇事件</Text>
+        <Pressable style={styles.panelToggle} onPress={toggleExpanded}>
+          <Text style={styles.panelToggleText}>{expanded ? "收拢" : "展开"}</Text>
+          <Ionicons name={expanded ? "chevron-up" : "chevron-down"} size={16} color={palette.ink} />
+        </Pressable>
       </View>
-      {events.slice(0, 3).map((event, index) => (
-        <View key={`${event.title || "event"}-${index}`} style={styles.eventRow}>
-          <Text style={styles.eventTitle} numberOfLines={1}>{event.title || "小镇事件"}</Text>
-          <Text style={styles.eventBody} numberOfLines={2}>{event.body || event.summary || event.text || "等待后台推进"}</Text>
-        </View>
-      ))}
-      {!events.length && <Text style={styles.emptyText}>暂无事件</Text>}
+      <ScrollView style={styles.eventScroll} nestedScrollEnabled showsVerticalScrollIndicator={expanded}>
+        {visibleEvents.map((event, index) => (
+          <View key={`${event.title || "event"}-${index}`} style={styles.eventRow}>
+            <Text style={styles.eventTitle} numberOfLines={1}>{event.title || "小镇事件"}</Text>
+            <Text style={styles.eventBody} numberOfLines={expanded ? 4 : 2}>{event.body || event.summary || event.text || "等待后台推进"}</Text>
+          </View>
+        ))}
+        {!events.length && <Text style={styles.emptyText}>暂无事件</Text>}
+      </ScrollView>
       <View style={styles.panelHeaderSmall}>
         <MaterialCommunityIcons name="target" size={17} color={palette.ink} />
         <Text style={styles.panelTitle}>异常关注</Text>
@@ -850,6 +860,23 @@ const styles = StyleSheet.create({
     fontWeight: "900",
     fontSize: 12
   },
+  panelToggle: {
+    marginLeft: "auto",
+    minHeight: 26,
+    paddingHorizontal: 8,
+    borderRadius: 999,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    backgroundColor: "rgba(255,255,255,0.08)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.1)"
+  },
+  panelToggleText: {
+    color: palette.ink,
+    fontSize: 10,
+    fontWeight: "900"
+  },
   miniMapBody: {
     height: 88,
     backgroundColor: "rgba(56, 94, 60, 0.7)"
@@ -874,6 +901,10 @@ const styles = StyleSheet.create({
     padding: 8,
     overflow: "hidden"
   },
+  sidePanelExpanded: {
+    width: 320,
+    maxHeight: 430
+  },
   sidePanelPortrait: {
     left: 12,
     right: 12,
@@ -881,6 +912,9 @@ const styles = StyleSheet.create({
     bottom: 116,
     width: undefined,
     maxHeight: 200
+  },
+  eventScroll: {
+    maxHeight: 258
   },
   eventRow: {
     padding: 8,
