@@ -693,7 +693,18 @@
     .save-row:last-child { border-bottom: 0; }
     .save-row strong { display: block; font-size: 14px; }
     .save-row span { display: block; margin-top: 4px; color: var(--muted); font-size: 12px; }
+    .save-row.running-save { background: #eef6ff; }
+    .running-badge { display: inline-block; margin-left: 8px; padding: 2px 6px; border-radius: 999px; background: #2764d8; color: #fff; font-size: 12px; font-weight: 700; }
     .save-meta { color: var(--muted); font-size: 12px; }
+    .runtime-status {
+      margin-top: 8px;
+      padding: 8px 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #f7fbff;
+      color: var(--muted);
+      font-size: 13px;
+    }
     .setup-backdrop {
       position: fixed;
       inset: 0;
@@ -800,6 +811,7 @@
       <div class="manager-title">
         <h2>小镇管理</h2>
         <p id="saveDirectoryText">读取存档文件夹中...</p>
+        <div class="runtime-status" id="managerRuntimeText">后台状态：读取中...</div>
       </div>
       <div class="manager-actions">
         <input id="saveNameInput" placeholder="新存档名称，例如 day-1">
@@ -860,6 +872,7 @@
       <span class="pill">队列 <b id="queueCount">0</b></span>
       <span class="pill">运行 <b id="runningCount">0</b></span>
       <span class="pill">AI <b id="aiState">检测中</b></span>
+      <span class="pill">后台 <b id="runtimeState">未运行</b></span>
       <span class="pill progress-pill" id="bootstrapProgressPill" hidden>建镇 <b id="bootstrapProgressText">准备中</b></span>
     </div>
     <div class="actions">
@@ -4470,6 +4483,7 @@
     let world = makeInitialWorld();
     let currentSaveSlot = "";
     let saveListCache = [];
+    let runtimeStatusCache = { running: false, slot: "", pid: 0 };
     let townEntered = false;
     let setupCreateInProgress = false;
     let setupBootstrapInProgress = false;
@@ -4778,8 +4792,8 @@
         return;
       }
       list.innerHTML = saveListCache.map(save => `
-        <div class="save-row" data-save-slot="${save.slot}">
-          <div><strong>${save.name}</strong><span>${save.clockText || "未知时间"}｜第 ${save.day || 1} 天｜${save.agentCount || 0} 人｜${save.format === "json" ? "旧JSON" : "文件夹"}｜${new Date(save.updatedAt).toLocaleString()}</span></div>
+        <div class="save-row ${runtimeStatusCache.running && runtimeStatusCache.slot === save.slot ? "running-save" : ""}" data-save-slot="${save.slot}">
+          <div><strong>${save.name}${runtimeStatusCache.running && runtimeStatusCache.slot === save.slot ? `<span class="running-badge">后台运行中</span>` : ""}</strong><span>${save.clockText || "未知时间"}｜第 ${save.day || 1} 天｜${save.agentCount || 0} 人｜${save.format === "json" ? "旧JSON" : "文件夹"}｜${new Date(save.updatedAt).toLocaleString()}</span></div>
           <button type="button" data-load-save="${save.slot}">读取</button>
           <button type="button" data-delete-save="${save.slot}">删除</button>
         </div>
@@ -4793,9 +4807,16 @@
     }
 
     async function refreshSaves() {
-      const data = await api("/api/saves", {}, CONFIG_TIMEOUT_MS);
+      const [data, runtime] = await Promise.all([
+        api("/api/saves", {}, CONFIG_TIMEOUT_MS),
+        api("/api/runtime/status", {}, CONFIG_TIMEOUT_MS).catch(() => runtimeStatusCache)
+      ]);
+      runtimeStatusCache = runtime || { running: false, slot: "", pid: 0 };
       saveListCache = data.saves || [];
       byId("saveDirectoryText").textContent = `存档文件夹：${data.directory || "outputs/saves"}`;
+      byId("managerRuntimeText").textContent = runtimeStatusCache.running
+        ? `后台状态：正在运行 ${runtimeStatusCache.slot || "未知存档"}｜PID ${runtimeStatusCache.pid || "-"}`
+        : "后台状态：未运行";
       if (!currentSaveSlot && saveListCache[0]) currentSaveSlot = saveListCache[0].slot;
       renderSaveList();
     }
@@ -10969,6 +10990,21 @@
       }
     }
 
+    async function refreshRuntimeStatus() {
+      try {
+        runtimeStatusCache = await api("/api/runtime/status", {}, CONFIG_TIMEOUT_MS);
+        byId("runtimeState").textContent = runtimeStatusCache.running ? runtimeStatusCache.slot || "运行中" : "未运行";
+        byId("runtimeState").title = runtimeStatusCache.running ? `PID ${runtimeStatusCache.pid || "-"}｜${runtimeStatusCache.runtimeUrl || ""}` : "";
+        if (byId("managerRuntimeText")) {
+          byId("managerRuntimeText").textContent = runtimeStatusCache.running
+            ? `后台状态：正在运行 ${runtimeStatusCache.slot || "未知存档"}｜PID ${runtimeStatusCache.pid || "-"}`
+            : "后台状态：未运行";
+        }
+      } catch {
+        byId("runtimeState").textContent = "未知";
+      }
+    }
+
     function labelRectOverlaps(rect, placed, gap = 8) {
       return placed.some(other =>
         rect.x < other.x + other.w + gap &&
@@ -12128,9 +12164,13 @@
         scheduleLoop();
       }
       await refreshMetrics();
+      await refreshRuntimeStatus();
       await refreshWhenSourceChanged();
       render();
       setInterval(refreshMetrics, 1000);
+      setInterval(() => {
+        refreshRuntimeStatus().then(renderSaveList).catch(() => {});
+      }, 3000);
       setInterval(refreshWhenSourceChanged, 2000);
       setInterval(() => {
         if (world.aiBackoffUntil) render();
