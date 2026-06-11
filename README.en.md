@@ -24,6 +24,8 @@ Background runtime ownership has moved to Node. `node-core-v1` no longer depends
 - Node calls `Scheduler` to choose which characters act this round.
 - Node calls `AgentAction` for selected characters in parallel, distributed through the key pool and per-key concurrency limit.
 - `AgentAction` results are written back to character current tasks, emotions, memories, active processes, movement requests, and action records.
+- `TimePassageAgent` now runs in the Node chain to judge action duration, completion, remaining low-grain activity, and cross-round process state.
+- `StateSettlementAgent` now runs in the Node chain as one small parallel request per action to avoid large JSON failures; local reducers clamp and apply need, emotion, memory, relationship, and settlement-note patches.
 - After actions are applied, Node core advances virtual time, sleep, physiological decay, basic eating/care, movement arrival, and mortality checks.
 - The background loop is serial: the next round is scheduled only after Scheduler, AgentAction, and Node tick have all completed.
 - Pausing or stopping the background runtime cancels current AI retries so old requests do not keep the backend stuck.

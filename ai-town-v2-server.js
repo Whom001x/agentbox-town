@@ -3,7 +3,7 @@ const fs = require("fs");
 const path = require("path");
 const os = require("os");
 const { spawn } = require("child_process");
-const { nodeStepPayload } = require("./ai-town-node-core");
+const { nodeStepPayload, minutesToClock } = require("./ai-town-node-core");
 
 const PORT = Number(process.env.AI_TOWN_V2_PORT || 8788);
 const HOST = String(process.env.AI_TOWN_V2_HOST || "0.0.0.0");
@@ -707,6 +707,10 @@ function nodeRuntimePlaceId(world, agent) {
   return agent?.position || agent?.place || "";
 }
 
+function nodeRuntimeClockText(world) {
+  return minutesToClock(Number(world?.clock || 0)).text;
+}
+
 function nodeRuntimePlace(world, placeId) {
   const places = Array.isArray(world?.places) ? world.places : [];
   return places.find(place => place.id === placeId) || { id: placeId, name: placeId || "unknown" };
@@ -769,7 +773,7 @@ function nodeRuntimeSchedulerPayload(world, dueAgents) {
   const maxActions = Math.max(1, Math.min(MAX_ACTIONS_HARD_LIMIT, Number(world?.config?.maxActionsPerCycle || aiConfig.maxActionsPerCycle || 3)));
   return {
     clock: world.clock || 0,
-    clockText: world.clockText || world.weatherBox?.calendar?.text || "",
+    clockText: nodeRuntimeClockText(world),
     calendar: world.weatherBox?.calendar || {},
     maxActions,
     dueAgents,
@@ -820,27 +824,193 @@ function nodeRuntimeClampDelta(value, min = -8, max = 8) {
   return Math.max(min, Math.min(max, number));
 }
 
-function nodeRuntimeApplyAction(world, agent, aiResult) {
+const nodeRuntimeNeedKeys = ["hunger", "hygiene", "health", "social", "responsibility", "stress", "comfort", "safety"];
+const nodeRuntimeEmotionKeys = ["happy", "anxious", "angry", "sad", "tired", "lonely", "hopeful", "calm", "curious"];
+
+function nodeRuntimeAdjustNeeds(agent, changes = {}, limit = 8) {
+  agent.needs ||= {};
+  Object.entries(changes || {}).forEach(([key, value]) => {
+    if (!nodeRuntimeNeedKeys.includes(key)) return;
+    const before = Number(agent.needs[key] ?? 70);
+    agent.needs[key] = Math.max(0, Math.min(100, before + nodeRuntimeClampDelta(value, key === "health" ? -3 : -limit, limit)));
+  });
+}
+
+function nodeRuntimeAdjustEmotion(agent, changes = {}, limit = 8) {
+  agent.emotionVector ||= agent.emotions || {};
+  Object.entries(changes || {}).forEach(([key, value]) => {
+    if (!nodeRuntimeEmotionKeys.includes(key)) return;
+    const before = Number(agent.emotionVector[key] ?? 50);
+    agent.emotionVector[key] = Math.max(0, Math.min(100, before + nodeRuntimeClampDelta(value, -limit, limit)));
+  });
+  agent.emotions = agent.emotionVector;
+}
+
+function nodeRuntimeTimePassagePayload(world, actionItems) {
+  const tickMinutes = Math.max(1, Math.min(240, Number(world?.config?.virtualMinutesPerPulse || aiConfig.virtualMinutesPerPulse || 60)));
+  return {
+    time: nodeRuntimeClockText(world),
+    virtualMinute: world.clock || 0,
+    tickMinutes,
+    locations: Array.isArray(world.places) ? world.places.map(place => ({ id: place.id, name: place.name })).slice(0, 120) : [],
+    items: actionItems.map(item => ({
+      queueId: item.queueId,
+      agentId: item.agent.id,
+      agent: nodeRuntimeAgentBrief(item.agent),
+      action: item.result?.action || {},
+      currentLocation: nodeRuntimePlace(world, nodeRuntimePlaceId(world, item.agent)),
+      actionType: item.candidate?.actionType || item.result?.action?.type || "wait",
+      activeProcess: item.agent.activeProcess || null,
+      movement: item.agent.movement || null
+    }))
+  };
+}
+
+function nodeRuntimeNormalizeTimePassage(raw = {}, payloadItem = {}, tickMinutes = 60) {
+  const estimated = Math.max(5, Math.min(240, Number(raw.estimatedMinutes || raw.spentMinutes || tickMinutes)));
+  const spent = Math.max(0, Math.min(tickMinutes, Number(raw.spentMinutes || Math.min(estimated, tickMinutes))));
+  const ambient = Math.max(0, Math.min(tickMinutes, Number(raw.ambientMinutes ?? tickMinutes - spent)));
+  const overflow = Math.max(0, Number(raw.overflowMinutes ?? estimated - spent));
+  const finished = raw.finished === undefined ? estimated <= tickMinutes && overflow <= 0 : Boolean(raw.finished);
+  return {
+    queueId: String(raw.queueId || payloadItem.queueId || ""),
+    agentId: String(raw.agentId || payloadItem.agentId || ""),
+    tickMinutes,
+    estimatedMinutes: estimated,
+    spentMinutes: spent,
+    ambientMinutes: ambient,
+    overflowMinutes: overflow,
+    finished,
+    stage: String(raw.stage || (finished ? "feedback" : "execute")).slice(0, 30),
+    currentStep: String(raw.currentStep || raw.processUpdate?.currentStep || "").slice(0, 120),
+    summary: String(raw.summary || "").slice(0, 180),
+    remainingActivity: raw.remainingActivity && typeof raw.remainingActivity === "object" ? {
+      type: String(raw.remainingActivity.type || "observe").slice(0, 30),
+      minutes: Math.max(0, Math.min(ambient, Number(raw.remainingActivity.minutes || 0))),
+      currentTask: String(raw.remainingActivity.currentTask || "").slice(0, 80),
+      summary: String(raw.remainingActivity.summary || "").slice(0, 160)
+    } : null,
+    nextRoundHint: String(raw.nextRoundHint || "").slice(0, 120),
+    movement: raw.movement && typeof raw.movement === "object" ? raw.movement : null,
+    processUpdate: raw.processUpdate && typeof raw.processUpdate === "object" ? raw.processUpdate : {}
+  };
+}
+
+async function nodeRuntimeRunTimePassage(world, actionItems) {
+  if (!actionItems.length) return [];
+  const payload = nodeRuntimeTimePassagePayload(world, actionItems);
+  const result = await callAiWithRetry("timePassageAgent", payload);
+  const raw = Array.isArray(result?.passages) ? result.passages : [];
+  return payload.items.map(item => {
+    const found = raw.find(passage => passage.queueId === item.queueId || passage.agentId === item.agentId) || {};
+    return nodeRuntimeNormalizeTimePassage(found, item, payload.tickMinutes);
+  });
+}
+
+function nodeRuntimeStateSettlementPayload(world, actionItems) {
+  return {
+    time: nodeRuntimeClockText(world),
+    virtualMinute: world.clock || 0,
+    locations: Array.isArray(world.places) ? world.places.map(place => ({ id: place.id, name: place.name })).slice(0, 120) : [],
+    items: actionItems.map(item => {
+      const visibleAgents = nodeRuntimeVisibleAgents(world, item.agent);
+      return {
+        queueId: item.queueId,
+        agentId: item.agent.id,
+        agent: nodeRuntimeAgentBrief(item.agent),
+        action: item.result?.action || {},
+        timePassage: item.timePassage || null,
+        currentLocation: nodeRuntimePlace(world, nodeRuntimePlaceId(world, item.agent)),
+        allowedKnowledgeIds: [item.agent.id, ...visibleAgents.map(agent => agent.id)],
+        allowedSettlementPlaces: [
+          nodeRuntimePlaceId(world, item.agent),
+          item.result?.action?.newLocation || ""
+        ].filter(Boolean)
+      };
+    })
+  };
+}
+
+async function nodeRuntimeRunStateSettlement(world, actionItems) {
+  if (!actionItems.length) return [];
+  const settled = await Promise.all(actionItems.map(async item => {
+    const result = await callAiWithRetry("stateSettlementAgent", nodeRuntimeStateSettlementPayload(world, [item]));
+    return Array.isArray(result?.patches) ? result.patches : [];
+  }));
+  return settled.flat();
+}
+
+function nodeRuntimeFindPatch(patches, item) {
+  return (patches || []).find(patch => patch.queueId === item.queueId || patch.agentId === item.agent.id) || null;
+}
+
+function nodeRuntimeApplySettlementPatch(world, agent, patch) {
+  if (!patch || typeof patch !== "object") return;
+  nodeRuntimeAdjustNeeds(agent, patch.needDelta || {}, 8);
+  nodeRuntimeAdjustEmotion(agent, patch.emotionDelta || {}, 8);
+  if (Array.isArray(patch.memoryWrites)) {
+    agent.memory ||= { short: [], long: [], emotional: [], secret: [], rumor: [] };
+    patch.memoryWrites.slice(0, 2).forEach(memory => {
+      const layer = ["short", "long", "emotional", "secret", "rumor"].includes(memory.layer) ? memory.layer : "short";
+      const text = String(memory.text || "").slice(0, 180);
+      if (!text) return;
+      agent.memory[layer] ||= [];
+      agent.memory[layer].unshift({
+        text,
+        importance: Math.max(1, Math.min(5, Number(memory.importance || 3))),
+        at: world.clock || 0,
+        source: "node-state-settlement"
+      });
+      agent.memory[layer] = agent.memory[layer].slice(0, 30);
+    });
+  }
+  if (Array.isArray(patch.relationImpacts)) {
+    agent.relationshipMatrix ||= {};
+    patch.relationImpacts.slice(0, 4).forEach(impact => {
+      const targetId = String(impact.to || "");
+      if (!targetId || !(world.agents || []).some(item => item.id === targetId)) return;
+      agent.relationshipMatrix[targetId] ||= {};
+      ["trust", "intimacy", "respect", "debt", "resentment", "dependency", "rivalry"].forEach(key => {
+        const before = Number(agent.relationshipMatrix[targetId][key] ?? 0);
+        agent.relationshipMatrix[targetId][key] = Math.max(0, Math.min(100, before + nodeRuntimeClampDelta(impact[key], -4, 4)));
+      });
+      agent.relationshipMatrix[targetId].lastReason = String(impact.reason || patch.explanation || "node settlement").slice(0, 80);
+    });
+  }
+  agent.stateSettlementNotes ||= [];
+  if (patch.explanation || patch.reason) {
+    agent.stateSettlementNotes.unshift({
+      time: nodeRuntimeClockText(world),
+      note: String(patch.explanation || patch.reason).slice(0, 160),
+      source: "node-state-settlement"
+    });
+    agent.stateSettlementNotes = agent.stateSettlementNotes.slice(0, 20);
+  }
+}
+
+function nodeRuntimeApplyAction(world, agent, aiResult, timePassage = null, settlementPatch = null) {
   const action = aiResult?.action || {};
   agent.currentTask = String(action.currentTask || action.summary || agent.currentTask || "维持当前安排").slice(0, 80);
   agent.mood = String(action.mood || agent.mood || "").slice(0, 40);
-  agent.emotionVector ||= agent.emotions || {};
-  Object.entries(action.emotionDelta || {}).forEach(([key, delta]) => {
-    const before = Number(agent.emotionVector[key] ?? 50);
-    agent.emotionVector[key] = Math.max(0, Math.min(100, before + nodeRuntimeClampDelta(delta)));
-  });
-  agent.emotions = agent.emotionVector;
+  nodeRuntimeAdjustEmotion(agent, action.emotionDelta || {}, 8);
+  if (timePassage) {
+    agent.lastTimePassage = timePassage;
+    const remainingTask = timePassage.finished ? timePassage.remainingActivity?.currentTask : "";
+    if (remainingTask) agent.currentTask = remainingTask;
+  }
   if (action.processUpdate && typeof action.processUpdate === "object") {
-    if (action.processUpdate.finished) {
+    const passageProcess = timePassage?.processUpdate || {};
+    const finished = timePassage ? Boolean(timePassage.finished) : Boolean(action.processUpdate.finished);
+    if (finished) {
       agent.activeProcess = null;
     } else {
       agent.activeProcess = {
         ...(agent.activeProcess || {}),
-        goal: String(action.processUpdate.goal || agent.activeProcess?.goal || action.currentTask || "").slice(0, 80),
-        stage: String(action.processUpdate.stage || agent.activeProcess?.stage || "execute").slice(0, 30),
-        currentStep: String(action.processUpdate.currentStep || "").slice(0, 120),
-        progress: Math.max(0, Math.min(100, Number(agent.activeProcess?.progress || 0) + nodeRuntimeClampDelta(action.processUpdate.progressDelta, 0, 60))),
-        blockedBy: String(action.processUpdate.blockedBy || "").slice(0, 120),
+        goal: String(passageProcess.goal || action.processUpdate.goal || agent.activeProcess?.goal || action.currentTask || "").slice(0, 80),
+        stage: String(passageProcess.stage || action.processUpdate.stage || agent.activeProcess?.stage || "execute").slice(0, 30),
+        currentStep: String(passageProcess.currentStep || action.processUpdate.currentStep || timePassage?.currentStep || "").slice(0, 120),
+        progress: Math.max(0, Math.min(100, Number(agent.activeProcess?.progress || 0) + nodeRuntimeClampDelta(passageProcess.progressDelta ?? action.processUpdate.progressDelta, 0, 60))),
+        blockedBy: String(passageProcess.blockedBy || action.processUpdate.blockedBy || timePassage?.nextRoundHint || "").slice(0, 120),
         updatedAt: world.clock || 0
       };
     }
@@ -864,16 +1034,17 @@ function nodeRuntimeApplyAction(world, agent, aiResult) {
       from: nodeRuntimePlaceId(world, agent),
       to: targetPlace,
       startedAt: world.clock || 0,
-      arriveAt: Number(world.clock || 0) + Math.max(10, Math.min(60, Number(world?.config?.virtualMinutesPerPulse || 60) / 2))
+      arriveAt: Number(world.clock || 0) + Math.max(10, Math.min(90, Number(timePassage?.movement?.routeMinutes || timePassage?.spentMinutes || Number(world?.config?.virtualMinutesPerPulse || 60) / 2)))
     };
   }
+  nodeRuntimeApplySettlementPatch(world, agent, settlementPatch);
   world.records ||= [];
   world.records.unshift({
     title: `${agent.name} 的行动`,
-    body: String(action.summary || agent.currentTask || "维持当前生活节奏").slice(0, 220),
+    body: String([action.summary, timePassage?.summary, timePassage?.remainingActivity?.summary].filter(Boolean).join("｜") || agent.currentTask || "维持当前生活节奏").slice(0, 260),
     type: "node_agent_action",
     agents: [agent.id],
-    time: world.weatherBox?.calendar?.text || "",
+    time: nodeRuntimeClockText(world),
     clock: world.clock || 0,
     source: "node-runtime-agent-loop"
   });
@@ -899,24 +1070,40 @@ async function runNodeRuntimeStep(slot) {
     const actionCalls = selected
       .filter(item => byId.has(item.agentId))
       .slice(0, maxActions)
-      .map(candidate => {
+      .map((candidate, index) => {
         const agent = byId.get(candidate.agentId);
         return callAiWithRetry("agentAction", nodeRuntimeActionPayload(world, agent, candidate))
-          .then(result => ({ status: "fulfilled", agent, candidate, result }))
+          .then(result => ({ status: "fulfilled", queueId: `node-${world.clock || 0}-${agent.id}-${index}`, agent, candidate, result }))
           .catch(error => ({ status: "rejected", agent, candidate, error }));
       });
     const actionResults = await Promise.all(actionCalls);
-    actionResults.forEach(item => {
-      if (item.status === "fulfilled") {
-        nodeRuntimeApplyAction(world, item.agent, item.result);
-        return;
-      }
+    const successfulActions = actionResults.filter(item => item.status === "fulfilled");
+    if (successfulActions.length) {
+      const passages = await nodeRuntimeRunTimePassage(world, successfulActions);
+      successfulActions.forEach(item => {
+        item.timePassage = passages.find(passage => passage.queueId === item.queueId || passage.agentId === item.agent.id) || null;
+      });
+      const patches = await nodeRuntimeRunStateSettlement(world, successfulActions);
+      successfulActions.forEach(item => {
+        nodeRuntimeApplyAction(world, item.agent, item.result, item.timePassage, nodeRuntimeFindPatch(patches, item));
+      });
+      world.logs ||= [];
+      world.logs.unshift({
+        title: "Node AI Action Chain",
+        body: `Scheduler selected ${selected.length}; AgentAction ${successfulActions.length}; TimePassage ${passages.length}; StateSettlement ${patches.length}`,
+        type: "node_runtime",
+        time: nodeRuntimeClockText(world),
+        clock: world.clock || 0,
+        source: "node-runtime-agent-loop"
+      });
+    }
+    actionResults.filter(item => item.status === "rejected").forEach(item => {
       world.logs ||= [];
       world.logs.unshift({
         title: "Node AgentAction failed",
         body: `${item.agent?.name || item.candidate?.agentId || ""}: ${item.error?.message || "unknown error"}`,
         type: "node_runtime_error",
-        time: world.weatherBox?.calendar?.text || "",
+        time: nodeRuntimeClockText(world),
         clock: world.clock || 0,
         source: "node-runtime-agent-loop"
       });
