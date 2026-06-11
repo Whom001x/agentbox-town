@@ -5631,6 +5631,65 @@
       setSetupProgress("AI 分批建镇完成，可以创建并进入", 100, true);
     }
 
+    async function waitForNodeSetup(slot) {
+      const started = Date.now();
+      while (Date.now() - started < 30 * 60 * 1000) {
+        const progress = await api("/api/runtime/progress", {}, CONFIG_TIMEOUT_MS).catch(() => null);
+        if (progress) {
+          const percent = Number.isFinite(Number(progress.percent)) ? Math.round(Number(progress.percent)) : 0;
+          setSetupProgress(`Node建镇：${progress.phase || "running"} ${progress.currentTask || ""}`, percent, true);
+          if (progress.phase === "failed") throw new Error(progress.lastError || "Node setup failed");
+          if (progress.phase === "completed" && String(progress.currentTask || "").includes(slot)) return progress;
+        }
+        await sleep(1200);
+      }
+      throw new Error("Node setup timed out");
+    }
+
+    async function createArchiveFromSetupNode(forceAi = false) {
+      if (setupCreateInProgress) {
+        byId("setupHint").textContent = "正在创建存档，请稍等。";
+        return;
+      }
+      setupCreateInProgress = true;
+      byId("setupCreateBtn").disabled = true;
+      byId("setupAiBtn").disabled = true;
+      const slot = byId("setupSaveName").value.trim() || `town-${Date.now()}`;
+      try {
+        const seedRows = readSetupSeeds();
+        const targetAgentCount = desiredSetupAgentCount(seedRows);
+        const setupPlaces = ensureSetupPlaceCount(readSetupPlaces(), desiredSetupLocationCount(targetAgentCount));
+        setSetupProgress("提交给Node后端建镇", 5, true);
+        byId("setupHint").textContent = "Node后端正在建镇，页面只显示进度。";
+        await api("/api/setup/create", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            slot,
+            prompt: byId("setupPrompt").value.trim(),
+            startClock: setupClockMinutes(),
+            targetAgentCount,
+            targetLocationCount: setupPlaces.length,
+            agents: seedRows,
+            places: setupPlaces,
+            useAi: Boolean(forceAi || world.config.aiEnabled),
+            wait: false
+          })
+        }, CONFIG_TIMEOUT_MS);
+        await waitForNodeSetup(slot);
+        setSetupProgress("读取Node后端新存档", 96, true);
+        await refreshSaves();
+        await loadArchive(slot, true);
+        byId("setupBackdrop").hidden = true;
+        byId("managerBackdrop").hidden = true;
+        setSetupProgress("Node建镇完成", 100, true);
+      } finally {
+        setupCreateInProgress = false;
+        byId("setupCreateBtn").disabled = false;
+        byId("setupAiBtn").disabled = false;
+      }
+    }
+
     async function createArchiveFromSetup() {
       if (setupCreateInProgress) {
         byId("setupHint").textContent = "正在创建存档，请稍等，不要重复点击。";
@@ -12060,12 +12119,14 @@
       renderSetupRoles(setupSeedRowsForPromptTarget());
       renderSetupLocations(ensureSetupPlaceCount(setupPlacesFromTemplate(), desiredSetupLocationCount(desiredSetupAgentCount(readSetupSeeds()))));
     });
-    byId("setupAiBtn").addEventListener("click", () => aiCompleteSetup().catch(error => {
+    byId("setupAiBtn").textContent = "AI后端建镇并进入";
+    byId("setupCreateBtn").textContent = "Node创建并进入";
+    byId("setupAiBtn").addEventListener("click", () => createArchiveFromSetupNode(true).catch(error => {
       byId("setupHint").textContent = error.message;
       setSetupProgress(`失败：${error.message}`, 100, true);
     }));
     byId("setupCancelBtn").addEventListener("click", () => { byId("setupBackdrop").hidden = true; });
-    byId("setupCreateBtn").addEventListener("click", () => createArchiveFromSetup().catch(error => {
+    byId("setupCreateBtn").addEventListener("click", () => createArchiveFromSetupNode(false).catch(error => {
       byId("setupHint").textContent = error.message;
       setSetupProgress(`失败：${error.message}`, 100, true);
     }));
