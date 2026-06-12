@@ -438,10 +438,12 @@ function TownMap({ mapWidth, mapHeight, places, boxes, placeAgentCount, openPlac
     scale: 1
   }), [canvasHeight, canvasWidth, mapHeight, mapWidth]);
   const [mapView, setMapView] = useState(initialView);
+  const mapViewRef = useRef(initialView);
   const gestureRef = useRef({ x: initialView.x, y: initialView.y, distance: 0, scale: 1, focalX: 0, focalY: 0, moved: false });
 
   useEffect(() => {
     setMapView(initialView);
+    mapViewRef.current = initialView;
     gestureRef.current = { x: initialView.x, y: initialView.y, distance: 0, scale: initialView.scale, focalX: 0, focalY: 0, moved: false };
   }, [initialView]);
 
@@ -484,12 +486,16 @@ function TownMap({ mapWidth, mapHeight, places, boxes, placeAgentCount, openPlac
   }
 
   function zoomBy(delta) {
-    setMapView(current => clampMapView({
-      ...current,
-      scale: current.scale + delta,
-      x: current.x - (canvasWidth * delta) / 2,
-      y: current.y - (canvasHeight * delta) / 2
-    }, current));
+    setMapView(current => {
+      const next = clampMapView({
+        ...current,
+        scale: current.scale + delta,
+        x: current.x - (canvasWidth * delta) / 2,
+        y: current.y - (canvasHeight * delta) / 2
+      }, current);
+      mapViewRef.current = next;
+      return next;
+    });
   }
 
   const panResponder = useMemo(() => PanResponder.create({
@@ -505,11 +511,12 @@ function TownMap({ mapWidth, mapHeight, places, boxes, placeAgentCount, openPlac
     },
     onPanResponderGrant: (event) => {
       const focal = touchCenter(event.nativeEvent.touches);
+      const currentView = mapViewRef.current;
       gestureRef.current = {
-        x: mapView.x,
-        y: mapView.y,
+        x: currentView.x,
+        y: currentView.y,
         distance: touchDistance(event.nativeEvent.touches),
-        scale: mapView.scale,
+        scale: currentView.scale,
         focalX: focal.x,
         focalY: focal.y,
         moved: false
@@ -525,47 +532,57 @@ function TownMap({ mapWidth, mapHeight, places, boxes, placeAgentCount, openPlac
         const focal = touchCenter(event.nativeEvent.touches);
         const worldX = (gestureRef.current.focalX - gestureRef.current.x) / gestureRef.current.scale;
         const worldY = (gestureRef.current.focalY - gestureRef.current.y) / gestureRef.current.scale;
-        setMapView(current => clampMapView({
-          scale: nextScale,
-          x: focal.x - worldX * nextScale,
-          y: focal.y - worldY * nextScale
-        }, current));
+        setMapView(current => {
+          const next = clampMapView({
+            scale: nextScale,
+            x: focal.x - worldX * nextScale,
+            y: focal.y - worldY * nextScale
+          }, current);
+          mapViewRef.current = next;
+          return next;
+        });
         return;
       }
-      setMapView(current => clampMapView({
-        x: gestureRef.current.x + gesture.dx,
-        y: gestureRef.current.y + gesture.dy,
-        scale: gestureRef.current.scale
-      }, current));
+      setMapView(current => {
+        const next = clampMapView({
+          x: gestureRef.current.x + gesture.dx,
+          y: gestureRef.current.y + gesture.dy,
+          scale: gestureRef.current.scale
+        }, current);
+        mapViewRef.current = next;
+        return next;
+      });
     },
     onPanResponderRelease: (event, gesture) => {
       if (!gestureRef.current.moved && Math.abs(gesture.dx) < 4 && Math.abs(gesture.dy) < 4) {
         const touch = event.nativeEvent.changedTouches?.[0] || event.nativeEvent.touches?.[0];
         if (touch) {
-          const place = placeAtPoint(touch.pageX, touch.pageY, mapView);
+          const place = placeAtPoint(touch.pageX, touch.pageY, mapViewRef.current);
           if (place) openPlace(place);
         }
       }
       setMapView(current => {
+        mapViewRef.current = current;
         gestureRef.current = { x: current.x, y: current.y, distance: 0, scale: current.scale, focalX: 0, focalY: 0, moved: false };
         return current;
       });
     },
     onPanResponderTerminate: () => {
       setMapView(current => {
+        mapViewRef.current = current;
         gestureRef.current = { x: current.x, y: current.y, distance: 0, scale: current.scale, focalX: 0, focalY: 0, moved: false };
         return current;
       });
     },
     onPanResponderTerminationRequest: () => false
-  }), [mapView, canvasWidth, canvasHeight, mapWidth, mapHeight, places, openPlace]);
+  }), [canvasWidth, canvasHeight, mapWidth, mapHeight, places, openPlace]);
 
   return (
     <View
       style={[styles.map, { height: mapHeight }]}
     >
+      <View style={styles.mapGestureLayer} {...panResponder.panHandlers}>
       <ImageBackground
-        {...panResponder.panHandlers}
         source={assets.townMap}
         style={[
           styles.mapCanvas,
@@ -588,7 +605,7 @@ function TownMap({ mapWidth, mapHeight, places, boxes, placeAgentCount, openPlac
           const hasEvent = (box.localEvents || []).length > 0;
           const busy = count >= 8 || /busy|忙|排队/.test(String(box.agentState?.status || box.state?.tempo || ""));
           return (
-            <Pressable
+            <View
               key={place.id || index}
               style={[
                 styles.place,
@@ -599,16 +616,16 @@ function TownMap({ mapWidth, mapHeight, places, boxes, placeAgentCount, openPlac
                 busy && styles.placeBusy,
                 hasEvent && styles.placeEvent
               ]}
-              onPress={() => openPlace(place)}
             >
               <Image source={assets.placeMarker} style={styles.placeMarkerImage} />
               <Text style={styles.placeName} numberOfLines={1}>{place.name || place.id}</Text>
               <Text style={styles.placeCount}>{count} 人</Text>
               {hasEvent && <Image source={assets.eventMarker} style={styles.eventMark} />}
-            </Pressable>
+            </View>
           );
         })}
       </ImageBackground>
+      </View>
       <View style={styles.mapControls}>
         <Pressable style={styles.mapControlButton} onPress={() => zoomBy(0.18)}>
           <Text style={styles.mapControlText}>+</Text>
@@ -616,7 +633,10 @@ function TownMap({ mapWidth, mapHeight, places, boxes, placeAgentCount, openPlac
         <Pressable style={styles.mapControlButton} onPress={() => zoomBy(-0.18)}>
           <Text style={styles.mapControlText}>-</Text>
         </Pressable>
-        <Pressable style={styles.mapControlButton} onPress={() => setMapView(initialView)}>
+        <Pressable style={styles.mapControlButton} onPress={() => {
+          mapViewRef.current = initialView;
+          setMapView(initialView);
+        }}>
           <Ionicons name="locate" size={16} color={palette.ink} />
         </Pressable>
       </View>
@@ -874,6 +894,10 @@ const styles = StyleSheet.create({
     margin: 0,
     overflow: "hidden",
     backgroundColor: "#2f543d"
+  },
+  mapGestureLayer: {
+    ...StyleSheet.absoluteFillObject,
+    overflow: "hidden"
   },
   mapCanvas: {
     position: "absolute",
