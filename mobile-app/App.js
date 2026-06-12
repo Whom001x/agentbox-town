@@ -5,7 +5,6 @@ import {
   ImageBackground,
   Modal,
   NativeModules,
-  PanResponder,
   Pressable,
   ScrollView,
   StatusBar,
@@ -524,7 +523,7 @@ function TownMap({ mapWidth, mapHeight, places, boxes, placeAgentCount, openPlac
     };
   }
 
-  function handleMapTouchMove(event) {
+  function handleMapTouchMove(event, gestureState = {}) {
     const touches = event.nativeEvent.touches || [];
     const first = touches[0] || {};
     const distance = touchDistance(touches);
@@ -571,8 +570,10 @@ function TownMap({ mapWidth, mapHeight, places, boxes, placeAgentCount, openPlac
       };
       return;
     }
-    const dx = Number(first.pageX || 0) - touchRef.current.startX;
-    const dy = Number(first.pageY || 0) - touchRef.current.startY;
+    const nativeDx = Number(first.pageX || 0) - touchRef.current.startX;
+    const nativeDy = Number(first.pageY || 0) - touchRef.current.startY;
+    const dx = Number.isFinite(gestureState.dx) ? gestureState.dx : nativeDx;
+    const dy = Number.isFinite(gestureState.dy) ? gestureState.dy : nativeDy;
     if (Math.abs(dx) > 1 || Math.abs(dy) > 1) touchRef.current.moved = true;
     applyMapView({
       x: touchRef.current.x + dx,
@@ -591,24 +592,16 @@ function TownMap({ mapWidth, mapHeight, places, boxes, placeAgentCount, openPlac
     touchRef.current = { x: currentView.x, y: currentView.y, scale: currentView.scale, startX: 0, startY: 0, distance: 0, focalX: 0, focalY: 0, moved: false };
   }
 
-  const mapPanResponder = useMemo(() => PanResponder.create({
-    onStartShouldSetPanResponder: () => true,
-    onMoveShouldSetPanResponder: () => true,
-    onStartShouldSetPanResponderCapture: () => true,
-    onMoveShouldSetPanResponderCapture: () => true,
-    onPanResponderGrant: handleMapTouchStart,
-    onPanResponderMove: handleMapTouchMove,
-    onPanResponderRelease: handleMapTouchEnd,
-    onPanResponderTerminate: handleMapTouchEnd,
-    onPanResponderTerminationRequest: () => false
-  }), [canvasHeight, canvasWidth, mapHeight, mapWidth, openPlace, places]);
-
   const renderTranslateX = mapView.x + (canvasWidth * (mapView.scale - 1)) / 2;
   const renderTranslateY = mapView.y + (canvasHeight * (mapView.scale - 1)) / 2;
 
   return (
     <View
       style={[styles.map, { height: mapHeight }]}
+      onTouchStart={handleMapTouchStart}
+      onTouchMove={handleMapTouchMove}
+      onTouchEnd={handleMapTouchEnd}
+      onTouchCancel={handleMapTouchEnd}
     >
       <ImageBackground
         source={assets.townMap}
@@ -653,7 +646,6 @@ function TownMap({ mapWidth, mapHeight, places, boxes, placeAgentCount, openPlac
           );
         })}
       </ImageBackground>
-      <View style={styles.mapGestureLayer} {...mapPanResponder.panHandlers} />
       <View style={styles.mapControls}>
         <Pressable style={styles.mapControlButton} onPress={() => zoomBy(0.18)}>
           <Text style={styles.mapControlText}>+</Text>
@@ -923,12 +915,6 @@ const styles = StyleSheet.create({
     position: "relative",
     overflow: "hidden",
     backgroundColor: "#2f543d"
-  },
-  mapGestureLayer: {
-    ...StyleSheet.absoluteFillObject,
-    zIndex: 4,
-    elevation: 4,
-    backgroundColor: "rgba(0,0,0,0.001)"
   },
   mapCanvas: {
     position: "absolute",
