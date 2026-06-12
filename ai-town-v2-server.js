@@ -2312,6 +2312,9 @@ function repairJsonCandidate(text) {
     .replace(/[\u201C\u201D]/g, "\"")
     .replace(/[\u2018\u2019]/g, "'")
     .replace(/,\s*([}\]])/g, "$1")
+    .replace(/}\s*{/g, "},{")
+    .replace(/]\s*"/g, "],\"")
+    .replace(/}\s*"/g, "},\"")
     .replace(/([{,]\s*)([A-Za-z_$][A-Za-z0-9_$-]*)\s*:/g, '$1"$2":')
     .replace(/:\s*undefined\b/g, ": null")
     .replace(/:\s*NaN\b/g, ": null")
@@ -2396,6 +2399,17 @@ function strictJson(text, task = "") {
     try {
       return parseLooseJson(text);
     } catch (error) {
+      const retryJsonTasks = new Set([
+        "socialEmbeddingAgent",
+        "locationInstitutionAgent",
+        "locationDailyAgent",
+        "locationChainAgent",
+        "locationRuntimeAgent",
+        "socialStructureAgent",
+        "setupAgentBatchAgent",
+        "setupRelationSketchAgent"
+      ]);
+      if (retryJsonTasks.has(task)) throw error;
       const fallback = fallbackJson(task);
       if (Object.keys(fallback).length) {
         fallback._fallback = { reason: error.message };
