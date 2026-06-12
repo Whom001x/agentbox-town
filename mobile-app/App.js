@@ -39,7 +39,7 @@ const palette = {
 };
 
 const MIN_MAP_SCALE = 0.62;
-const MAX_MAP_SCALE = 2.4;
+const MAX_MAP_SCALE = 5;
 
 const needLabels = {
   hunger: "饱腹",
