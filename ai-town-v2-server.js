@@ -3822,7 +3822,44 @@ function setupFallbackRelationships(agents, places) {
 
 function setupApplyRelationshipMatrix(agents, social) {
   const byId = new Map(agents.map(agent => [agent.id, agent]));
-  (Array.isArray(social?.relations) ? social.relations : []).forEach(relation => {
+  const expanded = [];
+  (Array.isArray(social?.households) ? social.households : []).forEach(household => {
+    const ids = Array.isArray(household.members) ? household.members : [];
+    ids.forEach(from => ids.filter(to => to && to !== from).forEach(to => {
+      const familyLike = /family|guardian|elder|家|照顾|照护/.test(String(household.type || household.responsibilities || ""));
+      expanded.push({
+        from,
+        to,
+        type: familyLike ? "家人/同住照应" : "同住熟人",
+        trust: familyLike ? 72 : 58,
+        intimacy: familyLike ? 65 : 38,
+        respect: 55,
+        debt: 0,
+        dependency: familyLike ? 45 : 18,
+        familiarity: 82
+      });
+    }));
+  });
+  (Array.isArray(social?.groups) ? social.groups : []).forEach(group => {
+    const ids = Array.isArray(group.members) ? group.members : [];
+    ids.forEach((from, index) => {
+      const contacts = [ids[(index + 1) % ids.length], ids[(index + 3) % ids.length], ...(Array.isArray(group.authority) ? group.authority : [])]
+        .filter(to => to && to !== from);
+      [...new Set(contacts)].slice(0, 4).forEach(to => {
+        expanded.push({
+          from,
+          to,
+          type: /class|student|teacher|school|同学|师生/.test(String(group.type || group.place || "")) ? "同学/师生圈" : /cowork|work|office|factory|同事/.test(String(group.type || group.place || "")) ? "同事圈" : /neighbor|apartment|邻/.test(String(group.type || group.place || "")) ? "邻里熟人" : "群体熟人",
+          trust: 42,
+          intimacy: 22,
+          respect: 38,
+          debt: 0,
+          familiarity: 48
+        });
+      });
+    });
+  });
+  [...expanded, ...(Array.isArray(social?.relations) ? social.relations : [])].forEach(relation => {
     const from = relation.from || relation.source || relation.agentId;
     const to = relation.to || relation.target || relation.targetId;
     if (!from || !to || from === to || !byId.has(from) || !byId.has(to)) return;
@@ -3841,6 +3878,26 @@ function setupApplyRelationshipMatrix(agents, social) {
       rivalry: Math.max(Number(before.rivalry || 0), clampNumber(relation.rivalry || relation.competition, 0, 100, 0)),
       type: before.type && before.type !== nextType ? `${before.type}/${nextType}`.slice(0, 30) : (before.type || nextType)
     };
+  });
+  agents.forEach((agent, index) => {
+    agent.relationshipMatrix ||= {};
+    if (Object.keys(agent.relationshipMatrix).length) return;
+    const samePlace = agents.filter(item => item.id !== agent.id && (item.position || item.place) === (agent.position || agent.place));
+    const contacts = (samePlace.length ? samePlace : [agents[(index + 1) % agents.length], agents[(index + agents.length - 1) % agents.length]])
+      .filter(item => item && item.id && item.id !== agent.id);
+    contacts.slice(0, 2).forEach(contact => {
+      agent.relationshipMatrix[contact.id] = {
+        trust: 34,
+        intimacy: 16,
+        respect: 32,
+        debt: 0,
+        resentment: 0,
+        dependency: 12,
+        familiarity: 40,
+        rivalry: 0,
+        type: "点头熟人"
+      };
+    });
   });
   return agents;
 }
