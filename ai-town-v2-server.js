@@ -3690,15 +3690,20 @@ aiRouter = createAiRouter({
 let setupJobRunning = false;
 
 const mapPlacePresets = [
-  { re: /square|plaza|center|public|\u5e7f\u573a|\u4e2d\u5fc3/i, x: 50, y: 50 },
-  { re: /school|education|\u5b66\u6821|\u5e7c\u513f\u56ed/i, x: 69, y: 18 },
-  { re: /clinic|hospital|medical|\u8bca\u6240|\u533b\u9662|\u793e\u533a\u8bca\u6240/i, x: 30, y: 54 },
+  { re: /kindergarten|\u5e7c\u513f\u56ed/i, x: 66.5, y: 23.2 },
+  { re: /warehouse|\u4ed3\u5e93/i, x: 93.4, y: 37.4 },
+  { re: /library|\u56fe\u4e66\u5ba4|\u56fe\u4e66\u9986/i, x: 35.2, y: 35.2 },
+  { re: /restaurant|\u996d\u9986|\u9910\u9986|\u996d\u5e97/i, x: 45.1, y: 31.2 },
+  { re: /breakfast|food|\u65e9\u9910|\u65e9\u9910\u5e97/i, x: 80.4, y: 12.0 },
+  { re: /market|\u83dc\u5e02|\u83dc\u5e02\u573a|\u5e02\u573a/i, x: 48.5, y: 71.2 },
+  { re: /square|plaza|center|public|\u5e7f\u573a|\u4e2d\u5fc3/i, x: 40.4, y: 52.8 },
+  { re: /school|education|\u5b66\u6821/i, x: 56.1, y: 17.2 },
+  { re: /clinic|hospital|medical|\u8bca\u6240|\u533b\u9662|\u793e\u533a\u8bca\u6240/i, x: 26.6, y: 48.0 },
   { re: /commercial|old_street|street|\u5546\u4e1a\u8857|\u8001\u8857/i, x: 35, y: 74 },
-  { re: /store|shop|market|\u5c0f\u5356|\u5546\u5e97|\u83dc\u5e02|\u5e02\u573a/i, x: 25, y: 66 },
-  { re: /breakfast|restaurant|food|tea|barber|\u65e9\u9910|\u9910|\u996d|\u8336\u9986|\u7406\u53d1/i, x: 37, y: 73 },
-  { re: /apartment|apartments|residence|home|new_block|\u5c45\u6c11|\u4f4f\u5b85|\u5c0f\u533a|\u5bb6/i, x: 82, y: 28 },
-  { re: /riverside|river|lake|water|\u6cb3\u8fb9|\u6e56\u8fb9|\u6cb3\u7554/i, x: 84, y: 68 },
-  { re: /park|garden|\u516c\u56ed|\u82b1\u56ed/i, x: 72, y: 57 },
+  { re: /store|shop|\u5c0f\u5356|\u5c0f\u5356\u90e8|\u5546\u5e97/i, x: 20.0, y: 62.6 },
+  { re: /apartment|apartments|residence|home|new_block|\u5c45\u6c11|\u5c45\u6c11\u697c|\u4f4f\u5b85|\u5c0f\u533a|\u5bb6/i, x: 82.2, y: 26.0 },
+  { re: /riverside|river|lake|water|\u6cb3\u8fb9|\u6e56\u8fb9|\u6cb3\u7554/i, x: 81.3, y: 69.9 },
+  { re: /park|garden|\u516c\u56ed|\u82b1\u56ed/i, x: 68.8, y: 52.3 },
   { re: /farm|field|\u519c\u7530|\u83dc\u5730|\u7530/i, x: 12, y: 43 },
   { re: /mill|waterwheel|\u78e8\u574a|\u6c34\u8f66/i, x: 14, y: 74 },
   { re: /temple|shrine|\u5bfa|\u7960\u5802|\u53e4\u5efa\u7b51/i, x: 26, y: 17 },
@@ -3706,10 +3711,10 @@ const mapPlacePresets = [
   { re: /pavilion|\u4ead|\u6e56\u5fc3\u4ead/i, x: 88, y: 75 },
   { re: /waterfall|forest|mountain|\u7011\u5e03|\u5c71\u6797|\u5c71\u6eaa/i, x: 43, y: 11 },
   { re: /bridge|\u6865|\u6865\u5934/i, x: 66, y: 88 },
-  { re: /office|government|community|\u9547\u52a1|\u9547\u653f|\u529e\u516c|\u793e\u533a\u4e2d\u5fc3/i, x: 45, y: 38 },
-  { re: /police|security|\u8b66\u52a1|\u4fdd\u5b89/i, x: 42, y: 38 },
-  { re: /factory|workshop|warehouse|\u5de5\u574a|\u5de5\u70b9|\u4ed3\u5e93|\u7ef4\u4fee/i, x: 18, y: 18 },
-  { re: /bus|transport|\u516c\u4ea4|\u8f66\u7ad9/i, x: 52, y: 40 }
+  { re: /office|government|community|\u9547\u52a1|\u9547\u653f|\u653f\u5e9c|\u529e\u516c|\u793e\u533a\u4e2d\u5fc3/i, x: 30.5, y: 14.2 },
+  { re: /police|security|\u8b66\u52a1|\u8b66\u52a1\u5ba4|\u4fdd\u5b89/i, x: 48.8, y: 34.7 },
+  { re: /factory|workshop|\u5de5\u574a|\u5de5\u70b9|\u5c0f\u5de5|\u7ef4\u4fee/i, x: 92.7, y: 17.2 },
+  { re: /bus|transport|\u516c\u4ea4|\u516c\u4ea4\u7ad9|\u8f66\u7ad9/i, x: 30.5, y: 67.8 }
 ];
 
 function mapPlaceCoordinates(place = {}, index = 0) {
