@@ -40,6 +40,7 @@ const palette = {
 
 const MIN_MAP_SCALE = 0.3;
 const MAX_MAP_SCALE = 5;
+const TOWN_MAP_ASPECT = 1680 / 917;
 
 const needLabels = {
   hunger: "饱腹",
@@ -432,8 +433,8 @@ function MiniMap({ places }) {
 }
 
 function TownMap({ mapWidth, mapHeight, places, boxes, placeAgentCount, openPlace }) {
-  const canvasWidth = Math.max(mapWidth * 1.45, mapWidth + 360);
-  const canvasHeight = Math.max(mapHeight * 1.45, mapHeight + 240);
+  const canvasWidth = Math.max(mapWidth * 1.35, mapHeight * TOWN_MAP_ASPECT * 1.2);
+  const canvasHeight = canvasWidth / TOWN_MAP_ASPECT;
   const initialView = useMemo(() => ({
     x: -(canvasWidth - mapWidth) / 2,
     y: -(canvasHeight - mapHeight) / 2,
@@ -1101,7 +1102,7 @@ const styles = StyleSheet.create({
     position: "absolute",
     top: 8,
     left: 8,
-    width: 126,
+    width: 162,
     borderRadius: 16,
     borderWidth: 1,
     borderColor: palette.line,

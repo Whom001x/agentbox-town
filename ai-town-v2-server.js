@@ -1058,8 +1058,7 @@ function buildMobileSavePayload(slot, payload) {
     id: compactText(place.id || `place_${index}`, `place_${index}`, 60),
     name: compactText(place.name || place.id || `地点${index + 1}`, `地点${index + 1}`, 60),
     type: compactText(place.type || "", "", 40),
-    x: Number.isFinite(Number(place.x)) ? Number(place.x) : 18 + (index % 5) * 16,
-    y: Number.isFinite(Number(place.y)) ? Number(place.y) : 18 + Math.floor(index / 5) * 14
+    ...mapPlaceCoordinates(place, index)
   })) : [];
   const events = [
     ...(Array.isArray(world.records) ? world.records : []),
@@ -3690,6 +3689,39 @@ aiRouter = createAiRouter({
 
 let setupJobRunning = false;
 
+const mapPlacePresets = [
+  { re: /square|plaza|center|public|\u5e7f\u573a|\u4e2d\u5fc3/i, x: 50, y: 50 },
+  { re: /school|education|\u5b66\u6821|\u5e7c\u513f\u56ed/i, x: 69, y: 18 },
+  { re: /clinic|hospital|medical|\u8bca\u6240|\u533b\u9662|\u793e\u533a\u8bca\u6240/i, x: 30, y: 54 },
+  { re: /commercial|old_street|street|\u5546\u4e1a\u8857|\u8001\u8857/i, x: 35, y: 74 },
+  { re: /store|shop|market|\u5c0f\u5356|\u5546\u5e97|\u83dc\u5e02|\u5e02\u573a/i, x: 25, y: 66 },
+  { re: /breakfast|restaurant|food|tea|barber|\u65e9\u9910|\u9910|\u996d|\u8336\u9986|\u7406\u53d1/i, x: 37, y: 73 },
+  { re: /apartment|apartments|residence|home|new_block|\u5c45\u6c11|\u4f4f\u5b85|\u5c0f\u533a|\u5bb6/i, x: 82, y: 28 },
+  { re: /riverside|river|lake|water|\u6cb3\u8fb9|\u6e56\u8fb9|\u6cb3\u7554/i, x: 84, y: 68 },
+  { re: /park|garden|\u516c\u56ed|\u82b1\u56ed/i, x: 72, y: 57 },
+  { re: /farm|field|\u519c\u7530|\u83dc\u5730|\u7530/i, x: 12, y: 43 },
+  { re: /mill|waterwheel|\u78e8\u574a|\u6c34\u8f66/i, x: 14, y: 74 },
+  { re: /temple|shrine|\u5bfa|\u7960\u5802|\u53e4\u5efa\u7b51/i, x: 26, y: 17 },
+  { re: /gate|arch|\u9547\u95e8|\u724c\u574a/i, x: 31, y: 90 },
+  { re: /pavilion|\u4ead|\u6e56\u5fc3\u4ead/i, x: 88, y: 75 },
+  { re: /waterfall|forest|mountain|\u7011\u5e03|\u5c71\u6797|\u5c71\u6eaa/i, x: 43, y: 11 },
+  { re: /bridge|\u6865|\u6865\u5934/i, x: 66, y: 88 },
+  { re: /office|government|community|\u9547\u52a1|\u9547\u653f|\u529e\u516c|\u793e\u533a\u4e2d\u5fc3/i, x: 45, y: 38 },
+  { re: /police|security|\u8b66\u52a1|\u4fdd\u5b89/i, x: 42, y: 38 },
+  { re: /factory|workshop|warehouse|\u5de5\u574a|\u5de5\u70b9|\u4ed3\u5e93|\u7ef4\u4fee/i, x: 18, y: 18 },
+  { re: /bus|transport|\u516c\u4ea4|\u8f66\u7ad9/i, x: 52, y: 40 }
+];
+
+function mapPlaceCoordinates(place = {}, index = 0) {
+  const text = `${place.id || ""} ${place.name || ""} ${place.type || ""}`;
+  const preset = mapPlacePresets.find(item => item.re.test(text));
+  if (preset) return { x: preset.x, y: preset.y };
+  return {
+    x: clampNumber(place.x, 5, 95, 15 + (index % 5) * 16),
+    y: clampNumber(place.y, 5, 95, 15 + Math.floor(index / 5) * 16)
+  };
+}
+
 function setupSafeId(value, fallback) {
   return safeSaveName(String(value || fallback || "item").toLowerCase()).replace(/-/g, "_").slice(0, 40);
 }
@@ -3712,15 +3744,15 @@ function setupDefaultPlaces(target = 12) {
           ? [`work_${index}`, `小镇工点${index}`, "work"]
           : [`lane_${index}`, `邻里街区${index}`, "public"]);
   }
-  return base.slice(0, Math.max(1, target)).map((item, index) => ({
-    id: item[0],
-    name: item[1],
-    type: item[2],
-    x: 12 + (index % 4) * 24,
-    y: 16 + Math.floor(index / 4) * 24,
-    capacity: item[2] === "home" ? 80 : 25,
-    visible: []
-  }));
+  return base.slice(0, Math.max(1, target)).map((item, index) => {
+    const place = { id: item[0], name: item[1], type: item[2] };
+    return {
+      ...place,
+      ...mapPlaceCoordinates(place, index),
+      capacity: item[2] === "home" ? 80 : 25,
+      visible: []
+    };
+  });
 }
 
 function setupNormalizePlaces(input = [], target = 12) {
@@ -3729,15 +3761,14 @@ function setupNormalizePlaces(input = [], target = 12) {
     let id = setupSafeId(place.id || place.name, `place_${index + 1}`);
     while (used.has(id)) id = `${id}_${used.size + 1}`;
     used.add(id);
-    return {
+    const row = {
       id,
       name: String(place.name || id).slice(0, 24),
       type: String(place.type || ""),
-      x: clampNumber(place.x, 5, 95, 15 + (index % 5) * 16),
-      y: clampNumber(place.y, 5, 95, 15 + Math.floor(index / 5) * 16),
       capacity: clampNumber(place.capacity, 1, 300, 30),
       visible: Array.isArray(place.visible) ? place.visible.map(String).slice(0, 12) : []
     };
+    return { ...row, ...mapPlaceCoordinates({ ...row, x: place.x, y: place.y }, index) };
   });
   setupDefaultPlaces(target).forEach(place => {
     if (rows.length >= target) return;
