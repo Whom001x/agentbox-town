@@ -681,9 +681,11 @@
         if (key) counts[key] = (counts[key] || 0) + 1;
       });
       if (!selectedPlaceId && places.length) selectedPlaceId = places[0].id;
-      const topPlaces = [...places].sort((a, b) => (counts[b.id] || 0) - (counts[a.id] || 0)).slice(0, 10);
-      const compactPlaces = places.filter(place => !topPlaces.some(item => item.id === place.id));
-      const pinHtml = topPlaces.map(place => {
+      const visiblePlaces = [...places].sort((a, b) => {
+        const delta = (counts[b.id] || 0) - (counts[a.id] || 0);
+        return delta || String(a.name || a.id).localeCompare(String(b.name || b.id), "zh-CN");
+      });
+      const pinHtml = visiblePlaces.map(place => {
         const point = monitorPlacePoint(place, places.indexOf(place));
         const count = counts[place.id] || 0;
         const box = boxes[place.id] || {};
@@ -698,11 +700,7 @@
           </span>
         </button>`;
       }).join("");
-      const compactHtml = compactPlaces.map(place => {
-        const point = monitorPlacePoint(place, places.indexOf(place));
-        return `<button class="place-pin compact" data-place="${esc(place.id)}" title="${esc(place.name || place.id)}" style="left:${point.x}%;top:${point.y}%" type="button"><span class="pin-body"></span></button>`;
-      }).join("");
-      canvas.innerHTML = `${pinHtml}${compactHtml}`;
+      canvas.innerHTML = pinHtml;
       canvas.querySelectorAll("[data-place]").forEach(button => {
         button.addEventListener("click", () => {
           if (suppressMapClick) return;
