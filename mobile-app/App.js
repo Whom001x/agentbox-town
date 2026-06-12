@@ -5,7 +5,6 @@ import {
   ImageBackground,
   Modal,
   NativeModules,
-  PanResponder,
   Pressable,
   ScrollView,
   StatusBar,
@@ -439,12 +438,12 @@ function TownMap({ mapWidth, mapHeight, places, boxes, placeAgentCount, openPlac
   }), [canvasHeight, canvasWidth, mapHeight, mapWidth]);
   const [mapView, setMapView] = useState(initialView);
   const mapViewRef = useRef(initialView);
-  const gestureRef = useRef({ x: initialView.x, y: initialView.y, distance: 0, scale: 1, focalX: 0, focalY: 0, moved: false });
+  const touchRef = useRef({ x: initialView.x, y: initialView.y, scale: 1, startX: 0, startY: 0, distance: 0, focalX: 0, focalY: 0, moved: false });
 
   useEffect(() => {
     setMapView(initialView);
     mapViewRef.current = initialView;
-    gestureRef.current = { x: initialView.x, y: initialView.y, distance: 0, scale: initialView.scale, focalX: 0, focalY: 0, moved: false };
+    touchRef.current = { x: initialView.x, y: initialView.y, scale: initialView.scale, startX: 0, startY: 0, distance: 0, focalX: 0, focalY: 0, moved: false };
   }, [initialView]);
 
   function clampMapView(next, current = mapView) {
@@ -498,84 +497,68 @@ function TownMap({ mapWidth, mapHeight, places, boxes, placeAgentCount, openPlac
     });
   }
 
-  const panResponder = useMemo(() => PanResponder.create({
-    onStartShouldSetPanResponder: () => true,
-    onStartShouldSetPanResponderCapture: () => true,
-    onMoveShouldSetPanResponder: (event, gesture) => {
-      const touches = event.nativeEvent.touches || [];
-      return touches.length > 1 || Math.abs(gesture.dx) > 1 || Math.abs(gesture.dy) > 1;
-    },
-    onMoveShouldSetPanResponderCapture: (event, gesture) => {
-      const touches = event.nativeEvent.touches || [];
-      return touches.length > 1 || Math.abs(gesture.dx) > 1 || Math.abs(gesture.dy) > 1;
-    },
-    onPanResponderGrant: (event) => {
-      const focal = touchCenter(event.nativeEvent.touches);
-      const currentView = mapViewRef.current;
-      gestureRef.current = {
-        x: currentView.x,
-        y: currentView.y,
-        distance: touchDistance(event.nativeEvent.touches),
-        scale: currentView.scale,
-        focalX: focal.x,
-        focalY: focal.y,
-        moved: false
-      };
-    },
-    onPanResponderMove: (event, gesture) => {
-      const distance = touchDistance(event.nativeEvent.touches);
-      if (Math.abs(gesture.dx) > 2 || Math.abs(gesture.dy) > 2 || distance) {
-        gestureRef.current.moved = true;
-      }
-      if (distance && gestureRef.current.distance) {
-        const nextScale = gestureRef.current.scale * (distance / gestureRef.current.distance);
-        const focal = touchCenter(event.nativeEvent.touches);
-        const worldX = (gestureRef.current.focalX - gestureRef.current.x) / gestureRef.current.scale;
-        const worldY = (gestureRef.current.focalY - gestureRef.current.y) / gestureRef.current.scale;
-        setMapView(current => {
-          const next = clampMapView({
-            scale: nextScale,
-            x: focal.x - worldX * nextScale,
-            y: focal.y - worldY * nextScale
-          }, current);
-          mapViewRef.current = next;
-          return next;
-        });
-        return;
-      }
-      setMapView(current => {
-        const next = clampMapView({
-          x: gestureRef.current.x + gesture.dx,
-          y: gestureRef.current.y + gesture.dy,
-          scale: gestureRef.current.scale
-        }, current);
-        mapViewRef.current = next;
-        return next;
+  function applyMapView(nextInput) {
+    setMapView(current => {
+      const next = clampMapView(nextInput, current);
+      mapViewRef.current = next;
+      return next;
+    });
+  }
+
+  function handleMapTouchStart(event) {
+    const touches = event.nativeEvent.touches || [];
+    const first = touches[0] || {};
+    const focal = touchCenter(touches);
+    const currentView = mapViewRef.current;
+    touchRef.current = {
+      x: currentView.x,
+      y: currentView.y,
+      scale: currentView.scale,
+      startX: first.pageX || focal.x,
+      startY: first.pageY || focal.y,
+      distance: touchDistance(touches),
+      focalX: focal.x,
+      focalY: focal.y,
+      moved: false
+    };
+  }
+
+  function handleMapTouchMove(event) {
+    const touches = event.nativeEvent.touches || [];
+    const first = touches[0] || {};
+    const distance = touchDistance(touches);
+    if (distance && touchRef.current.distance) {
+      const nextScale = touchRef.current.scale * (distance / touchRef.current.distance);
+      const focal = touchCenter(touches);
+      const worldX = (touchRef.current.focalX - touchRef.current.x) / touchRef.current.scale;
+      const worldY = (touchRef.current.focalY - touchRef.current.y) / touchRef.current.scale;
+      touchRef.current.moved = true;
+      applyMapView({
+        scale: nextScale,
+        x: focal.x - worldX * nextScale,
+        y: focal.y - worldY * nextScale
       });
-    },
-    onPanResponderRelease: (event, gesture) => {
-      if (!gestureRef.current.moved && Math.abs(gesture.dx) < 4 && Math.abs(gesture.dy) < 4) {
-        const touch = event.nativeEvent.changedTouches?.[0] || event.nativeEvent.touches?.[0];
-        if (touch) {
-          const place = placeAtPoint(touch.pageX, touch.pageY, mapViewRef.current);
-          if (place) openPlace(place);
-        }
-      }
-      setMapView(current => {
-        mapViewRef.current = current;
-        gestureRef.current = { x: current.x, y: current.y, distance: 0, scale: current.scale, focalX: 0, focalY: 0, moved: false };
-        return current;
-      });
-    },
-    onPanResponderTerminate: () => {
-      setMapView(current => {
-        mapViewRef.current = current;
-        gestureRef.current = { x: current.x, y: current.y, distance: 0, scale: current.scale, focalX: 0, focalY: 0, moved: false };
-        return current;
-      });
-    },
-    onPanResponderTerminationRequest: () => false
-  }), [canvasWidth, canvasHeight, mapWidth, mapHeight, places, openPlace]);
+      return;
+    }
+    const dx = Number(first.pageX || 0) - touchRef.current.startX;
+    const dy = Number(first.pageY || 0) - touchRef.current.startY;
+    if (Math.abs(dx) > 1 || Math.abs(dy) > 1) touchRef.current.moved = true;
+    applyMapView({
+      x: touchRef.current.x + dx,
+      y: touchRef.current.y + dy,
+      scale: touchRef.current.scale
+    });
+  }
+
+  function handleMapTouchEnd(event) {
+    const touch = event.nativeEvent.changedTouches?.[0];
+    if (!touchRef.current.moved && touch) {
+      const place = placeAtPoint(touch.pageX, touch.pageY, mapViewRef.current);
+      if (place) openPlace(place);
+    }
+    const currentView = mapViewRef.current;
+    touchRef.current = { x: currentView.x, y: currentView.y, scale: currentView.scale, startX: 0, startY: 0, distance: 0, focalX: 0, focalY: 0, moved: false };
+  }
 
   return (
     <View
@@ -624,7 +607,13 @@ function TownMap({ mapWidth, mapHeight, places, boxes, placeAgentCount, openPlac
           );
         })}
       </ImageBackground>
-      <View style={styles.mapGestureLayer} {...panResponder.panHandlers} />
+      <View
+        style={styles.mapGestureLayer}
+        onTouchStart={handleMapTouchStart}
+        onTouchMove={handleMapTouchMove}
+        onTouchEnd={handleMapTouchEnd}
+        onTouchCancel={handleMapTouchEnd}
+      />
       <View style={styles.mapControls}>
         <Pressable style={styles.mapControlButton} onPress={() => zoomBy(0.18)}>
           <Text style={styles.mapControlText}>+</Text>
@@ -896,7 +885,8 @@ const styles = StyleSheet.create({
   },
   mapGestureLayer: {
     ...StyleSheet.absoluteFillObject,
-    zIndex: 4
+    zIndex: 4,
+    backgroundColor: "rgba(0,0,0,0.001)"
   },
   mapCanvas: {
     position: "absolute",
