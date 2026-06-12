@@ -57,13 +57,10 @@
     .map-bg {
       position: fixed;
       inset: 0;
-      background-image:
-        linear-gradient(180deg, rgba(3, 10, 16, .2), rgba(3, 10, 16, .5)),
-        url("/mobile-app/assets/town-map-bg.png");
-      background-size: cover;
-      background-position: center;
+      background:
+        radial-gradient(circle at 30% 25%, rgba(31, 143, 255, .18), transparent 34%),
+        linear-gradient(180deg, rgba(3, 10, 16, .65), rgba(3, 10, 16, .9));
       filter: saturate(1.08) contrast(1.04);
-      transform: scale(1.02);
       z-index: 0;
     }
     .map-bg::after {
@@ -126,10 +123,30 @@
     .map-layer {
       min-height: 0;
       overflow: hidden;
+      background: rgba(0, 0, 0, .08);
     }
+    .map-world {
+      position: absolute;
+      inset: 0;
+      transform-origin: 0 0;
+      will-change: transform;
+      cursor: grab;
+      user-select: none;
+      touch-action: none;
+    }
+    .map-world.dragging { cursor: grabbing; }
+    .map-image,
     .map-canvas {
       position: absolute;
       inset: 0;
+    }
+    .map-image {
+      background-image:
+        linear-gradient(180deg, rgba(3, 10, 16, .08), rgba(3, 10, 16, .26)),
+        url("/mobile-app/assets/town-map-bg.png");
+      background-size: cover;
+      background-position: center;
+      filter: saturate(1.08) contrast(1.04);
     }
     .mini-map {
       position: absolute;
@@ -202,6 +219,7 @@
       box-shadow: var(--shadow);
       cursor: pointer;
       transition: transform .16s ease, border-color .16s ease, background .16s ease;
+      user-select: none;
     }
     .place-pin:hover, .place-pin.selected {
       transform: translate(-50%, -100%) scale(1.04);
@@ -386,7 +404,10 @@
     </header>
 
     <main class="map-layer">
-      <div class="map-canvas" id="mapCanvas"></div>
+      <div class="map-world" id="mapWorld">
+        <div class="map-image" aria-hidden="true"></div>
+        <div class="map-canvas" id="mapCanvas"></div>
+      </div>
       <aside class="mini-map"><span class="expand">↗</span></aside>
       <nav class="toolbox" aria-label="地图工具">
         <button class="tool active" type="button" title="图层">▱</button>
@@ -424,6 +445,9 @@
     let lastPayload = null;
     let lastRuntime = null;
     let lastCalls = null;
+    const mapView = { x: 0, y: 0, scale: 1 };
+    const mapDrag = { active: false, pointerId: 0, startX: 0, startY: 0, viewX: 0, viewY: 0, moved: false };
+    let suppressMapClick = false;
 
     async function api(url, options = {}) {
       const res = await fetch(url, { cache: "no-store", ...options });
@@ -484,6 +508,105 @@
       if (!progress || !progress.phase || progress.phase === "idle") return "无任务";
       const percent = Number.isFinite(Number(progress.percent)) ? `${Math.round(Number(progress.percent))}%` : "";
       return `${progress.phase}${percent ? ` ${percent}` : ""}${progress.currentTask ? ` · ${progress.currentTask}` : ""}`;
+    }
+
+    function clampMapView() {
+      const layer = document.querySelector(".map-layer");
+      if (!layer) return;
+      const rect = layer.getBoundingClientRect();
+      const minScale = 0.75;
+      const maxScale = 2.8;
+      mapView.scale = clamp(mapView.scale, minScale, maxScale);
+      const overflowX = Math.max(0, rect.width * mapView.scale - rect.width);
+      const overflowY = Math.max(0, rect.height * mapView.scale - rect.height);
+      const padX = Math.max(120, rect.width * 0.18);
+      const padY = Math.max(90, rect.height * 0.18);
+      mapView.x = clamp(mapView.x, -overflowX - padX, padX);
+      mapView.y = clamp(mapView.y, -overflowY - padY, padY);
+    }
+
+    function applyMapView() {
+      clampMapView();
+      const world = $("mapWorld");
+      if (world) world.style.transform = `translate3d(${mapView.x}px, ${mapView.y}px, 0) scale(${mapView.scale})`;
+    }
+
+    function zoomMapAt(clientX, clientY, delta) {
+      const layer = document.querySelector(".map-layer");
+      if (!layer) return;
+      const rect = layer.getBoundingClientRect();
+      const nextScale = clamp(mapView.scale * delta, 0.75, 2.8);
+      const focalX = clientX - rect.left;
+      const focalY = clientY - rect.top;
+      const worldX = (focalX - mapView.x) / mapView.scale;
+      const worldY = (focalY - mapView.y) / mapView.scale;
+      mapView.scale = nextScale;
+      mapView.x = focalX - worldX * nextScale;
+      mapView.y = focalY - worldY * nextScale;
+      applyMapView();
+    }
+
+    function resetMapView() {
+      mapView.x = 0;
+      mapView.y = 0;
+      mapView.scale = 1;
+      applyMapView();
+    }
+
+    function bindMapControls() {
+      const world = $("mapWorld");
+      const layer = document.querySelector(".map-layer");
+      if (!world || !layer || world.dataset.bound === "1") return;
+      world.dataset.bound = "1";
+      world.addEventListener("pointerdown", event => {
+        if (event.button !== 0) return;
+        mapDrag.active = true;
+        mapDrag.pointerId = event.pointerId;
+        mapDrag.startX = event.clientX;
+        mapDrag.startY = event.clientY;
+        mapDrag.viewX = mapView.x;
+        mapDrag.viewY = mapView.y;
+        mapDrag.moved = false;
+        world.classList.add("dragging");
+        world.setPointerCapture(event.pointerId);
+      });
+      world.addEventListener("pointermove", event => {
+        if (!mapDrag.active || event.pointerId !== mapDrag.pointerId) return;
+        const dx = event.clientX - mapDrag.startX;
+        const dy = event.clientY - mapDrag.startY;
+        if (Math.abs(dx) + Math.abs(dy) > 4) mapDrag.moved = true;
+        mapView.x = mapDrag.viewX + dx;
+        mapView.y = mapDrag.viewY + dy;
+        applyMapView();
+      });
+      const endDrag = event => {
+        if (!mapDrag.active || event.pointerId !== mapDrag.pointerId) return;
+        if (mapDrag.moved) {
+          suppressMapClick = true;
+          setTimeout(() => { suppressMapClick = false; }, 80);
+        }
+        mapDrag.active = false;
+        world.classList.remove("dragging");
+        try { world.releasePointerCapture(event.pointerId); } catch {}
+      };
+      world.addEventListener("pointerup", endDrag);
+      world.addEventListener("pointercancel", endDrag);
+      world.addEventListener("click", event => {
+        if (!suppressMapClick) return;
+        event.preventDefault();
+        event.stopPropagation();
+      }, true);
+      layer.addEventListener("wheel", event => {
+        if (event.target.closest(".right-panel") || event.target.closest(".mini-map")) return;
+        event.preventDefault();
+        zoomMapAt(event.clientX, event.clientY, event.deltaY < 0 ? 1.12 : 0.88);
+      }, { passive: false });
+      layer.addEventListener("dblclick", event => {
+        if (event.target.closest(".right-panel")) return;
+        resetMapView();
+      });
+      window.addEventListener("resize", applyMapView);
+      applyMapView();
     }
 
     function renderMetrics(world, metrics, runtime, calls) {
@@ -555,11 +678,13 @@
       canvas.innerHTML = `${agentHtml}${pinHtml}${compactHtml}`;
       canvas.querySelectorAll("[data-place]").forEach(button => {
         button.addEventListener("click", () => {
+          if (suppressMapClick) return;
           selectedPlaceId = button.dataset.place;
           renderMap(world);
           renderDetail(world);
         });
       });
+      applyMapView();
     }
 
     function renderDetail(world) {
@@ -689,6 +814,10 @@
       selectedPlaceId = "";
       refresh();
     };
+    bindMapControls();
+    document.querySelectorAll(".tool").forEach(button => {
+      if (button.title === "定位") button.addEventListener("click", resetMapView);
+    });
     refresh().catch(error => {
       $("subtitle").textContent = error.message;
       $("metricsRow").innerHTML = `<article class="metric warn"><span>读取失败</span><strong>!</strong><small>${esc(error.message)}</small></article>`;
