@@ -3441,6 +3441,17 @@ function setupDefaultPlaces(target = 12) {
     ["riverside", "河边步道", "leisure"], ["office", "镇务办公室", "work"], ["factory", "小工坊", "work"],
     ["park", "小公园", "leisure"], ["bus_stop", "公交站", "transport"], ["market", "菜市场", "shop"]
   ];
+  while (base.length < target) {
+    const index = base.length + 1;
+    const kind = index % 4;
+    base.push(kind === 0
+      ? [`residence_${index}`, `居民巷${index}`, "home"]
+      : kind === 1
+        ? [`shop_${index}`, `街角店铺${index}`, "shop"]
+        : kind === 2
+          ? [`work_${index}`, `小镇工点${index}`, "work"]
+          : [`lane_${index}`, `邻里街区${index}`, "public"]);
+  }
   return base.slice(0, Math.max(1, target)).map((item, index) => ({
     id: item[0],
     name: item[1],
@@ -3481,7 +3492,7 @@ function setupNormalizePlaces(input = [], target = 12) {
 function setupChineseName(index) {
   const surnames = ["赵", "钱", "孙", "李", "周", "吴", "郑", "王", "陈", "林", "刘", "黄", "杨", "何", "郭", "马", "胡", "朱", "高", "罗"];
   const given = ["安宁", "思远", "晓梅", "文清", "海峰", "雨欣", "志强", "小满", "春华", "明轩", "芳仪", "建国", "若溪", "子涵", "桂兰", "远航", "秋实", "慧敏", "晨曦", "德胜"];
-  return `${surnames[index % surnames.length]}${given[Math.floor(index / surnames.length) % given.length]}${index >= surnames.length * given.length ? index + 1 : ""}`;
+  return `${surnames[index % surnames.length]}${given[(index * 7 + Math.floor(index / surnames.length)) % given.length]}${index >= surnames.length * given.length ? index + 1 : ""}`;
 }
 
 function setupRoleForIndex(index) {
@@ -3512,7 +3523,7 @@ function setupPlaceHintsForRole(role, places = [], fallbackIndex = 0) {
           : /老人|退休|照护|care|elder|retired/i.test(text) ? match(/apartment|home|居民|住宅/i)
             : [];
   const fallback = places[fallbackIndex % Math.max(1, places.length)]?.id || "square";
-  return [...new Set([...hints, fallback])].slice(0, 4);
+  return [...new Set([...hints, fallback])].slice(0, 8);
 }
 
 function setupDefaultRolePlan(count, places = []) {
@@ -3626,6 +3637,32 @@ function setupBuildSlotsFromBlueprint(blueprint, normalizedSeeds, sourceSeeds, c
       roleHint,
       ageRange: fixed && (raw.ageYears || raw.age) ? String(raw.ageYears || raw.age) : item.ageRange || "",
       placeHints
+    };
+  });
+}
+
+function setupAgeFromRange(range, fallback = 36) {
+  const match = String(range || "").match(/(\d+)\D+(\d+)/);
+  if (!match) return fallback;
+  const min = clampNumber(match[1], 1, 100, fallback);
+  const max = clampNumber(match[2], min, 100, min);
+  return min + Math.floor(Math.random() * (max - min + 1));
+}
+
+function setupSeedsFromSlots(slots = [], sourceSeeds = [], places = []) {
+  const source = Array.isArray(sourceSeeds) ? sourceSeeds : [];
+  return slots.map((slot, index) => {
+    const raw = source[index] || {};
+    const roleHint = raw.job || slot.roleHint || setupRoleForIndex(index);
+    const placeHints = Array.isArray(slot.placeHints) && slot.placeHints.length ? slot.placeHints : setupPlaceHintsForRole(roleHint, places, index);
+    const validPlaceHints = placeHints.filter(id => places.some(place => place.id === id));
+    const place = raw.place || validPlaceHints[index % Math.max(1, validPlaceHints.length)] || setupPlaceForRole(roleHint, places, index);
+    return {
+      ...raw,
+      id: raw.id || slot.id || `agent_${index + 1}`,
+      job: roleHint,
+      ageYears: raw.ageYears || raw.age || setupAgeFromRange(slot.ageRange, /学生/.test(roleHint) ? 12 : /老人|退休/.test(roleHint) ? 70 : 36),
+      place
     };
   });
 }
@@ -3758,9 +3795,27 @@ function setupFallbackRelationships(agents, places) {
       addHousehold([adultA, takeUnused(adults), roll > 0.9 ? takeUnused(adults) : null], "shared_roommates", ["合租或朋友同住，知道彼此作息但不等同家人"]);
     }
   }
+  households.forEach((household, index) => {
+    const from = household.members?.[0];
+    const next = households[(index + 1) % households.length]?.members?.[0];
+    const prev = households[(index + households.length - 1) % households.length]?.members?.[0];
+    [next, prev].filter(to => from && to && to !== from).forEach(to => {
+      relations.push({ from, to, type: "邻里熟人", trust: 36, intimacy: 18, respect: 35, debt: 0, familiarity: 42 });
+      relations.push({ from: to, to: from, type: "邻里熟人", trust: 36, intimacy: 18, respect: 35, debt: 0, familiarity: 42 });
+    });
+  });
   places.forEach(place => {
     const members = agents.filter(agent => agent.place === place.id || agent.position === place.id).map(agent => agent.id);
-    if (members.length > 1) groups.push({ id: `group_${place.id}`, type: place.type || "local", place: place.id, members, authority: members.slice(0, 2) });
+    if (members.length > 1) {
+      groups.push({ id: `group_${place.id}`, type: place.type || "local", place: place.id, members, authority: members.slice(0, 2) });
+      members.forEach((from, index) => {
+        const contacts = [members[(index + 1) % members.length], members[(index + 3) % members.length], ...members.slice(0, 2)]
+          .filter(to => to && to !== from);
+        [...new Set(contacts)].slice(0, 4).forEach(to => {
+          relations.push({ from, to, type: place.type === "education" ? "同学/师生圈" : place.type === "work" ? "同事圈" : "地点熟人", trust: 42, intimacy: 22, respect: 38, debt: 0, familiarity: 48 });
+        });
+      });
+    }
   });
   return { households, groups, relations };
 }
@@ -3773,16 +3828,18 @@ function setupApplyRelationshipMatrix(agents, social) {
     if (!from || !to || from === to || !byId.has(from) || !byId.has(to)) return;
     const agent = byId.get(from);
     agent.relationshipMatrix ||= {};
+    const before = agent.relationshipMatrix[to] || {};
+    const nextType = String(relation.type || "熟人").slice(0, 30);
     agent.relationshipMatrix[to] = {
-      trust: clampNumber(relation.trust, 0, 100, 50),
-      intimacy: clampNumber(relation.intimacy, 0, 100, 40),
-      respect: clampNumber(relation.respect, 0, 100, 45),
-      debt: clampNumber(relation.debt, 0, 100, 0),
-      resentment: clampNumber(relation.resentment || relation.grudge, 0, 100, 0),
-      dependency: clampNumber(relation.dependency, 0, 100, 20),
-      familiarity: clampNumber(relation.familiarity, 0, 100, 60),
-      rivalry: clampNumber(relation.rivalry || relation.competition, 0, 100, 0),
-      type: String(relation.type || "熟人").slice(0, 30)
+      trust: Math.max(Number(before.trust || 0), clampNumber(relation.trust, 0, 100, 50)),
+      intimacy: Math.max(Number(before.intimacy || 0), clampNumber(relation.intimacy, 0, 100, 40)),
+      respect: Math.max(Number(before.respect || 0), clampNumber(relation.respect, 0, 100, 45)),
+      debt: Math.max(Number(before.debt || 0), clampNumber(relation.debt, 0, 100, 0)),
+      resentment: Math.max(Number(before.resentment || 0), clampNumber(relation.resentment || relation.grudge, 0, 100, 0)),
+      dependency: Math.max(Number(before.dependency || 0), clampNumber(relation.dependency, 0, 100, 20)),
+      familiarity: Math.max(Number(before.familiarity || 0), clampNumber(relation.familiarity, 0, 100, 60)),
+      rivalry: Math.max(Number(before.rivalry || 0), clampNumber(relation.rivalry || relation.competition, 0, 100, 0)),
+      type: before.type && before.type !== nextType ? `${before.type}/${nextType}`.slice(0, 30) : (before.type || nextType)
     };
   });
   return agents;
@@ -3837,6 +3894,8 @@ async function runNodeSetupCreate(body = {}) {
   updateRuntimeProgress("setup-places", { phaseIndex: 1, currentTask: "normalize places" });
   let places = setupNormalizePlaces(body.places || [], targetLocationCount);
   let seeds = setupNormalizeSeeds(sourceSeeds, targetAgentCount, places);
+  const defaultSlots = setupBuildSlotsFromBlueprint(null, seeds, sourceSeeds, targetAgentCount, places);
+  seeds = setupNormalizeSeeds(setupSeedsFromSlots(defaultSlots, sourceSeeds, places), targetAgentCount, places);
   let blueprint = null;
   let relationships = null;
   if (body.useAi !== false && publicConfig().aiEnabled) {
