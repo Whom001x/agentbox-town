@@ -1073,6 +1073,148 @@ function cloneSocialRows(rows) {
   });
 }
 
+function setupFindPlace(places = [], patterns = [], fallback = "") {
+  const list = Array.isArray(patterns) ? patterns : [patterns];
+  return places.find(place => list.some(pattern => pattern.test(`${place.id || ""} ${place.name || ""} ${place.type || ""}`)))?.id
+    || fallback
+    || places[0]?.id
+    || "square";
+}
+
+function setupHouseholdHome(world, agent) {
+  const households = Array.isArray(world.households) ? world.households : [];
+  const household = households.find(item => Array.isArray(item.members) && item.members.includes(agent.id));
+  const places = Array.isArray(world.places) ? world.places : [];
+  if (household?.homePlace && places.some(place => place.id === household.homePlace)) return household.homePlace;
+  return setupFindPlace(places, [/apartment|apartments|residence|home|居民|住宅|住处/i], "");
+}
+
+function setupNormalizeHouseholdTypes(world = {}) {
+  const byId = new Map((world.agents || []).map(agent => [agent.id, agent]));
+  const ageOf = id => Number(byId.get(id)?.ageYears || ((byId.get(id)?.ageDays || 0) / 365) || 30);
+  (Array.isArray(world.households) ? world.households : []).forEach(household => {
+    const ids = Array.isArray(household.members) ? household.members : [];
+    const ages = ids.map(ageOf);
+    const hasMinor = ages.some(age => age < 18);
+    const elderCount = ages.filter(age => age >= 65).length;
+    const adultCount = ages.filter(age => age >= 18 && age < 65).length;
+    const current = String(household.type || "");
+    if (/single/.test(current) || ids.length === 1) household.type = elderCount ? "single_elder" : "single_adult";
+    else if (hasMinor) household.type = "guardian_family";
+    else if (elderCount && adultCount) household.type = "elder_with_caregiver";
+    else if (elderCount >= 2) household.type = "elder_couple";
+    else if (/couple/.test(current) || ids.length === 2) household.type = "adult_couple";
+    else if (/shared|roommate|合租/.test(current)) household.type = "shared_roommates";
+    else household.type = "shared_roommates";
+    household.routines = Array.isArray(household.routines) && household.routines.length ? household.routines : ["多数夜晚回到住处", "严重异常时同住者更容易发现"];
+  });
+  world.socialStructures ||= {};
+  world.socialStructures.households = cloneSocialRows(world.households || []);
+}
+
+function setupEnsureHouseholdCoverage(world = {}) {
+  const agents = Array.isArray(world.agents) ? world.agents : [];
+  const places = Array.isArray(world.places) ? world.places : [];
+  world.households = Array.isArray(world.households) ? world.households : [];
+  const home = setupFindPlace(places, [/apartment|apartments|residence|home|居民|住宅|住处/i], places[0]?.id || "square");
+  const assigned = new Set();
+  world.households.forEach(household => (Array.isArray(household.members) ? household.members : []).forEach(id => assigned.add(id)));
+  const unassigned = agents.filter(agent => agent?.id && !assigned.has(agent.id));
+  const ageOf = agent => Number(agent.ageYears || ((agent.ageDays || 0) / 365) || 30);
+  const minors = unassigned.filter(agent => ageOf(agent) < 18);
+  const elders = unassigned.filter(agent => ageOf(agent) >= 65);
+  const adults = unassigned.filter(agent => ageOf(agent) >= 18 && ageOf(agent) < 65);
+  const take = list => {
+    const agent = list.find(item => !assigned.has(item.id));
+    if (agent) assigned.add(agent.id);
+    return agent || null;
+  };
+  const addUnit = (members, type, responsibilities = []) => {
+    const ids = members.filter(Boolean).map(agent => agent.id);
+    if (!ids.length) return;
+    world.households.push({
+      id: `home_repair_${world.households.length + 1}`,
+      homePlace: home,
+      members: ids,
+      type,
+      routines: ["多数夜晚回到住处", "严重异常时同住者更容易发现"],
+      responsibilities
+    });
+  };
+  while (minors.some(agent => !assigned.has(agent.id))) {
+    addUnit([take(adults) || take(elders), take(adults), take(minors), Math.random() > 0.7 ? take(minors) : null], "guardian_family", ["未成年人需要稳定照看"]);
+  }
+  while (elders.some(agent => !assigned.has(agent.id))) {
+    const elderA = take(elders);
+    const roll = Math.random();
+    if (roll < 0.45) addUnit([elderA], "single_elder", ["独居老人，异常依赖邻里发现"]);
+    else if (roll < 0.82) addUnit([elderA, take(elders)], "elder_couple", ["健康异常时同住者优先发现"]);
+    else addUnit([elderA, take(adults)], "elder_with_caregiver", ["照护老人"]);
+  }
+  while (adults.some(agent => !assigned.has(agent.id))) {
+    const adultA = take(adults);
+    const roll = Math.random();
+    if (roll < 0.35) addUnit([adultA], "single_adult", ["独居"]);
+    else if (roll < 0.7) addUnit([adultA, take(adults)], "adult_couple", ["共同生活"]);
+    else addUnit([adultA, take(adults), roll > 0.85 ? take(adults) : null], "shared_roommates", ["合租或朋友同住"]);
+  }
+}
+
+function setupRepairPlacement(world = {}) {
+  const places = Array.isArray(world.places) ? world.places : [];
+  const clock = minutesToClock(Number(world.clock || world.startClock || 8 * 60));
+  const h = clock.h;
+  const school = setupFindPlace(places, [/school|学校|education/i], "");
+  const clinic = setupFindPlace(places, [/clinic|诊所|医院|medical/i], "");
+  const office = setupFindPlace(places, [/office|镇务|办公|work/i], "");
+  const factory = setupFindPlace(places, [/factory|工点|工坊|work/i], office);
+  const bus = setupFindPlace(places, [/bus|公交|transport/i], "");
+  const square = setupFindPlace(places, [/square|广场|public/i], places[0]?.id || "square");
+  const park = setupFindPlace(places, [/park|公园|river|河|leisure/i], square);
+  const shopPlaces = places.filter(place => /store|shop|market|breakfast|restaurant|小卖|店|市场|早餐|饭馆|food/i.test(`${place.id || ""} ${place.name || ""} ${place.type || ""}`)).map(place => place.id);
+  const setPlace = (agent, place) => {
+    if (!place || !places.some(item => item.id === place)) return;
+    agent.place = place;
+    agent.position = place;
+  };
+  (world.agents || []).forEach((agent, index) => {
+    if (!agent || agent.lifeStatus === "dead") return;
+    const job = String(agent.job || "");
+    const age = Number(agent.ageYears || ((agent.ageDays || 0) / 365) || 30);
+    const home = setupHouseholdHome(world, agent);
+    const isStudent = /学生|小学|中学|student/i.test(job) || age < 18;
+    if (isStudent) {
+      setPlace(agent, h >= 7 && h < 17 ? school : home);
+      return;
+    }
+    if (/医生|护士|医护|药房|doctor|nurse|medical/i.test(job)) {
+      setPlace(agent, h >= 7 && h < 18 ? clinic : home);
+      return;
+    }
+    if (/店|摊|服务|早餐|小卖|shop|store|vendor|restaurant/i.test(job)) {
+      setPlace(agent, h >= 6 && h < 21 ? (shopPlaces[index % Math.max(1, shopPlaces.length)] || square) : home);
+      return;
+    }
+    if (/通勤|外出|commuter/i.test(job)) {
+      setPlace(agent, h >= 6 && h < 9 ? (bus || home) : h >= 9 && h < 18 ? (bus || office || square) : home);
+      return;
+    }
+    if (/退休|老人|elder|retired/i.test(job) || age >= 65) {
+      setPlace(agent, h < 7 || h >= 18 ? home : [home, park, clinic, square][index % 4]);
+      return;
+    }
+    if (/镇务|保安|公共|police|security|office/i.test(job)) {
+      setPlace(agent, h >= 7 && h < 18 ? (office || square) : home);
+      return;
+    }
+    if (/工人|上班|零工|worker|work/i.test(job)) {
+      setPlace(agent, h >= 8 && h < 18 ? (index % 2 ? factory : office) : home);
+      return;
+    }
+    setPlace(agent, home || square);
+  });
+}
+
 function normalizeWorldBeforeSave(world = {}) {
   if (!Array.isArray(world.agents)) return world;
   const existingSocial = world.socialStructures && typeof world.socialStructures === "object" ? world.socialStructures : {};
@@ -1093,6 +1235,9 @@ function normalizeWorldBeforeSave(world = {}) {
         : fallbackSocial.relations || []
     };
   }
+  setupEnsureHouseholdCoverage(world);
+  setupNormalizeHouseholdTypes(world);
+  setupRepairPlacement(world);
   setupApplyRelationshipMatrix(world.agents, {
     households: world.households || [],
     groups: world.groups || [],
@@ -3898,6 +4043,44 @@ function setupApplyRelationshipMatrix(agents, social) {
         type: "点头熟人"
       };
     });
+  });
+  const addWeakRelation = (agent, contact, type, strength = 40) => {
+    if (!agent?.id || !contact?.id || agent.id === contact.id) return false;
+    agent.relationshipMatrix ||= {};
+    if (agent.relationshipMatrix[contact.id]) return false;
+    agent.relationshipMatrix[contact.id] = {
+      trust: strength,
+      intimacy: Math.max(10, strength - 22),
+      respect: Math.max(25, strength - 5),
+      debt: 0,
+      resentment: 0,
+      dependency: Math.max(8, strength - 30),
+      familiarity: Math.min(65, strength + 10),
+      rivalry: 0,
+      type
+    };
+    return true;
+  };
+  agents.forEach((agent, index) => {
+    const job = String(agent.job || "");
+    const age = Number(agent.ageYears || ((agent.ageDays || 0) / 365) || 30);
+    const current = () => Object.keys(agent.relationshipMatrix || {}).length;
+    const target = /学生|小学|中学|student/i.test(job) || age < 18 ? 9
+      : /店|摊|服务|早餐|小卖|shop|store|vendor|restaurant/i.test(job) ? 13
+        : /退休|老人|elder|retired/i.test(job) || age >= 65 ? 8
+          : /通勤|外出|commuter/i.test(job) ? 5
+            : 8;
+    const samePlace = agents.filter(item => item.id !== agent.id && (item.position || item.place) === (agent.position || agent.place));
+    const sameJob = agents.filter(item => item.id !== agent.id && String(item.job || "") === job);
+    const neighbors = agents.filter((item, itemIndex) => item.id !== agent.id && Math.abs(itemIndex - index) <= 4);
+    const candidates = [...samePlace, ...sameJob, ...neighbors, ...agents].filter(item => item?.id && item.id !== agent.id);
+    for (const contact of [...new Map(candidates.map(item => [item.id, item])).values()]) {
+      if (current() >= target) break;
+      const type = (agent.position || agent.place) === (contact.position || contact.place) ? "同地点熟人"
+        : String(contact.job || "") === job ? "同业熟人"
+          : "听说过/点头熟人";
+      addWeakRelation(agent, contact, type, type === "同地点熟人" ? 43 : 36);
+    }
   });
   return agents;
 }
