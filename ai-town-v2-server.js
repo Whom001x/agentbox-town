@@ -2438,7 +2438,7 @@ function userPrompt(task, payload) {
   }
   if (task === "setupBlueprintAgent") {
     return JSON.stringify({
-      instruction: "返回 JSON：{\"premise\":\"\",\"targetAgentCount\":100,\"targetLocationCount\":20,\"populationShape\":\"ordinary_mixed_town\",\"householdPlan\":{\"households\":32,\"singleElder\":3,\"familyWithChildren\":14,\"coupleOnly\":6,\"sharedOrRental\":4},\"agePyramid\":{\"children\":8,\"teens\":14,\"youngAdults\":12,\"adults\":42,\"elders\":24},\"institutions\":{\"school\":{\"students\":22,\"teachers\":3,\"staff\":1},\"clinic\":{\"doctor\":1,\"nurse\":1},\"shops\":{\"owners\":6,\"helpers\":3},\"publicOffice\":{\"staff\":3}},\"workPatterns\":{\"localWorkers\":22,\"commuters\":10,\"caregivers\":8,\"retired\":14,\"informalWork\":7},\"places\":[{\"id\":\"\",\"name\":\"\",\"x\":50,\"y\":50,\"capacity\":30,\"visible\":[\"\"]}],\"roleMix\":[{\"role\":\"\",\"count\":10,\"ageRange\":\"20-60\",\"places\":[\"\"]}],\"roleBatches\":[{\"batchId\":\"\",\"start\":0,\"count\":10,\"roleHint\":\"\",\"ageRange\":\"20-60\",\"placeHints\":[\"\"],\"notes\":\"\"}],\"relationshipPlan\":{\"householdTarget\":0,\"groupTarget\":0,\"relationTarget\":0,\"notes\":\"\"},\"logs\":[{\"title\":\"\",\"body\":\"\"}]}。",
+      instruction: "返回 JSON：{\"premise\":\"\",\"targetAgentCount\":100,\"targetLocationCount\":20,\"populationShape\":\"ordinary_mixed_town\",\"householdPlan\":{\"households\":32,\"singleElder\":5,\"familyWithChildren\":12,\"coupleOnly\":6,\"sharedOrRental\":4},\"agePyramid\":{\"children\":6,\"teens\":12,\"youngAdults\":12,\"adults\":46,\"elders\":24},\"institutions\":{\"school\":{\"students\":18,\"teachers\":3,\"staff\":1},\"clinic\":{\"doctor\":1,\"nurse\":1},\"shops\":{\"owners\":6,\"helpers\":4},\"publicOffice\":{\"staff\":3}},\"workPatterns\":{\"localWorkers\":24,\"commuters\":8,\"caregivers\":8,\"retired\":24,\"informalWork\":7},\"places\":[{\"id\":\"\",\"name\":\"\",\"x\":50,\"y\":50,\"capacity\":30,\"visible\":[\"\"]}],\"roleMix\":[{\"role\":\"\",\"count\":10,\"ageRange\":\"20-60\",\"places\":[\"\"]}],\"roleBatches\":[{\"batchId\":\"\",\"start\":0,\"count\":10,\"roleHint\":\"\",\"ageRange\":\"20-60\",\"placeHints\":[\"\"],\"notes\":\"\"}],\"relationshipPlan\":{\"householdTarget\":0,\"groupTarget\":0,\"relationTarget\":0,\"notes\":\"\"},\"logs\":[{\"title\":\"\",\"body\":\"\"}]}。",
       constraints: [
         "本阶段只做建镇人口结构规划和数量拆分，不生成具体人物",
         "targetAgentCount 以 payload.targetAgentCount 和用户一句话为准；例如 100 人小镇就规划 100 人",
@@ -2446,6 +2446,7 @@ function userPrompt(task, payload) {
         "places 优先沿用 payload.existingPlaces 的 id；如需补地点，id 必须英文/数字/下划线、唯一、稳定",
         "populationShape 必须先判断小镇类型，例如 ordinary_mixed_town、agricultural_town、commuter_town、aging_town、factory_town、school_centered_town、tourism_town",
         "householdPlan 要先估计家庭户数和户型；儿童/学生不能凭空存在，通常应有父母、祖辈、监护人或可联系成年人",
+        "普通中国小镇默认年龄结构按未成年人约18%、青年约12%、成年主力约46%、老人约24%；除非用户明确指定学校型、旅游型或极端老龄化小镇，不要偏离太多",
         "agePyramid 的 children、teens、youngAdults、adults、elders 总和应接近 targetAgentCount；不要让 100 人小镇全是成年人或全是职业标签",
         "institutions 必须按人口规模推导学校、诊所、商业和公共岗位；100 人小镇通常是诊所而不是完整医院，医生/护士数量要克制",
         "workPatterns 要包含本地工作、通勤外出、家庭照护、退休、非固定职业；不要把成年人都塞进工坊",
@@ -3481,14 +3482,14 @@ function setupDefaultRolePlan(count, places = []) {
   const n = Math.max(1, Number(count) || 1);
   const pct = value => Math.max(0, Math.round(n * value));
   const plan = [
-    { roleHint: "小学生/中学生", count: pct(0.20), ageRange: "7-18" },
+    { roleHint: "小学生/中学生", count: pct(0.18), ageRange: "7-18" },
     { roleHint: "老师/校工", count: Math.max(1, Math.round(n / 35)), ageRange: "24-60" },
     { roleHint: "医生/护士/药房人员", count: Math.max(1, Math.round(n / 55)), ageRange: "24-62" },
     { roleHint: "店主/摊主/服务人员", count: pct(0.10), ageRange: "22-65" },
-    { roleHint: "本地工人/上班族/零工", count: pct(0.28), ageRange: "20-64" },
+    { roleHint: "本地工人/上班族/零工", count: pct(0.24), ageRange: "25-64" },
     { roleHint: "通勤外出工作者", count: pct(0.08), ageRange: "22-60" },
     { roleHint: "家庭照护/自由职业/待业", count: pct(0.08), ageRange: "20-64" },
-    { roleHint: "退休老人", count: pct(0.16), ageRange: "65-88" },
+    { roleHint: "退休老人", count: pct(0.24), ageRange: "65-88" },
     { roleHint: "镇务/保安/公共服务", count: Math.max(1, Math.round(n / 40)), ageRange: "25-62" }
   ];
   let total = plan.reduce((sum, item) => sum + item.count, 0);
