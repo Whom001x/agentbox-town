@@ -349,6 +349,7 @@ export default function App() {
         openPlace={openPlace}
         events={recentEvents}
         runtime={runtime}
+        landscape={landscape}
         toggleRuntime={toggleRuntime}
         stepOnce={stepOnce}
         refresh={refresh}
@@ -734,12 +735,12 @@ function ActionButton({ icon, label, active, onPress }) {
 }
 
 function Drawer(props) {
-  const { drawer, close } = props;
+  const { drawer, close, landscape } = props;
   return (
     <Modal visible={!!drawer.type} transparent animationType="slide" onRequestClose={close}>
-      <View style={styles.modalBackdrop}>
+      <View style={[styles.modalBackdrop, landscape && styles.modalBackdropLandscape]}>
         <Pressable style={styles.backdropTap} onPress={close} />
-        <View style={styles.drawer}>
+        <View style={[styles.drawer, landscape && styles.drawerLandscape]}>
           <View style={styles.drawerHead}>
             <Text style={styles.drawerTitle}>{drawer.title}</Text>
             <Pressable style={styles.closeButton} onPress={close}>
@@ -938,25 +939,27 @@ const styles = StyleSheet.create({
   },
   mapControls: {
     position: "absolute",
-    left: 144,
-    bottom: 12,
-    flexDirection: "row",
+    left: 14,
+    bottom: 128,
+    flexDirection: "column",
     gap: 6,
     padding: 5,
-    borderRadius: 16,
-    backgroundColor: "rgba(8, 18, 29, 0.76)",
+    borderRadius: 18,
+    backgroundColor: "rgba(6, 14, 22, 0.72)",
     borderWidth: 1,
-    borderColor: "rgba(147, 211, 255, 0.28)",
+    borderColor: "rgba(255, 226, 154, 0.28)",
     zIndex: 8,
     elevation: 8
   },
   mapControlButton: {
-    width: 32,
-    height: 32,
-    borderRadius: 11,
+    width: 34,
+    height: 34,
+    borderRadius: 14,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "rgba(255,255,255,0.1)"
+    backgroundColor: "rgba(255,255,255,0.12)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.12)"
   },
   mapControlText: {
     color: palette.ink,
@@ -1062,18 +1065,21 @@ const styles = StyleSheet.create({
   },
   topHud: {
     position: "absolute",
-    top: 8,
-    right: 10,
-    width: 250,
-    minHeight: 46,
-    borderRadius: 15,
+    top: 10,
+    right: 12,
+    width: 236,
+    minHeight: 42,
+    borderRadius: 18,
     borderWidth: 1,
-    borderColor: palette.line,
-    backgroundColor: palette.panel,
-    padding: 7,
+    borderColor: "rgba(255, 226, 154, 0.24)",
+    backgroundColor: "rgba(7, 17, 25, 0.82)",
+    paddingHorizontal: 10,
+    paddingVertical: 6,
     flexDirection: "row",
     alignItems: "center",
-    gap: 10
+    gap: 8,
+    zIndex: 12,
+    elevation: 12
   },
   titleBlock: {
     flex: 1,
@@ -1082,21 +1088,21 @@ const styles = StyleSheet.create({
   townName: {
     color: palette.ink,
     fontWeight: "900",
-    fontSize: 14
+    fontSize: 13
   },
   hudSub: {
     color: palette.muted,
     marginTop: 2,
-    fontSize: 10
+    fontSize: 9
   },
   hudActions: {
     flexDirection: "row",
-    gap: 6
+    gap: 5
   },
   roundButton: {
-    width: 32,
-    height: 32,
-    borderRadius: 11,
+    width: 30,
+    height: 30,
+    borderRadius: 12,
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: "rgba(255,255,255,0.1)",
@@ -1105,14 +1111,16 @@ const styles = StyleSheet.create({
   },
   miniMap: {
     position: "absolute",
-    top: 8,
-    left: 8,
-    width: 162,
-    borderRadius: 16,
+    top: 10,
+    left: 10,
+    width: 150,
+    borderRadius: 14,
     borderWidth: 1,
-    borderColor: palette.line,
-    backgroundColor: palette.panel,
-    overflow: "hidden"
+    borderColor: "rgba(255, 226, 154, 0.28)",
+    backgroundColor: "rgba(7, 17, 25, 0.82)",
+    overflow: "hidden",
+    zIndex: 12,
+    elevation: 12
   },
   panelHeader: {
     minHeight: 32,
@@ -1153,7 +1161,7 @@ const styles = StyleSheet.create({
     fontWeight: "900"
   },
   miniMapBody: {
-    height: 88,
+    height: 82,
     backgroundColor: "rgba(56, 94, 60, 0.7)"
   },
   miniMapImage: {
@@ -1161,10 +1169,12 @@ const styles = StyleSheet.create({
   },
   miniDot: {
     position: "absolute",
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: palette.amber
+    width: 7,
+    height: 7,
+    borderRadius: 4,
+    backgroundColor: palette.amber,
+    borderWidth: 1,
+    borderColor: "rgba(25, 18, 8, 0.65)"
   },
   sidePanel: {
     position: "absolute",
@@ -1232,29 +1242,35 @@ const styles = StyleSheet.create({
   },
   bottomBar: {
     position: "absolute",
-    left: "27%",
-    right: "27%",
-    bottom: 8,
-    borderRadius: 18,
+    alignSelf: "center",
+    bottom: 10,
+    maxWidth: 560,
+    borderRadius: 22,
     borderWidth: 1,
-    borderColor: palette.line,
-    backgroundColor: "rgba(8, 18, 29, 0.92)",
-    padding: 6
+    borderColor: "rgba(255, 226, 154, 0.26)",
+    backgroundColor: "rgba(7, 16, 24, 0.88)",
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+    zIndex: 14,
+    elevation: 14
   },
   bottomItems: {
-    gap: 6,
-    paddingRight: 4
+    gap: 5,
+    paddingRight: 0
   },
   actionButton: {
-    minWidth: 58,
-    minHeight: 44,
-    borderRadius: 13,
+    width: 62,
+    minHeight: 48,
+    borderRadius: 16,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "rgba(255,255,255,0.08)"
+    backgroundColor: "rgba(255,255,255,0.075)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.08)"
   },
   actionActive: {
-    backgroundColor: palette.amber
+    backgroundColor: palette.amber,
+    borderColor: "rgba(255,255,255,0.32)"
   },
   actionText: {
     color: palette.ink,
@@ -1398,6 +1414,12 @@ const styles = StyleSheet.create({
     justifyContent: "flex-end",
     backgroundColor: "rgba(0,0,0,0.25)"
   },
+  modalBackdropLandscape: {
+    justifyContent: "center",
+    alignItems: "flex-end",
+    paddingRight: 14,
+    paddingVertical: 14
+  },
   backdropTap: {
     ...StyleSheet.absoluteFillObject
   },
@@ -1410,9 +1432,16 @@ const styles = StyleSheet.create({
     backgroundColor: palette.panelSolid,
     overflow: "hidden"
   },
+  drawerLandscape: {
+    width: 430,
+    maxHeight: "92%",
+    borderRadius: 22,
+    backgroundColor: "rgba(9, 21, 32, 0.94)",
+    borderColor: "rgba(255, 226, 154, 0.24)"
+  },
   drawerHead: {
-    minHeight: 58,
-    paddingHorizontal: 16,
+    minHeight: 52,
+    paddingHorizontal: 14,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
@@ -1421,24 +1450,24 @@ const styles = StyleSheet.create({
   },
   drawerTitle: {
     color: palette.ink,
-    fontSize: 18,
+    fontSize: 17,
     fontWeight: "900"
   },
   closeButton: {
-    width: 38,
-    height: 38,
-    borderRadius: 14,
+    width: 34,
+    height: 34,
+    borderRadius: 13,
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: "rgba(255,255,255,0.08)"
   },
   drawerBody: {
-    padding: 12,
-    gap: 9
+    padding: 10,
+    gap: 8
   },
   info: {
-    padding: 11,
-    borderRadius: 14,
+    padding: 10,
+    borderRadius: 12,
     backgroundColor: "rgba(255,255,255,0.07)",
     borderWidth: 1,
     borderColor: "rgba(147, 211, 255, 0.16)"
@@ -1454,8 +1483,8 @@ const styles = StyleSheet.create({
     lineHeight: 20
   },
   listRow: {
-    padding: 12,
-    borderRadius: 14,
+    padding: 10,
+    borderRadius: 12,
     backgroundColor: "rgba(255,255,255,0.07)",
     borderWidth: 1,
     borderColor: "rgba(147, 211, 255, 0.16)"
