@@ -177,15 +177,15 @@
     .tool.active { background: rgba(31, 143, 255, .24); color: #7fc0ff; }
     .place-pin {
       position: absolute;
-      min-width: 150px;
-      max-width: 220px;
+      min-width: 0;
+      max-width: 280px;
       transform: translate(-50%, -100%) scale(var(--pin-scale, 1));
       transform-origin: 50% 100%;
       border: 1px solid rgba(255,255,255,.13);
-      border-radius: 20px;
+      border-radius: 18px;
       background: linear-gradient(135deg, rgba(10, 23, 34, .94), rgba(5, 15, 23, .86));
       color: var(--ink);
-      padding: 12px 14px 12px 56px;
+      padding: 9px 13px 9px 50px;
       box-shadow: var(--shadow);
       cursor: pointer;
       transition: transform .16s ease, border-color .16s ease, background .16s ease;
@@ -217,10 +217,10 @@
     }
     .pin-icon {
       position: absolute;
-      left: 12px;
+      left: 10px;
       top: 50%;
-      width: 34px;
-      height: 34px;
+      width: 32px;
+      height: 32px;
       transform: translateY(-50%);
       display: grid;
       place-items: center;
@@ -233,9 +233,10 @@
     .place-pin[data-tone="yellow"] .pin-icon { background: #c88428; }
     .place-pin[data-tone="purple"] .pin-icon { background: var(--purple); }
     .place-pin[data-tone="cyan"] .pin-icon { background: var(--cyan); color: #032529; }
-    .pin-title { font-size: 18px; font-weight: 700; line-height: 1.2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .pin-meta { margin-top: 4px; font-size: 13px; color: #d8e7f2; }
-    .pin-state { margin-top: 6px; font-size: 12px; color: var(--green); }
+    .pin-body { display: flex; align-items: center; gap: 7px; min-width: 0; white-space: nowrap; }
+    .pin-title { font-size: 18px; font-weight: 700; line-height: 1.2; max-width: 92px; overflow: hidden; text-overflow: ellipsis; }
+    .pin-meta { font-size: 14px; color: #d8e7f2; }
+    .pin-state { font-size: 13px; color: var(--green); }
     .agent-dot {
       position: absolute;
       width: 22px;
