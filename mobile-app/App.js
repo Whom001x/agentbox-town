@@ -170,7 +170,7 @@ export default function App() {
 
   const loadSaves = useCallback(async () => {
     const data = await request("/api/saves");
-    const rows = data.saves || [];
+    const rows = (data.saves || []).filter(save => Number(save.agentCount || 0) > 0 && save.slot !== "runtime-progress");
     setSaves(rows);
     const nextSlot = slot || rows.find(save => Number(save.agentCount || 0) > 0)?.slot || rows[0]?.slot || "";
     if (nextSlot && nextSlot !== slot) setSlot(nextSlot);
@@ -185,7 +185,7 @@ export default function App() {
 
   const loadSlot = useCallback(async (targetSlot) => {
     if (!targetSlot) return;
-    const data = await request(`/api/saves/${encodeURIComponent(targetSlot)}`);
+    const data = await request(`/api/mobile/saves/${encodeURIComponent(targetSlot)}`, { timeoutMs: 15000 });
     setPayload(data);
     setSlot(targetSlot);
   }, [request]);

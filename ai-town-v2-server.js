@@ -994,6 +994,103 @@ function readSavePayload(slot) {
   return null;
 }
 
+function compactText(value, fallback = "", limit = 180) {
+  if (value === null || value === undefined) return fallback;
+  const text = typeof value === "string" ? value : JSON.stringify(value);
+  return String(text || fallback).replace(/\s+/g, " ").trim().slice(0, limit);
+}
+
+function compactAgentForMobile(agent = {}) {
+  const memory = agent.memory && typeof agent.memory === "object" ? agent.memory : {};
+  return {
+    id: compactText(agent.id || agent.name, "agent"),
+    name: compactText(agent.name || agent.id, "居民", 40),
+    job: compactText(agent.job || agent.role || "居民", "居民", 40),
+    ageYears: agent.ageYears ?? agent.age ?? "",
+    age: agent.age ?? agent.ageYears ?? "",
+    ageStage: compactText(agent.ageStage || "", "", 24),
+    position: compactText(agent.position || agent.place || "square", "square", 48),
+    place: compactText(agent.place || agent.position || "square", "square", 48),
+    currentTask: compactText(agent.currentTask || agent.activeProcess?.currentStep || agent.lastTimePassage?.summary || "", "", 120),
+    mood: compactText(agent.mood || agent.emotion || "", "", 60),
+    lifeStatus: agent.lifeStatus || "",
+    terminalState: agent.terminalState || null,
+    isSleeping: Boolean(agent.isSleeping),
+    needs: agent.needs && typeof agent.needs === "object" ? agent.needs : {},
+    emotionVector: agent.emotionVector && typeof agent.emotionVector === "object" ? agent.emotionVector : agent.emotions || {},
+    longTermGoal: compactText(agent.longTermGoal || agent.longTermGoals?.[0]?.title || "", "", 160),
+    memorySummary: compactText(agent.memorySummary || agent.memory || "", "", 180),
+    memory: {
+      emotional: Array.isArray(memory.emotional) ? memory.emotional.slice(0, 2).map(item => ({ text: compactText(item?.text || item, "", 100) })) : [],
+      long: Array.isArray(memory.long) ? memory.long.slice(0, 2).map(item => ({ text: compactText(item?.text || item, "", 100) })) : [],
+      short: Array.isArray(memory.short) ? memory.short.slice(0, 2).map(item => ({ text: compactText(item?.text || item, "", 100) })) : [],
+      rumor: Array.isArray(memory.rumor) ? memory.rumor.slice(0, 1).map(item => ({ text: compactText(item?.text || item, "", 100) })) : []
+    },
+    relationshipMatrix: Object.fromEntries(Object.entries(agent.relationshipMatrix || {}).slice(0, 8))
+  };
+}
+
+function compactEventForMobile(event = {}, index = 0) {
+  return {
+    id: compactText(event.id || event.eventId || `event_${index}`, `event_${index}`, 60),
+    title: compactText(event.title || event.type || "小镇事件", "小镇事件", 80),
+    body: compactText(event.body || event.summary || event.text || event.description || "", "", 180),
+    summary: compactText(event.summary || event.body || event.text || "", "", 160),
+    timeText: compactText(event.timeText || event.clockText || "", "", 40)
+  };
+}
+
+function compactLocationBoxesForMobile(boxes = {}) {
+  return Object.fromEntries(Object.entries(boxes || {}).map(([id, box = {}]) => [
+    id,
+    {
+      agentState: box.agentState ? { status: compactText(box.agentState.status || "", "", 80) } : {},
+      state: box.state ? { tempo: compactText(box.state.tempo || box.state.status || "", "", 80) } : {},
+      localEvents: Array.isArray(box.localEvents) ? box.localEvents.slice(0, 4).map(compactEventForMobile) : []
+    }
+  ]));
+}
+
+function buildMobileSavePayload(slot, payload) {
+  const world = payload?.world || payload || {};
+  const agents = Array.isArray(world.agents) ? world.agents.map(compactAgentForMobile) : [];
+  const places = Array.isArray(world.places) ? world.places.map((place, index) => ({
+    id: compactText(place.id || `place_${index}`, `place_${index}`, 60),
+    name: compactText(place.name || place.id || `地点${index + 1}`, `地点${index + 1}`, 60),
+    type: compactText(place.type || "", "", 40),
+    x: Number.isFinite(Number(place.x)) ? Number(place.x) : 18 + (index % 5) * 16,
+    y: Number.isFinite(Number(place.y)) ? Number(place.y) : 18 + Math.floor(index / 5) * 14
+  })) : [];
+  const events = [
+    ...(Array.isArray(world.records) ? world.records : []),
+    ...(Array.isArray(world.logs) ? world.logs : []),
+    ...(Array.isArray(world.publicEvents) ? world.publicEvents : [])
+  ].slice(0, 30).map(compactEventForMobile);
+  return {
+    version: payload?.version || 2,
+    savedAt: payload?.savedAt || payload?.meta?.updatedAt || "",
+    meta: {
+      ...(payload?.meta && typeof payload.meta === "object" ? payload.meta : {}),
+      name: compactText(payload?.meta?.name || slot, slot, 80),
+      agentCount: agents.length,
+      mobileCompact: true
+    },
+    world: {
+      clock: world.clock || 0,
+      startClock: world.startClock || world.clock || 0,
+      selected: world.selected || agents[0]?.id || "",
+      selectedPlace: world.selectedPlace || places[0]?.id || "",
+      weatherBox: world.weatherBox || {},
+      agents,
+      places,
+      records: events,
+      logs: [],
+      publicEvents: []
+    },
+    locationBoxes: compactLocationBoxesForMobile(payload?.locationBoxes || world.locationBoxes || {})
+  };
+}
+
 function writeRuntimePayload(slot, payload) {
   const safeSlot = safeSaveName(slot);
   const metaName = payload?.meta?.name || safeSlot;
@@ -4446,6 +4543,20 @@ async function handleApi(req, res) {
   }
   if (apiPath === "/api/saves" && req.method === "GET") {
     send(res, 200, { saves: listSaves(), directory: SAVE_DIR });
+    return;
+  }
+  if (apiPath.startsWith("/api/mobile/saves/") && req.method === "GET") {
+    try {
+      const slot = safeSaveName(decodeURIComponent(apiPath.slice("/api/mobile/saves/".length)));
+      const payload = readSavePayload(slot);
+      if (!payload) {
+        send(res, 404, { error: { message: "Save not found", type: "not_found" } });
+        return;
+      }
+      send(res, 200, buildMobileSavePayload(slot, payload));
+    } catch (error) {
+      send(res, 400, { error: { message: error.message, type: "load_mobile_save_error" } });
+    }
     return;
   }
   if (apiPath === "/api/saves" && req.method === "POST") {
