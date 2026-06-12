@@ -5,6 +5,7 @@ import {
   ImageBackground,
   Modal,
   NativeModules,
+  PanResponder,
   Pressable,
   ScrollView,
   StatusBar,
@@ -453,16 +454,16 @@ function TownMap({ mapWidth, mapHeight, places, boxes, placeAgentCount, openPlac
     gestureRef.current = { x: initialView.x, y: initialView.y, distance: 0, scale: initialView.scale };
   }, [initialView]);
 
-  function clampMapView(next) {
-    const scale = clamp(next.scale ?? mapView.scale, 1, 2.2);
+  function clampMapView(next, current = mapView) {
+    const scale = clamp(next.scale ?? current.scale, 1, 2.4);
     const scaledWidth = canvasWidth * scale;
     const scaledHeight = canvasHeight * scale;
     const minX = Math.min(-24, mapWidth - scaledWidth + 24);
     const minY = Math.min(-24, mapHeight - scaledHeight + 24);
     return {
       scale,
-      x: clamp(next.x ?? mapView.x, minX, 24),
-      y: clamp(next.y ?? mapView.y, minY, 24)
+      x: clamp(next.x ?? current.x, minX, 24),
+      y: clamp(next.y ?? current.y, minY, 24)
     };
   }
 
@@ -480,35 +481,58 @@ function TownMap({ mapWidth, mapHeight, places, boxes, placeAgentCount, openPlac
       scale: current.scale + delta,
       x: current.x - (canvasWidth * delta) / 2,
       y: current.y - (canvasHeight * delta) / 2
-    }));
+    }, current));
   }
+
+  const panResponder = useMemo(() => PanResponder.create({
+    onStartShouldSetPanResponder: () => false,
+    onStartShouldSetPanResponderCapture: () => false,
+    onMoveShouldSetPanResponder: (event, gesture) => {
+      const touches = event.nativeEvent.touches || [];
+      return touches.length > 1 || Math.abs(gesture.dx) > 3 || Math.abs(gesture.dy) > 3;
+    },
+    onMoveShouldSetPanResponderCapture: (event, gesture) => {
+      const touches = event.nativeEvent.touches || [];
+      return touches.length > 1 || Math.abs(gesture.dx) > 6 || Math.abs(gesture.dy) > 6;
+    },
+    onPanResponderGrant: (event) => {
+      gestureRef.current = {
+        x: mapView.x,
+        y: mapView.y,
+        distance: touchDistance(event.nativeEvent.touches),
+        scale: mapView.scale
+      };
+    },
+    onPanResponderMove: (event, gesture) => {
+      const distance = touchDistance(event.nativeEvent.touches);
+      if (distance && gestureRef.current.distance) {
+        const nextScale = gestureRef.current.scale * (distance / gestureRef.current.distance);
+        setMapView(current => clampMapView({
+          scale: nextScale,
+          x: gestureRef.current.x,
+          y: gestureRef.current.y
+        }, current));
+        return;
+      }
+      setMapView(current => clampMapView({
+        x: gestureRef.current.x + gesture.dx,
+        y: gestureRef.current.y + gesture.dy,
+        scale: gestureRef.current.scale
+      }, current));
+    },
+    onPanResponderRelease: () => {
+      setMapView(current => {
+        gestureRef.current = { x: current.x, y: current.y, distance: 0, scale: current.scale };
+        return current;
+      });
+    },
+    onPanResponderTerminationRequest: () => true
+  }), [mapView.x, mapView.y, mapView.scale, canvasWidth, canvasHeight, mapWidth, mapHeight]);
 
   return (
     <View
       style={[styles.map, { height: mapHeight }]}
-      onStartShouldSetResponder={() => false}
-      onMoveShouldSetResponder={(event, gesture) => Math.abs(gesture.dx) > 4 || Math.abs(gesture.dy) > 4 || event.nativeEvent.touches?.length > 1}
-      onResponderGrant={(event) => {
-        gestureRef.current = {
-          x: mapView.x,
-          y: mapView.y,
-          distance: touchDistance(event.nativeEvent.touches),
-          scale: mapView.scale
-        };
-      }}
-      onResponderMove={(event, gesture) => {
-        const distance = touchDistance(event.nativeEvent.touches);
-        if (distance && gestureRef.current.distance) {
-          const nextScale = gestureRef.current.scale * (distance / gestureRef.current.distance);
-          setMapView(current => clampMapView({ ...current, scale: nextScale }));
-          return;
-        }
-        setMapView(clampMapView({
-          x: gestureRef.current.x + gesture.dx,
-          y: gestureRef.current.y + gesture.dy,
-          scale: mapView.scale
-        }));
-      }}
+      {...panResponder.panHandlers}
     >
       <ImageBackground
         source={assets.townMap}
