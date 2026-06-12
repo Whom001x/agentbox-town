@@ -633,6 +633,31 @@
       if (toggle) toggle.textContent = detailOpen ? "收起详情" : "地点详情";
     }
 
+    function placeIdAtClientPoint(clientX, clientY) {
+      let best = null;
+      document.querySelectorAll("#mapCanvas [data-place]").forEach(node => {
+        const rect = node.getBoundingClientRect();
+        const pad = 10;
+        if (
+          clientX < rect.left - pad || clientX > rect.right + pad ||
+          clientY < rect.top - pad || clientY > rect.bottom + pad
+        ) return;
+        const cx = rect.left + rect.width / 2;
+        const cy = rect.top + rect.height / 2;
+        const distance = Math.hypot(clientX - cx, clientY - cy);
+        if (!best || distance < best.distance) best = { id: node.dataset.place, distance };
+      });
+      return best?.id || "";
+    }
+
+    function selectPlace(placeId, world = lastPayload?.world) {
+      if (!placeId || !world) return;
+      selectedPlaceId = placeId;
+      setDetailOpen(true);
+      renderMap(world);
+      renderDetail(world);
+    }
+
     function bindMapControls() {
       const world = $("mapWorld");
       const layer = document.querySelector(".map-layer");
@@ -753,10 +778,7 @@
       canvas.querySelectorAll("[data-place]").forEach(button => {
         button.addEventListener("click", () => {
           if (suppressMapClick) return;
-          selectedPlaceId = button.dataset.place;
-          setDetailOpen(true);
-          renderMap(world);
-          renderDetail(world);
+          selectPlace(button.dataset.place, world);
         });
       });
       applyMapView();
@@ -920,6 +942,14 @@
       if (!detailOpen && lastPayload?.world) renderDetail(lastPayload.world);
       setDetailOpen(!detailOpen);
     });
+    $("detailPanel").addEventListener("click", event => {
+      if (event.target.closest("#detailClose")) return;
+      const placeId = placeIdAtClientPoint(event.clientX, event.clientY);
+      if (!placeId || placeId === selectedPlaceId) return;
+      event.preventDefault();
+      event.stopPropagation();
+      selectPlace(placeId, lastPayload?.world);
+    }, true);
     refresh().catch(error => {
       $("subtitle").textContent = error.message;
       $("metricsRow").innerHTML = `<article class="metric warn"><span>读取失败</span><strong>!</strong><small>${esc(error.message)}</small></article>`;
