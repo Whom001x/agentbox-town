@@ -1059,8 +1059,45 @@ function freezeDeadAgent(agent, world = {}) {
   return true;
 }
 
+function cloneSocialRows(rows) {
+  if (!Array.isArray(rows)) return [];
+  return rows.map(row => {
+    if (!row || typeof row !== "object") return row;
+    return {
+      ...row,
+      members: Array.isArray(row.members) ? [...row.members] : row.members,
+      authority: Array.isArray(row.authority) ? [...row.authority] : row.authority,
+      routines: Array.isArray(row.routines) ? [...row.routines] : row.routines,
+      responsibilities: Array.isArray(row.responsibilities) ? [...row.responsibilities] : row.responsibilities
+    };
+  });
+}
+
 function normalizeWorldBeforeSave(world = {}) {
   if (!Array.isArray(world.agents)) return world;
+  const existingSocial = world.socialStructures && typeof world.socialStructures === "object" ? world.socialStructures : {};
+  if (!Array.isArray(world.households) && Array.isArray(existingSocial.households)) world.households = cloneSocialRows(existingSocial.households);
+  if (!Array.isArray(world.groups) && Array.isArray(existingSocial.groups)) world.groups = cloneSocialRows(existingSocial.groups);
+  const missingHouseholds = !Array.isArray(world.households) || !world.households.length;
+  const missingGroups = !Array.isArray(world.groups) || !world.groups.length;
+  if (missingHouseholds || missingGroups) {
+    const fallbackSocial = setupFallbackRelationships(world.agents, Array.isArray(world.places) ? world.places : []);
+    if (missingHouseholds) world.households = Array.isArray(existingSocial.households) && existingSocial.households.length ? cloneSocialRows(existingSocial.households) : cloneSocialRows(fallbackSocial.households || []);
+    if (missingGroups) world.groups = Array.isArray(existingSocial.groups) && existingSocial.groups.length ? cloneSocialRows(existingSocial.groups) : cloneSocialRows(fallbackSocial.groups || []);
+    world.socialStructures = {
+      ...existingSocial,
+      households: cloneSocialRows(world.households),
+      groups: cloneSocialRows(world.groups),
+      relations: Array.isArray(existingSocial.relations) && existingSocial.relations.length
+        ? existingSocial.relations
+        : fallbackSocial.relations || []
+    };
+  }
+  setupApplyRelationshipMatrix(world.agents, {
+    households: world.households || [],
+    groups: world.groups || [],
+    relations: world.socialStructures?.relations || []
+  });
   world.agents.forEach(agent => {
     normalizeMemoryLayers(agent, world);
     freezeDeadAgent(agent, world);
@@ -3623,6 +3660,19 @@ function setupNormalizeSeeds(input = [], count = 12, places = []) {
 function setupMakeAgent(seed, index) {
   const baseNeed = () => clampNumber(58 + Math.round(Math.random() * 28), 0, 100, 70);
   const emotion = () => clampNumber(35 + Math.round(Math.random() * 35), 0, 100, 50);
+  const ageYears = Number(seed.ageYears || 30);
+  const job = String(seed.job || "");
+  const lifeAnchor = `${seed.name || "这个人"}在${job || "小镇居民"}身份里有稳定责任，常在${seed.place || "镇上"}活动。`;
+  const identity = seed.identityCore || {};
+  const defaultHabit = /学生/.test(job) ? "上课日会优先考虑学校安排"
+    : /医生|护士|医护/.test(job) ? "听到紧急健康事件会优先确认是否需要返回诊所"
+    : /老师/.test(job) ? "会留意学生是否缺课或身体不适"
+    : /店|商|早餐|小卖部/.test(job) ? "会关注营业时间、熟客和店里秩序"
+    : ageYears >= 65 ? "行动节奏偏慢，更看重安全和熟人照应"
+    : "会围绕工作、家庭和日常责任安排一天";
+  const initialMemory = Array.isArray(seed.memory) && seed.memory.length
+    ? seed.memory
+    : [lifeAnchor, `长期目标：${seed.goal || "维持稳定生活"}`];
   return {
     ...seed,
     position: seed.place,
@@ -3630,15 +3680,20 @@ function setupMakeAgent(seed, index) {
     currentTask: "开始一天的日常安排",
     needs: { hunger: baseNeed(), hygiene: baseNeed(), health: baseNeed(), social: baseNeed(), responsibility: baseNeed(), stress: baseNeed(), comfort: baseNeed(), safety: baseNeed() },
     emotionVector: { happy: emotion(), anxious: emotion(), angry: emotion(), sad: emotion(), tired: emotion(), lonely: emotion(), hopeful: emotion(), calm: emotion(), curious: emotion() },
-    memory: { short: seed.memory || [], long: [], emotional: [], secret: [], rumor: [] },
-    memorySummary: (seed.memory || []).join("；").slice(0, 240),
+    memory: { short: initialMemory.slice(0, 4), long: initialMemory.slice(0, 4), emotional: [], secret: [], rumor: [] },
+    memorySummary: initialMemory.join("；").slice(0, 240),
     knownFacts: [],
     eventQueue: [],
     longTermGoals: [{ title: seed.goal || "维持稳定生活", progress: 25, priority: 6, horizon: "month" }],
     relationshipMatrix: seed.relations || {},
-    ageDays: Math.round(Number(seed.ageYears || 30) * 365),
-    ageStage: Number(seed.ageYears || 30) < 18 ? "teen" : Number(seed.ageYears || 30) >= 65 ? "elder" : "adult",
-    identityCore: { values: [seed.goal || "稳定生活"], habits: [], avoidance: [], fears: [] },
+    ageDays: Math.round(ageYears * 365),
+    ageStage: ageYears < 12 ? "child" : ageYears < 18 ? "teen" : ageYears >= 65 ? "elder" : "adult",
+    identityCore: {
+      values: Array.isArray(identity.values) && identity.values.length ? identity.values : [seed.goal || "稳定生活"],
+      habits: Array.isArray(identity.habits) && identity.habits.length ? identity.habits : [defaultHabit],
+      avoidance: Array.isArray(identity.avoidance) ? identity.avoidance : [],
+      fears: Array.isArray(identity.fears) ? identity.fears : []
+    },
     order: index
   };
 }
@@ -3648,10 +3703,43 @@ function setupFallbackRelationships(agents, places) {
   const households = [];
   const groups = [];
   const relations = [];
-  for (let i = 0; i < agents.length; i += 3) {
-    const members = agents.slice(i, i + 3).map(agent => agent.id);
-    households.push({ id: `home_${Math.floor(i / 3) + 1}`, homePlace: home, members, type: members.length > 1 ? "family" : "single", routines: ["晚间回家"], responsibilities: ["互相照看"] });
-    members.forEach(from => members.filter(to => to !== from).forEach(to => relations.push({ from, to, type: "家人", trust: 72, intimacy: 65, respect: 55, debt: 0 })));
+  const byAge = agent => Number(agent.ageYears || agent.age || 30);
+  const jobText = agent => String(agent.job || "");
+  const minors = agents.filter(agent => byAge(agent) < 18 || /学生|儿童|幼儿/.test(jobText(agent)));
+  const adults = agents.filter(agent => byAge(agent) >= 18 && byAge(agent) < 65 && !/学生/.test(jobText(agent)));
+  const elders = agents.filter(agent => byAge(agent) >= 65 || /老人|退休/.test(jobText(agent)));
+  const unused = new Set(agents.map(agent => agent.id));
+  const takeUnused = list => {
+    const agent = list.find(item => unused.has(item.id));
+    if (agent) unused.delete(agent.id);
+    return agent || null;
+  };
+  const addHousehold = (members, type, responsibilities = ["互相照看"]) => {
+    const ids = members.filter(Boolean).map(agent => agent.id);
+    if (!ids.length) return;
+    const id = `home_${households.length + 1}`;
+    households.push({ id, homePlace: home, members: ids, type, routines: ["晚间回家", "重要事情优先通知同住者"], responsibilities });
+    ids.forEach(from => ids.filter(to => to !== from).forEach(to => {
+      relations.push({ from, to, type: type === "single" ? "同住熟人" : "家人", trust: 72, intimacy: 65, respect: 58, debt: 0, familiarity: 80 });
+    }));
+  };
+  while (minors.some(agent => unused.has(agent.id))) {
+    const adultA = takeUnused(adults);
+    const adultB = Math.random() > 0.45 ? takeUnused(adults) : null;
+    const childA = takeUnused(minors);
+    const childB = Math.random() > 0.55 ? takeUnused(minors) : null;
+    addHousehold([adultA, adultB, childA, childB], "family_with_children", ["照顾未成年人", "晚间同步重要消息"]);
+  }
+  while (elders.some(agent => unused.has(agent.id))) {
+    const elderA = takeUnused(elders);
+    const elderB = Math.random() > 0.65 ? takeUnused(elders) : null;
+    const caregiver = Math.random() > 0.72 ? takeUnused(adults) : null;
+    addHousehold([elderA, elderB, caregiver], caregiver ? "elder_with_caregiver" : elderB ? "elder_couple" : "single_elder", ["健康异常时通知家人或邻里"]);
+  }
+  while (adults.some(agent => unused.has(agent.id))) {
+    const adultA = takeUnused(adults);
+    const adultB = Math.random() > 0.55 ? takeUnused(adults) : null;
+    addHousehold([adultA, adultB], adultB ? "couple_or_roommates" : "single", adultB ? ["分担日常事务"] : ["独居，重要异常依赖邻里发现"]);
   }
   places.forEach(place => {
     const members = agents.filter(agent => agent.place === place.id || agent.position === place.id).map(agent => agent.id);
@@ -3660,9 +3748,33 @@ function setupFallbackRelationships(agents, places) {
   return { households, groups, relations };
 }
 
+function setupApplyRelationshipMatrix(agents, social) {
+  const byId = new Map(agents.map(agent => [agent.id, agent]));
+  (Array.isArray(social?.relations) ? social.relations : []).forEach(relation => {
+    const from = relation.from || relation.source || relation.agentId;
+    const to = relation.to || relation.target || relation.targetId;
+    if (!from || !to || from === to || !byId.has(from) || !byId.has(to)) return;
+    const agent = byId.get(from);
+    agent.relationshipMatrix ||= {};
+    agent.relationshipMatrix[to] = {
+      trust: clampNumber(relation.trust, 0, 100, 50),
+      intimacy: clampNumber(relation.intimacy, 0, 100, 40),
+      respect: clampNumber(relation.respect, 0, 100, 45),
+      debt: clampNumber(relation.debt, 0, 100, 0),
+      resentment: clampNumber(relation.resentment || relation.grudge, 0, 100, 0),
+      dependency: clampNumber(relation.dependency, 0, 100, 20),
+      familiarity: clampNumber(relation.familiarity, 0, 100, 60),
+      rivalry: clampNumber(relation.rivalry || relation.competition, 0, 100, 0),
+      type: String(relation.type || "熟人").slice(0, 30)
+    };
+  });
+  return agents;
+}
+
 function setupMakeWorld({ slot, prompt, startClock, config, places, seeds, relationships, setupTables }) {
   const agents = seeds.map(setupMakeAgent);
   const social = relationships || setupFallbackRelationships(agents, places);
+  setupApplyRelationshipMatrix(agents, social);
   return {
     version: 2,
     savedAt: new Date().toISOString(),

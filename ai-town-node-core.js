@@ -178,7 +178,7 @@ function foodAvailableAt(agent) {
 
 function clinicCareAvailableFor(world, agent) {
   if ((agent.position || agent.place) !== "clinic") return false;
-  return (world.agents || []).some(item => item.id !== agent.id && item.position === "clinic" && /医生|护士|医护|护理/.test(String(item.job || "")) && !isDead(item));
+  return (world.agents || []).some(item => item.id !== agent.id && item.position === "clinic" && isMedicalWorker(item) && !isDead(item));
 }
 
 function placeId(agent) {
@@ -187,7 +187,16 @@ function placeId(agent) {
 
 function isMedicalWorker(agent) {
   const job = String(agent?.job || "");
-  return /医生|护士|医护|护理|doctor|nurse|clinic|鍖荤敓|鎶ゅ＋|鍖绘姢|鎶ょ悊/.test(job);
+  return /医生|护士|医护|护理|药房|doctor|nurse|clinic|medical|鍖荤敓|鎶ゅ＋|鍖绘姢|鎶ょ悊/i.test(job);
+}
+
+function isClinicLinked(world, agent) {
+  if (placeId(agent) === "clinic") return true;
+  return (Array.isArray(world.groups) ? world.groups : []).some(group => {
+    const members = Array.isArray(group.members) ? group.members : [];
+    if (!members.includes(agent?.id)) return false;
+    return /clinic|medical|诊所|医院|医护|鍖荤枟/.test(`${group.type || ""} ${group.place || ""}`);
+  });
 }
 
 function nearbyAliveAgents(world, agent) {
@@ -233,13 +242,17 @@ function careNetworkAgents(world, patient, level, nearby = []) {
   const nearbyIds = new Set(nearby.map(item => item.id));
   const all = (world.agents || []).filter(item => item?.id && item.id !== patient.id && !isDead(item));
   const severity = level === "critical" ? 100 : level === "urgent" ? 85 : 65;
+  const patientAtClinic = placeId(patient) === "clinic";
   return all
     .map(agent => {
       const samePlace = nearbyIds.has(agent.id) ? 100 : 0;
-      const medical = isMedicalWorker(agent) ? (level === "critical" ? 100 : 82) : 0;
       const household = householdScore(world, patient, agent);
       const group = sharedGroupScore(world, patient, agent);
       const rel = relationScore(patient, agent);
+      const clinicLinked = isMedicalWorker(agent) && (patientAtClinic || isClinicLinked(world, agent));
+      const medical = clinicLinked
+        ? (patientAtClinic ? 96 : level === "critical" ? Math.max(72, Math.min(90, Math.max(group, rel))) : Math.max(group, rel))
+        : 0;
       const score = Math.max(samePlace, medical, household, group, rel);
       return { agent, score, samePlace: Boolean(samePlace), medical: Boolean(medical) };
     })
@@ -423,8 +436,8 @@ function applyBasicLifeMaintenance(world) {
       world.basicLifeDone[`meal-${slot}`] = true;
       pushRecord(world, "基础进食", `${agent.name}按当前地点条件补充了食物。`, "survival", [agent.id]);
     }
-    if (clinicCareAvailableFor(world, agent) && (agent.needs.health <= 25 || agent.needs.hunger <= 5 || agent.needs.stress <= 5) && !world.basicLifeDone[`clinic-${slot}`]) {
-      adjustNeeds(agent, { hunger: agent.needs.hunger <= 5 ? 12 : 0, health: 10, safety: 6, stress: 5, comfort: 3 });
+    if (clinicCareAvailableFor(world, agent) && (agent.needs.hunger <= 5 || agent.needs.stress <= 5) && !world.basicLifeDone[`clinic-${slot}`]) {
+      adjustNeeds(agent, { hunger: agent.needs.hunger <= 5 ? 12 : 0, safety: 6, stress: 5, comfort: 3 });
       agent.currentTask = "基础急救";
       world.basicLifeDone[`clinic-${slot}`] = true;
       pushRecord(world, "基础救治", `${agent.name}在诊所有医护在场，获得最低限度照护。`, "survival", [agent.id]);
