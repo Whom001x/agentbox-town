@@ -3,93 +3,649 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>AgentBox Town 显示端</title>
+  <title>AgentBox Town 监视器</title>
   <style>
-    :root { color-scheme: light; --line:#d9e1ea; --text:#17202a; --muted:#607080; --bg:#f6f8fb; --panel:#fff; --accent:#2764d8; }
+    :root {
+      color-scheme: dark;
+      --bg: #061018;
+      --panel: rgba(7, 17, 26, .82);
+      --panel-strong: rgba(10, 23, 34, .94);
+      --line: rgba(142, 178, 205, .24);
+      --line-strong: rgba(121, 190, 255, .42);
+      --ink: #eef7ff;
+      --muted: #91a8ba;
+      --blue: #1f8fff;
+      --green: #48d279;
+      --yellow: #ffc742;
+      --red: #ff5a62;
+      --purple: #8d65ff;
+      --cyan: #38d9d0;
+      --shadow: 0 18px 50px rgba(0, 0, 0, .42);
+    }
     * { box-sizing: border-box; }
-    body { margin: 0; font-family: "Microsoft YaHei", system-ui, sans-serif; background: var(--bg); color: var(--text); }
-    header { display: flex; gap: 12px; align-items: center; justify-content: space-between; padding: 14px 18px; border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 2; }
-    h1 { font-size: 18px; margin: 0; }
-    button, select { border: 1px solid var(--line); background: #fff; border-radius: 6px; padding: 8px 10px; font: inherit; }
-    button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
-    main { display: grid; grid-template-columns: 320px 1fr; gap: 14px; padding: 14px; }
-    section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
-    h2 { font-size: 15px; margin: 0 0 10px; }
-    .stats { display: grid; grid-template-columns: repeat(4, minmax(120px, 1fr)); gap: 10px; }
-    .stat { border: 1px solid var(--line); border-radius: 8px; padding: 10px; background: #fbfcfe; }
-    .stat b { display: block; font-size: 20px; margin-top: 4px; }
-    .muted { color: var(--muted); font-size: 12px; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 10px; }
-    .agent { border: 1px solid var(--line); border-radius: 8px; padding: 10px; background: #fff; }
-    .agent strong { display: block; font-size: 14px; }
-    .bar { height: 6px; background: #e8eef6; border-radius: 99px; overflow: hidden; margin-top: 4px; }
-    .bar span { display: block; height: 100%; background: var(--accent); }
-    .places { display: grid; gap: 6px; }
-    .place { display: flex; justify-content: space-between; border-bottom: 1px solid #eef2f7; padding: 6px 0; }
-    .log { max-height: 260px; overflow: auto; display: grid; gap: 6px; }
-    .log div { border-bottom: 1px solid #eef2f7; padding-bottom: 6px; }
-    @media (max-width: 900px) { main { grid-template-columns: 1fr; } .stats { grid-template-columns: repeat(2, 1fr); } }
+    html, body { min-height: 100%; }
+    body {
+      margin: 0;
+      overflow: hidden;
+      font-family: "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+      background:
+        radial-gradient(circle at 15% 10%, rgba(31, 143, 255, .2), transparent 28%),
+        radial-gradient(circle at 78% 0%, rgba(72, 210, 121, .15), transparent 25%),
+        var(--bg);
+      color: var(--ink);
+    }
+    button, select {
+      font: inherit;
+      color: var(--ink);
+      background: rgba(9, 20, 30, .82);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 10px 13px;
+      outline: none;
+    }
+    button { cursor: pointer; }
+    button:hover, select:hover { border-color: var(--line-strong); }
+    button.primary { background: rgba(31, 143, 255, .28); border-color: rgba(31, 143, 255, .62); }
+    button.danger { background: rgba(255, 90, 98, .14); border-color: rgba(255, 90, 98, .34); }
+    .app {
+      position: relative;
+      width: 100vw;
+      height: 100vh;
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+    }
+    .map-bg {
+      position: fixed;
+      inset: 0;
+      background-image:
+        linear-gradient(180deg, rgba(3, 10, 16, .2), rgba(3, 10, 16, .5)),
+        url("/mobile-app/assets/town-map-bg.png");
+      background-size: cover;
+      background-position: center;
+      filter: saturate(1.08) contrast(1.04);
+      transform: scale(1.02);
+      z-index: 0;
+    }
+    .map-bg::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background:
+        linear-gradient(90deg, rgba(2, 8, 12, .55), transparent 22%, transparent 70%, rgba(2, 8, 12, .62)),
+        linear-gradient(180deg, rgba(2, 8, 12, .75), transparent 19%, transparent 74%, rgba(2, 8, 12, .84));
+    }
+    .top, .map-layer, .bottom { position: relative; z-index: 1; }
+    .top {
+      display: grid;
+      gap: 14px;
+      padding: 18px 22px 12px;
+      background: linear-gradient(180deg, rgba(4, 10, 15, .9), rgba(4, 10, 15, .36), transparent);
+    }
+    .header {
+      display: flex;
+      justify-content: space-between;
+      gap: 14px;
+      align-items: center;
+    }
+    .brand { display: flex; align-items: center; gap: 14px; min-width: 260px; }
+    .menu-btn, .icon-btn {
+      width: 48px;
+      height: 48px;
+      display: grid;
+      place-items: center;
+      padding: 0;
+      font-size: 24px;
+      border-radius: 14px;
+      background: rgba(8, 18, 28, .82);
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,.02);
+    }
+    h1 { margin: 0; font-size: 22px; line-height: 1.15; letter-spacing: 0; }
+    .subtitle { margin-top: 4px; color: var(--muted); font-size: 13px; }
+    .status-dot { display: inline-flex; align-items: center; gap: 7px; color: var(--green); font-size: 13px; margin-left: 8px; }
+    .status-dot::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: currentColor; box-shadow: 0 0 14px currentColor; }
+    .controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
+    .save-select { min-width: 240px; max-width: 330px; }
+    .metric-row {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(130px, 1fr));
+      gap: 12px;
+    }
+    .metric {
+      min-height: 104px;
+      padding: 15px 18px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: linear-gradient(135deg, rgba(11, 28, 42, .86), rgba(7, 16, 25, .72));
+      box-shadow: var(--shadow);
+    }
+    .metric span { display: block; color: #bdd0de; font-size: 13px; }
+    .metric strong { display: block; margin: 10px 0 4px; font-size: 26px; line-height: 1; }
+    .metric small { color: var(--muted); font-size: 13px; }
+    .metric.warn strong, .metric.warn small { color: var(--red); }
+    .metric.ok small { color: var(--green); }
+    .map-layer {
+      min-height: 0;
+      overflow: hidden;
+    }
+    .map-canvas {
+      position: absolute;
+      inset: 0;
+    }
+    .mini-map {
+      position: absolute;
+      left: 22px;
+      top: 20px;
+      width: 270px;
+      aspect-ratio: 1680 / 917;
+      border: 1px solid var(--line-strong);
+      border-radius: 18px;
+      overflow: hidden;
+      background: url("/mobile-app/assets/mini-map-bg.png") center / cover;
+      box-shadow: var(--shadow);
+    }
+    .mini-map::after {
+      content: "";
+      position: absolute;
+      left: 34%;
+      top: 32%;
+      width: 46%;
+      height: 38%;
+      border: 2px solid rgba(255,255,255,.85);
+      box-shadow: 0 0 0 999px rgba(0,0,0,.16);
+    }
+    .mini-map .expand {
+      position: absolute;
+      right: 10px;
+      bottom: 10px;
+      width: 36px;
+      height: 36px;
+      border-radius: 10px;
+      background: rgba(0,0,0,.55);
+      display: grid;
+      place-items: center;
+      font-size: 18px;
+    }
+    .toolbox {
+      position: absolute;
+      left: 22px;
+      top: 235px;
+      display: grid;
+      gap: 9px;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: rgba(5, 14, 22, .82);
+      box-shadow: var(--shadow);
+    }
+    .tool {
+      width: 48px;
+      height: 48px;
+      border: 0;
+      border-radius: 14px;
+      background: transparent;
+      color: #d7e9f7;
+      display: grid;
+      place-items: center;
+      font-size: 21px;
+    }
+    .tool.active { background: rgba(31, 143, 255, .24); color: #7fc0ff; }
+    .place-pin {
+      position: absolute;
+      min-width: 150px;
+      max-width: 220px;
+      transform: translate(-50%, -100%);
+      border: 1px solid rgba(255,255,255,.13);
+      border-radius: 20px;
+      background: linear-gradient(135deg, rgba(10, 23, 34, .94), rgba(5, 15, 23, .86));
+      color: var(--ink);
+      padding: 12px 14px 12px 56px;
+      box-shadow: var(--shadow);
+      cursor: pointer;
+      transition: transform .16s ease, border-color .16s ease, background .16s ease;
+    }
+    .place-pin:hover, .place-pin.selected {
+      transform: translate(-50%, -100%) scale(1.04);
+      border-color: rgba(31, 143, 255, .85);
+      background: linear-gradient(135deg, rgba(15, 70, 119, .95), rgba(6, 20, 34, .9));
+    }
+    .place-pin.compact {
+      min-width: 0;
+      width: 28px;
+      height: 28px;
+      padding: 0;
+      border-radius: 50%;
+      transform: translate(-50%, -50%);
+      background: rgba(31, 143, 255, .8);
+      box-shadow: 0 0 0 4px rgba(31,143,255,.18), 0 8px 22px rgba(0,0,0,.45);
+    }
+    .place-pin.compact .pin-body { display: none; }
+    .place-pin.compact::after {
+      content: "";
+      position: absolute;
+      inset: 8px;
+      border-radius: 50%;
+      background: white;
+      opacity: .95;
+    }
+    .pin-icon {
+      position: absolute;
+      left: 12px;
+      top: 50%;
+      width: 34px;
+      height: 34px;
+      transform: translateY(-50%);
+      display: grid;
+      place-items: center;
+      border-radius: 50%;
+      font-size: 18px;
+      background: var(--blue);
+      box-shadow: inset 0 -8px 16px rgba(0,0,0,.18);
+    }
+    .place-pin[data-tone="green"] .pin-icon { background: var(--green); }
+    .place-pin[data-tone="yellow"] .pin-icon { background: #c88428; }
+    .place-pin[data-tone="purple"] .pin-icon { background: var(--purple); }
+    .place-pin[data-tone="cyan"] .pin-icon { background: var(--cyan); color: #032529; }
+    .pin-title { font-size: 18px; font-weight: 700; line-height: 1.2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .pin-meta { margin-top: 4px; font-size: 13px; color: #d8e7f2; }
+    .pin-state { margin-top: 6px; font-size: 12px; color: var(--green); }
+    .agent-dot {
+      position: absolute;
+      width: 22px;
+      height: 22px;
+      transform: translate(-50%, -50%);
+      border-radius: 50%;
+      background: rgba(31, 143, 255, .88);
+      border: 2px solid rgba(224, 243, 255, .9);
+      box-shadow: 0 8px 18px rgba(0,0,0,.35);
+    }
+    .agent-dot.warn { background: var(--red); }
+    .agent-dot.idle { background: var(--purple); }
+    .right-panel {
+      position: absolute;
+      right: 22px;
+      top: 30px;
+      width: min(390px, calc(100vw - 360px));
+      max-height: calc(100% - 48px);
+      overflow: auto;
+      border: 1px solid var(--line-strong);
+      border-radius: 22px;
+      background: linear-gradient(180deg, rgba(8, 20, 30, .94), rgba(5, 13, 20, .92));
+      box-shadow: var(--shadow);
+      padding: 16px;
+    }
+    .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .panel-title { display: flex; gap: 12px; align-items: center; min-width: 0; }
+    .panel-title .big-icon {
+      width: 44px;
+      height: 44px;
+      border-radius: 50%;
+      display: grid;
+      place-items: center;
+      background: var(--blue);
+      font-size: 24px;
+      flex: 0 0 auto;
+    }
+    .panel-title h2 { margin: 0; font-size: 20px; }
+    .panel-title p { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
+    .badge { border-radius: 999px; padding: 5px 9px; background: rgba(72, 210, 121, .16); color: var(--green); font-size: 12px; white-space: nowrap; }
+    .tabs { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; margin: 16px 0 12px; border-bottom: 1px solid var(--line); }
+    .tab { padding: 9px 4px 11px; text-align: center; color: #bbccda; border-bottom: 2px solid transparent; font-size: 14px; }
+    .tab.active { color: #4aa4ff; border-color: #4aa4ff; }
+    .detail-section {
+      padding: 13px;
+      border-radius: 12px;
+      background: rgba(255,255,255,.035);
+      border: 1px solid rgba(255,255,255,.045);
+      margin-top: 10px;
+    }
+    .kv { display: grid; grid-template-columns: 92px 1fr; gap: 8px; font-size: 13px; margin: 7px 0; }
+    .kv span { color: var(--muted); }
+    .kv strong { text-align: right; font-weight: 500; overflow-wrap: anywhere; }
+    .list { display: grid; gap: 8px; margin-top: 8px; }
+    .list-item { display: grid; grid-template-columns: auto 1fr auto; gap: 8px; align-items: start; font-size: 13px; color: #d7e6f2; }
+    .bullet { width: 9px; height: 9px; border-radius: 50%; margin-top: 5px; background: var(--purple); }
+    .list-item small { color: var(--muted); white-space: nowrap; }
+    .bottom {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1.1fr;
+      gap: 12px;
+      padding: 0 18px 14px;
+      background: linear-gradient(0deg, rgba(2, 8, 12, .9), rgba(2, 8, 12, .5), transparent);
+    }
+    .bottom-card {
+      min-height: 174px;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: linear-gradient(135deg, rgba(9, 21, 32, .88), rgba(5, 14, 22, .82));
+      box-shadow: var(--shadow);
+      padding: 14px 16px;
+      overflow: hidden;
+    }
+    .bottom-card h3 { margin: 0 0 10px; font-size: 16px; font-weight: 600; color: #dceaf5; }
+    .feed, .logs { max-height: 118px; overflow: auto; display: grid; gap: 7px; padding-right: 4px; }
+    .feed-row, .log-row { display: grid; grid-template-columns: 68px 90px 1fr; gap: 8px; color: #cbd9e4; font-size: 13px; }
+    .feed-row b { color: var(--yellow); font-weight: 600; }
+    .log-row { grid-template-columns: 76px 98px 1fr; }
+    .donut-wrap { display: grid; grid-template-columns: 150px 1fr; align-items: center; gap: 16px; }
+    .donut {
+      width: 136px;
+      height: 136px;
+      border-radius: 50%;
+      display: grid;
+      place-items: center;
+      background: conic-gradient(var(--green) 0 70%, var(--yellow) 70% 86%, var(--blue) 86% 96%, var(--red) 96% 100%);
+      position: relative;
+    }
+    .donut::after { content: ""; position: absolute; inset: 28px; border-radius: 50%; background: #08141e; box-shadow: inset 0 0 22px rgba(0,0,0,.4); }
+    .donut strong { position: relative; z-index: 1; font-size: 26px; }
+    .legend { display: grid; gap: 9px; color: #d4e2ec; font-size: 14px; }
+    .legend span { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .legend i { width: 11px; height: 11px; border-radius: 50%; display: inline-block; margin-right: 8px; }
+    .nav {
+      position: absolute;
+      left: 18px;
+      right: 18px;
+      bottom: 16px;
+      transform: translateY(100%);
+      display: none;
+    }
+    .empty { color: var(--muted); font-size: 13px; }
+    @media (max-width: 1200px) {
+      body { overflow: auto; }
+      .app { min-height: 100vh; height: auto; }
+      .metric-row { grid-template-columns: repeat(3, 1fr); }
+      .map-layer { height: 720px; }
+      .right-panel { width: 360px; }
+      .bottom { grid-template-columns: 1fr; }
+    }
   </style>
 </head>
 <body>
-  <header>
-    <div>
-      <h1>AgentBox Town 显示端</h1>
-      <div class="muted" id="subtitle">只显示后台存档，不参与计算</div>
-    </div>
-    <div>
-      <select id="saveSelect"></select>
-      <button class="primary" id="startBtn">启动后台</button>
-      <button id="pauseBtn">暂停</button>
-      <button id="stepBtn">单步</button>
-      <button id="stopBtn">停止后台</button>
-    </div>
-  </header>
-  <main>
-    <aside>
-      <section>
-        <h2>后台状态</h2>
-        <div id="runtimeBox" class="muted">读取中...</div>
+  <div class="map-bg" aria-hidden="true"></div>
+  <div class="app">
+    <header class="top">
+      <div class="header">
+        <div class="brand">
+          <button class="menu-btn" type="button" title="菜单">☰</button>
+          <div>
+            <h1>AgentBox Town <span class="status-dot" id="runState">读取中</span></h1>
+            <div class="subtitle" id="subtitle">AI 小镇监视器</div>
+          </div>
+        </div>
+        <div class="controls">
+          <select class="save-select" id="saveSelect" title="选择存档"></select>
+          <button id="startBtn" class="primary" type="button">启动</button>
+          <button id="pauseBtn" type="button">暂停</button>
+          <button id="stepBtn" type="button">单步</button>
+          <button id="stopBtn" class="danger" type="button">停止</button>
+          <button class="icon-btn" type="button" title="设置" onclick="location.href='/'">⚙</button>
+          <button class="icon-btn" type="button" title="刷新" onclick="refresh()">↻</button>
+        </div>
+      </div>
+      <section class="metric-row" id="metricsRow"></section>
+    </header>
+
+    <main class="map-layer">
+      <div class="map-canvas" id="mapCanvas"></div>
+      <aside class="mini-map"><span class="expand">↗</span></aside>
+      <nav class="toolbox" aria-label="地图工具">
+        <button class="tool active" type="button" title="图层">▱</button>
+        <button class="tool" type="button" title="筛选">⌯</button>
+        <button class="tool" type="button" title="热力">◴</button>
+        <button class="tool" type="button" title="定位">⌖</button>
+      </nav>
+      <aside class="right-panel" id="detailPanel"></aside>
+    </main>
+
+    <footer class="bottom">
+      <section class="bottom-card">
+        <h3>事件流（实时）</h3>
+        <div class="feed" id="eventFeed"></div>
       </section>
-      <section style="margin-top:14px">
-        <h2>地点分布</h2>
-        <div class="places" id="placesBox"></div>
+      <section class="bottom-card">
+        <h3>Agent 状态分布</h3>
+        <div class="donut-wrap">
+          <div class="donut"><strong id="donutTotal">0</strong></div>
+          <div class="legend" id="stateLegend"></div>
+        </div>
       </section>
-      <section style="margin-top:14px">
-        <h2>调用日志</h2>
-        <div class="log" id="callsBox"></div>
+      <section class="bottom-card">
+        <h3>系统日志（最近）</h3>
+        <div class="logs" id="systemLogs"></div>
       </section>
-    </aside>
-    <div>
-      <section>
-        <h2>小镇概览</h2>
-        <div class="stats" id="statsBox"></div>
-      </section>
-      <section style="margin-top:14px">
-        <h2>角色状态</h2>
-        <div class="grid" id="agentsBox"></div>
-      </section>
-    </div>
-  </main>
+    </footer>
+  </div>
+
   <script>
-    const api = async (url, options = {}) => {
+    const $ = id => document.getElementById(id);
+    const clamp = (value, min, max) => Math.max(min, Math.min(max, Number(value) || 0));
+    const esc = value => String(value ?? "").replace(/[&<>"']/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
+    let selectedPlaceId = "";
+    let lastPayload = null;
+    let lastRuntime = null;
+    let lastCalls = null;
+
+    async function api(url, options = {}) {
       const res = await fetch(url, { cache: "no-store", ...options });
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error?.message || data?.error || res.statusText);
       return data;
-    };
-    const fmtClock = world => {
+    }
+
+    function fmtClock(world) {
       const clock = Number(world?.clock || 0);
       const day = Math.floor(clock / 1440) + 1;
-      const minute = clock % 1440;
-      return `第${day}天 ${String(Math.floor(minute / 60)).padStart(2, "0")}:${String(minute % 60).padStart(2, "0")}`;
-    };
-    const selectedSlot = () => document.getElementById("saveSelect").value;
-    const progressText = progress => {
-      if (!progress || !progress.phase || progress.phase === "idle") return "-";
+      const minute = ((clock % 1440) + 1440) % 1440;
+      const weekdays = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
+      return `${weekdays[(day - 1) % 7]} ${String(Math.floor(minute / 60)).padStart(2, "0")}:${String(minute % 60).padStart(2, "0")}`;
+    }
+
+    function selectedSlot() {
+      return $("saveSelect").value;
+    }
+
+    function placeLabel(id, world) {
+      return (world?.places || []).find(place => place.id === id)?.name || id || "未知地点";
+    }
+
+    function placeIcon(place) {
+      const text = `${place?.id || ""} ${place?.name || ""}`;
+      if (/学校|school|education/i.test(text)) return ["🎓", "blue"];
+      if (/医院|诊所|clinic|hospital|medical/i.test(text)) return ["✚", "green"];
+      if (/餐|饭|restaurant|food|breakfast/i.test(text)) return ["🍴", "yellow"];
+      if (/居民|住宅|家|apartment|home|residence/i.test(text)) return ["▦", "purple"];
+      if (/图书|library/i.test(text)) return ["▤", "purple"];
+      if (/政府|镇务|office|government/i.test(text)) return ["▥", "blue"];
+      if (/公园|广场|河|湖|park|square|river|lake/i.test(text)) return ["⌂", "cyan"];
+      if (/小卖|商店|market|shop|store/i.test(text)) return ["◈", "yellow"];
+      return ["●", "blue"];
+    }
+
+    function placeStatus(place, count, box) {
+      const localEvents = box?.localEvents || [];
+      const runtime = box?.agentState?.status || box?.state?.tempo || "";
+      if (localEvents.length >= 2 || /忙|拥挤|排队|busy/i.test(runtime)) return ["繁忙", "yellow"];
+      if (localEvents.length) return ["有事件", "yellow"];
+      if (count === 0) return ["空闲", "muted"];
+      return ["正常", "green"];
+    }
+
+    function agentCondition(agent) {
+      const health = Number(agent?.needs?.health ?? 100);
+      const stress = Number(agent?.needs?.stress ?? 100);
+      if (agent?.lifeStatus === "dead") return "异常";
+      if (agent?.lifeStatus === "critical" || health <= 15) return "异常";
+      if (health <= 45 || stress <= 35) return "忙碌";
+      if (/等待|观察|休息|停/.test(String(agent?.currentTask || ""))) return "空闲";
+      return "正常";
+    }
+
+    function progressText(progress) {
+      if (!progress || !progress.phase || progress.phase === "idle") return "无任务";
       const percent = Number.isFinite(Number(progress.percent)) ? `${Math.round(Number(progress.percent))}%` : "";
-      return `${progress.phase}${percent ? ` | ${percent}` : ""}${progress.currentTask ? ` | ${progress.currentTask}` : ""}`;
-    };
+      return `${progress.phase}${percent ? ` ${percent}` : ""}${progress.currentTask ? ` · ${progress.currentTask}` : ""}`;
+    }
+
+    function renderMetrics(world, metrics, runtime, calls) {
+      const agents = world.agents || [];
+      const alive = agents.filter(agent => agent.lifeStatus !== "dead").length;
+      const abnormal = agents.filter(agent => agentCondition(agent) === "异常").length;
+      const running = runtime.state === "running";
+      $("runState").textContent = running ? "运行中" : (runtime.state || "未运行");
+      $("runState").style.color = running ? "var(--green)" : "var(--yellow)";
+      const date = world.weatherBox?.calendar?.date || `第 ${Math.floor((world.clock || 0) / 1440) + 1} 天`;
+      const inFlight = Number(metrics.inFlight || 0);
+      const recentCalls = (calls.calls || []).slice(0, 60);
+      const failed = recentCalls.filter(call => call.status === "error" || call.status === "failed").length;
+      const callsPerMin = recentCalls.length ? Math.round(recentCalls.length / 3) : 0;
+      const openEvents = (world.records || []).filter(item => item.type !== "debug").length;
+      const cards = [
+        ["回合", Math.round((world.clock || 0) / Math.max(1, Number(world.config?.virtualMinutesPerPulse || 60))), running ? "↑ 后台演算中" : "后台未运行", "ok"],
+        ["模拟时间", fmtClock(world), date, ""],
+        ["在线 Agent", `${alive} / ${agents.length}`, agents.length ? `${Math.round(alive / agents.length * 100)}%` : "0%", ""],
+        ["API 调用", `${metrics.success || 0}`, `${inFlight} 个进行中 · ${callsPerMin}/min`, inFlight ? "" : "ok"],
+        ["事件队列", openEvents, progressText(runtime.progress), ""],
+        ["异常", abnormal, failed ? `${failed} 条调用异常` : "暂无异常", abnormal || failed ? "warn" : "ok"]
+      ];
+      $("metricsRow").innerHTML = cards.map(([label, value, sub, tone]) => `
+        <article class="metric ${tone || ""}">
+          <span>${esc(label)}</span>
+          <strong>${esc(value)}</strong>
+          <small>${esc(sub)}</small>
+        </article>
+      `).join("");
+    }
+
+    function renderMap(world) {
+      const canvas = $("mapCanvas");
+      const places = world.places || [];
+      const agents = world.agents || [];
+      const boxes = lastPayload?.locationBoxes || {};
+      const counts = {};
+      agents.forEach(agent => {
+        const key = agent.position || agent.place || "";
+        if (key) counts[key] = (counts[key] || 0) + 1;
+      });
+      if (!selectedPlaceId && places.length) selectedPlaceId = places[0].id;
+      const topPlaces = [...places].sort((a, b) => (counts[b.id] || 0) - (counts[a.id] || 0)).slice(0, 10);
+      const compactPlaces = places.filter(place => !topPlaces.some(item => item.id === place.id));
+      const pinHtml = topPlaces.map(place => {
+        const count = counts[place.id] || 0;
+        const box = boxes[place.id] || {};
+        const [icon, tone] = placeIcon(place);
+        const [status, statusTone] = placeStatus(place, count, box);
+        return `<button class="place-pin ${place.id === selectedPlaceId ? "selected" : ""}" data-place="${esc(place.id)}" data-tone="${tone}" style="left:${clamp(place.x ?? 50, 5, 95)}%;top:${clamp(place.y ?? 50, 5, 95)}%" type="button">
+          <span class="pin-icon">${icon}</span>
+          <span class="pin-body">
+            <span class="pin-title">${esc(place.name || place.id)}</span>
+            <span class="pin-meta">${count} 人｜${(box.localEvents || []).length} 事件</span>
+            <span class="pin-state" style="color:var(--${statusTone === "muted" ? "muted" : statusTone})">${esc(status)}</span>
+          </span>
+        </button>`;
+      }).join("");
+      const compactHtml = compactPlaces.map(place => `<button class="place-pin compact" data-place="${esc(place.id)}" title="${esc(place.name || place.id)}" style="left:${clamp(place.x ?? 50, 5, 95)}%;top:${clamp(place.y ?? 50, 5, 95)}%" type="button"><span class="pin-body"></span></button>`).join("");
+      const agentHtml = agents.slice(0, 36).map((agent, index) => {
+        const place = places.find(item => item.id === (agent.position || agent.place)) || places[index % Math.max(1, places.length)] || { x: 50, y: 50 };
+        const jitterX = ((index % 5) - 2) * 1.1;
+        const jitterY = ((Math.floor(index / 5) % 5) - 2) * 1.1;
+        const condition = agentCondition(agent);
+        const cls = condition === "异常" ? "warn" : condition === "空闲" ? "idle" : "";
+        return `<span class="agent-dot ${cls}" title="${esc(agent.name || agent.id)}｜${esc(place.name || place.id)}" style="left:${clamp((place.x ?? 50) + jitterX, 4, 96)}%;top:${clamp((place.y ?? 50) + jitterY + 2, 5, 95)}%"></span>`;
+      }).join("");
+      canvas.innerHTML = `${agentHtml}${pinHtml}${compactHtml}`;
+      canvas.querySelectorAll("[data-place]").forEach(button => {
+        button.addEventListener("click", () => {
+          selectedPlaceId = button.dataset.place;
+          renderMap(world);
+          renderDetail(world);
+        });
+      });
+    }
+
+    function renderDetail(world) {
+      const places = world.places || [];
+      const agents = world.agents || [];
+      const boxes = lastPayload?.locationBoxes || {};
+      const place = places.find(item => item.id === selectedPlaceId) || places[0] || { id: "town", name: "小镇" };
+      selectedPlaceId = place.id;
+      const count = agents.filter(agent => (agent.position || agent.place) === place.id).length;
+      const residents = agents.filter(agent => (agent.position || agent.place) === place.id).slice(0, 8);
+      const box = boxes[place.id] || {};
+      const events = (box.localEvents || []).slice(0, 4);
+      const [icon, tone] = placeIcon(place);
+      const [status] = placeStatus(place, count, box);
+      const runtime = world.locationRuntime?.[place.id] || {};
+      $("detailPanel").innerHTML = `
+        <div class="panel-head">
+          <div class="panel-title">
+            <span class="big-icon" style="background:var(--${tone === "blue" ? "blue" : tone})">${icon}</span>
+            <div>
+              <h2>${esc(place.name || place.id)}</h2>
+              <p>地点 ID: ${esc(place.id)}</p>
+            </div>
+          </div>
+          <span class="badge">${esc(status)}</span>
+        </div>
+        <div class="tabs">
+          <div class="tab active">概览</div>
+          <div class="tab">Agent (${count})</div>
+          <div class="tab">事件 (${events.length})</div>
+          <div class="tab">日志</div>
+        </div>
+        <section class="detail-section">
+          <div class="kv"><span>类型</span><strong>${esc(place.type || runtime.mode || "普通地点")}</strong></div>
+          <div class="kv"><span>当前人数</span><strong>${count} / ${place.capacity || "--"}</strong></div>
+          <div class="kv"><span>地点运行</span><strong>${esc(runtime.summary || box.agentState?.status || box.state?.tempo || "平稳")}</strong></div>
+          <div class="kv"><span>天气影响</span><strong>${esc((world.weatherBox?.impacts || []).slice(0, 2).join("；") || "无明显影响")}</strong></div>
+        </section>
+        <section class="detail-section">
+          <strong>当前事件</strong>
+          <div class="list">
+            ${events.length ? events.map(event => `<div class="list-item"><span class="bullet"></span><span>${esc(event.title || event.summary || "地点事件")}<br><small>${esc(event.summary || event.body || "")}</small></span><small>${esc(event.stage || "进行中")}</small></div>`).join("") : `<div class="empty">暂无地点事件</div>`}
+          </div>
+        </section>
+        <section class="detail-section">
+          <strong>最近在场 Agent</strong>
+          <div class="list">
+            ${residents.length ? residents.map(agent => `<div class="list-item"><span class="bullet" style="background:${agentCondition(agent) === "异常" ? "var(--red)" : "var(--blue)"}"></span><span>${esc(agent.name || agent.id)}<br><small>${esc(agent.job || agent.role || "居民")}｜${esc(agent.currentTask || "观察当前环境")}</small></span><small>${esc(agentCondition(agent))}</small></div>`).join("") : `<div class="empty">当前地点无人</div>`}
+          </div>
+        </section>
+      `;
+    }
+
+    function renderBottom(world, calls) {
+      const records = (world.records || world.logs || []).slice(0, 24);
+      $("eventFeed").innerHTML = records.length ? records.slice(0, 8).map(item => `
+        <div class="feed-row">
+          <span>${esc(item.time || fmtClock({ clock: item.clock || world.clock || 0 }).slice(-5))}</span>
+          <b>${esc(placeLabel(item.place || item.location || item.source || "", world)).slice(0, 8)}</b>
+          <span>${esc(item.title || item.body || item.summary || "事件更新")}</span>
+        </div>
+      `).join("") : `<div class="empty">暂无事件记录</div>`;
+
+      const agents = world.agents || [];
+      const normal = agents.filter(agent => agentCondition(agent) === "正常").length;
+      const busy = agents.filter(agent => agentCondition(agent) === "忙碌").length;
+      const idle = agents.filter(agent => agentCondition(agent) === "空闲").length;
+      const abnormal = agents.filter(agent => agentCondition(agent) === "异常").length;
+      $("donutTotal").textContent = agents.length;
+      $("stateLegend").innerHTML = [
+        ["正常", normal, "var(--green)"],
+        ["忙碌", busy, "var(--yellow)"],
+        ["空闲", idle, "var(--blue)"],
+        ["异常", abnormal, "var(--red)"]
+      ].map(([label, value, color]) => `<span><em><i style="background:${color}"></i>${label}</em><b>${value} (${agents.length ? Math.round(value / agents.length * 100) : 0}%)</b></span>`).join("");
+
+      const callRows = (calls.calls || []).slice(0, 10);
+      $("systemLogs").innerHTML = callRows.length ? callRows.map(call => `
+        <div class="log-row">
+          <span>${new Date(call.at || Date.now()).toLocaleTimeString("zh-CN", { hour12: false })}</span>
+          <b>${esc(call.task || "AI")}</b>
+          <span>${esc(call.status || "unknown")}｜Key ${esc(call.keyIndex ?? "-")}｜${esc(call.error || `${call.durationMs || 0}ms`)}</span>
+        </div>
+      `).join("") : `<div class="empty">暂无调用日志</div>`;
+    }
+
     async function refresh() {
       const [savesData, metrics, runtime, calls] = await Promise.all([
         api("/api/saves"),
@@ -97,70 +653,46 @@
         api("/api/runtime/status"),
         api("/api/calls")
       ]);
-      const select = document.getElementById("saveSelect");
+      lastRuntime = runtime;
+      lastCalls = calls;
+      const select = $("saveSelect");
       const previous = select.value;
-      select.innerHTML = (savesData.saves || []).map(save => `<option value="${save.slot}">${save.name}｜${save.agentCount}人｜${save.clockText}</option>`).join("");
+      select.innerHTML = (savesData.saves || []).map(save => `<option value="${esc(save.slot)}">${esc(save.name || save.slot)}｜${save.agentCount || 0}人｜${esc(save.clockText || "")}</option>`).join("");
       if (previous && [...select.options].some(item => item.value === previous)) select.value = previous;
-      const slot = selectedSlot() || savesData.saves?.[0]?.slot;
-      const payload = slot ? await api(`/api/saves/${encodeURIComponent(slot)}`) : { world: {} };
-      const world = payload.world || {};
-      const agents = world.agents || [];
-      const alive = agents.filter(a => a.lifeStatus !== "dead").length;
-      const critical = agents.filter(a => a.lifeStatus === "critical").length;
-      document.getElementById("subtitle").textContent = `${payload.meta?.name || slot || "无存档"}｜${fmtClock(world)}｜${agents.length} 人`;
-      document.getElementById("runtimeBox").innerHTML = `
-        <div>状态：<b>${runtime.state || (runtime.running ? "running" : "stopped")}</b></div>
-        <div>PID：${runtime.pid || "-"}</div>
-        <div>存档：${runtime.slot || "-"}</div>
-        <div>说明：${runtime.message || "-"}</div>
-        <div>进度：${progressText(runtime.progress)}</div>
-        <div>控制器：${runtime.controller || "-"}｜计算：${runtime.computeEngine || "-"}</div>
-        <div>AI 请求：${metrics.inFlight || 0}｜成功 ${metrics.success || 0}｜失败 ${metrics.failure || 0}</div>
-        <div>模型：${metrics.model || "-"}</div>
-      `;
-      document.getElementById("statsBox").innerHTML = [
-        ["总人数", agents.length],
-        ["存活", alive],
-        ["濒危", critical],
-        ["当前任务", world.actionQueue?.length || 0],
-        ["家庭", world.socialStructures?.households?.length || 0],
-        ["群组", world.socialStructures?.groups?.length || 0],
-        ["事件", world.records?.length || 0],
-        ["AI进行中", metrics.inFlight || 0]
-      ].map(([k,v]) => `<div class="stat"><span class="muted">${k}</span><b>${v}</b></div>`).join("");
-      const placeCounts = {};
-      agents.forEach(agent => { placeCounts[agent.position || agent.place || "未知"] = (placeCounts[agent.position || agent.place || "未知"] || 0) + 1; });
-      document.getElementById("placesBox").innerHTML = Object.entries(placeCounts).sort((a,b)=>b[1]-a[1]).slice(0, 24).map(([k,v]) => `<div class="place"><span>${k}</span><b>${v}</b></div>`).join("");
-      document.getElementById("agentsBox").innerHTML = agents.slice(0, 80).map(agent => {
-        const health = Math.round(agent.needs?.health ?? 0);
-        const hunger = Math.round(agent.needs?.hunger ?? 0);
-        return `<div class="agent">
-          <strong>${agent.name} <span class="muted">${agent.ageYears || agent.age || ""}岁｜${agent.job || ""}</span></strong>
-          <div class="muted">${agent.position || ""}｜${agent.currentTask || ""}</div>
-          <div class="muted">健康 ${health}</div><div class="bar"><span style="width:${health}%"></span></div>
-          <div class="muted">饱腹 ${hunger}</div><div class="bar"><span style="width:${hunger}%"></span></div>
-        </div>`;
-      }).join("");
-      document.getElementById("callsBox").innerHTML = (calls.calls || []).slice(0, 20).map(call => `<div><b>${call.task}</b>｜${call.status}｜Key ${call.keyIndex || "-"}<br><span class="muted">${call.error || `${call.durationMs || 0}ms`}</span></div>`).join("");
+      const slot = selectedSlot() || savesData.saves?.[0]?.slot || "";
+      lastPayload = slot ? await api(`/api/saves/${encodeURIComponent(slot)}`) : { world: {}, locationBoxes: {} };
+      const world = lastPayload.world || {};
+      $("subtitle").textContent = `${lastPayload.meta?.name || slot || "无存档"} · ${fmtClock(world)} · ${world.agents?.length || 0} 人`;
+      renderMetrics(world, metrics, runtime, calls);
+      renderMap(world);
+      renderDetail(world);
+      renderBottom(world, calls);
     }
-    document.getElementById("startBtn").onclick = async () => {
+
+    $("startBtn").onclick = async () => {
       await api("/api/runtime/start", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ slot: selectedSlot(), engine: "node-core-v1" }) });
       await refresh();
     };
-    document.getElementById("pauseBtn").onclick = async () => {
+    $("pauseBtn").onclick = async () => {
       await api("/api/runtime/pause", { method: "POST" });
       await refresh();
     };
-    document.getElementById("stepBtn").onclick = async () => {
+    $("stepBtn").onclick = async () => {
       await api("/api/runtime/step", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ slot: selectedSlot(), engine: "node-core-v1" }) });
       await refresh();
     };
-    document.getElementById("stopBtn").onclick = async () => {
+    $("stopBtn").onclick = async () => {
       await api("/api/runtime/stop", { method: "POST" });
       await refresh();
     };
-    document.getElementById("saveSelect").onchange = refresh;
-    refresh().catch(error => { document.getElementById("runtimeBox").textContent = error.message; });
+    $("saveSelect").onchange = () => {
+      selectedPlaceId = "";
+      refresh();
+    };
+    refresh().catch(error => {
+      $("subtitle").textContent = error.message;
+      $("metricsRow").innerHTML = `<article class="metric warn"><span>读取失败</span><strong>!</strong><small>${esc(error.message)}</small></article>`;
+    });
     setInterval(() => refresh().catch(() => {}), 3000);
   </script>
 </body>
