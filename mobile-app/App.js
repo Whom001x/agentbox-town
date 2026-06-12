@@ -6,7 +6,6 @@ import {
   Modal,
   NativeModules,
   Pressable,
-  SafeAreaView,
   ScrollView,
   StatusBar,
   StyleSheet,
@@ -122,7 +121,7 @@ function useTownApi(initialBaseUrl) {
 }
 
 export default function App() {
-  const { height } = useWindowDimensions();
+  const { width, height } = useWindowDimensions();
   const landscape = true;
   const { baseUrl, setBaseUrl, request } = useTownApi(defaultServer);
   const [serverInput, setServerInput] = useState(defaultServer);
@@ -280,7 +279,7 @@ export default function App() {
   const mapHeight = height;
 
   return (
-    <SafeAreaView style={styles.root}>
+    <View style={styles.root}>
       <StatusBar hidden />
       <View style={styles.cityBackdrop} />
       {!payload ? (
@@ -359,7 +358,7 @@ export default function App() {
         stepOnce={stepOnce}
         refresh={refresh}
       />
-    </SafeAreaView>
+    </View>
   );
 }
 
