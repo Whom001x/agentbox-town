@@ -315,15 +315,6 @@ export default function App() {
             refresh={refresh}
             toggleRuntime={toggleRuntime}
           />
-          <SidePanel
-            events={recentEvents}
-            agents={agents}
-            runtime={runtime}
-            landscape={landscape}
-            openAgent={openAgent}
-            expanded={eventsExpanded}
-            toggleExpanded={() => setEventsExpanded(value => !value)}
-          />
           <BottomBar
             slot={slot}
             saves={saves}
@@ -447,11 +438,11 @@ function TownMap({ mapWidth, mapHeight, places, boxes, placeAgentCount, openPlac
     scale: 1
   }), [canvasHeight, canvasWidth, mapHeight, mapWidth]);
   const [mapView, setMapView] = useState(initialView);
-  const gestureRef = useRef({ x: initialView.x, y: initialView.y, distance: 0, scale: 1 });
+  const gestureRef = useRef({ x: initialView.x, y: initialView.y, distance: 0, scale: 1, focalX: 0, focalY: 0, moved: false });
 
   useEffect(() => {
     setMapView(initialView);
-    gestureRef.current = { x: initialView.x, y: initialView.y, distance: 0, scale: initialView.scale };
+    gestureRef.current = { x: initialView.x, y: initialView.y, distance: 0, scale: initialView.scale, focalX: 0, focalY: 0, moved: false };
   }, [initialView]);
 
   function clampMapView(next, current = mapView) {
@@ -475,6 +466,23 @@ function TownMap({ mapWidth, mapHeight, places, boxes, placeAgentCount, openPlac
     return Math.sqrt(dx * dx + dy * dy);
   }
 
+  function touchCenter(touches) {
+    if (!touches || !touches.length) return { x: 0, y: 0 };
+    const used = touches.length >= 2 ? touches.slice(0, 2) : touches;
+    const sum = used.reduce((acc, touch) => ({ x: acc.x + touch.pageX, y: acc.y + touch.pageY }), { x: 0, y: 0 });
+    return { x: sum.x / used.length, y: sum.y / used.length };
+  }
+
+  function placeAtPoint(pageX, pageY, view = mapView) {
+    const canvasX = (pageX - view.x) / view.scale;
+    const canvasY = (pageY - view.y) / view.scale;
+    return places.find((place, index) => {
+      const px = (clamp(place.x ?? (18 + (index % 4) * 22), 7, 93) / 100) * canvasWidth;
+      const py = (clamp(place.y ?? (18 + Math.floor(index / 4) * 18), 8, 92) / 100) * canvasHeight;
+      return Math.abs(canvasX - px) <= 54 && Math.abs(canvasY - py) <= 54;
+    });
+  }
+
   function zoomBy(delta) {
     setMapView(current => clampMapView({
       ...current,
@@ -485,32 +493,42 @@ function TownMap({ mapWidth, mapHeight, places, boxes, placeAgentCount, openPlac
   }
 
   const panResponder = useMemo(() => PanResponder.create({
-    onStartShouldSetPanResponder: () => false,
-    onStartShouldSetPanResponderCapture: () => false,
+    onStartShouldSetPanResponder: () => true,
+    onStartShouldSetPanResponderCapture: () => true,
     onMoveShouldSetPanResponder: (event, gesture) => {
       const touches = event.nativeEvent.touches || [];
-      return touches.length > 1 || Math.abs(gesture.dx) > 3 || Math.abs(gesture.dy) > 3;
+      return touches.length > 1 || Math.abs(gesture.dx) > 1 || Math.abs(gesture.dy) > 1;
     },
     onMoveShouldSetPanResponderCapture: (event, gesture) => {
       const touches = event.nativeEvent.touches || [];
-      return touches.length > 1 || Math.abs(gesture.dx) > 6 || Math.abs(gesture.dy) > 6;
+      return touches.length > 1 || Math.abs(gesture.dx) > 1 || Math.abs(gesture.dy) > 1;
     },
     onPanResponderGrant: (event) => {
+      const focal = touchCenter(event.nativeEvent.touches);
       gestureRef.current = {
         x: mapView.x,
         y: mapView.y,
         distance: touchDistance(event.nativeEvent.touches),
-        scale: mapView.scale
+        scale: mapView.scale,
+        focalX: focal.x,
+        focalY: focal.y,
+        moved: false
       };
     },
     onPanResponderMove: (event, gesture) => {
       const distance = touchDistance(event.nativeEvent.touches);
+      if (Math.abs(gesture.dx) > 2 || Math.abs(gesture.dy) > 2 || distance) {
+        gestureRef.current.moved = true;
+      }
       if (distance && gestureRef.current.distance) {
         const nextScale = gestureRef.current.scale * (distance / gestureRef.current.distance);
+        const focal = touchCenter(event.nativeEvent.touches);
+        const worldX = (gestureRef.current.focalX - gestureRef.current.x) / gestureRef.current.scale;
+        const worldY = (gestureRef.current.focalY - gestureRef.current.y) / gestureRef.current.scale;
         setMapView(current => clampMapView({
           scale: nextScale,
-          x: gestureRef.current.x,
-          y: gestureRef.current.y
+          x: focal.x - worldX * nextScale,
+          y: focal.y - worldY * nextScale
         }, current));
         return;
       }
@@ -520,21 +538,34 @@ function TownMap({ mapWidth, mapHeight, places, boxes, placeAgentCount, openPlac
         scale: gestureRef.current.scale
       }, current));
     },
-    onPanResponderRelease: () => {
+    onPanResponderRelease: (event, gesture) => {
+      if (!gestureRef.current.moved && Math.abs(gesture.dx) < 4 && Math.abs(gesture.dy) < 4) {
+        const touch = event.nativeEvent.changedTouches?.[0] || event.nativeEvent.touches?.[0];
+        if (touch) {
+          const place = placeAtPoint(touch.pageX, touch.pageY, mapView);
+          if (place) openPlace(place);
+        }
+      }
       setMapView(current => {
-        gestureRef.current = { x: current.x, y: current.y, distance: 0, scale: current.scale };
+        gestureRef.current = { x: current.x, y: current.y, distance: 0, scale: current.scale, focalX: 0, focalY: 0, moved: false };
         return current;
       });
     },
-    onPanResponderTerminationRequest: () => true
-  }), [mapView.x, mapView.y, mapView.scale, canvasWidth, canvasHeight, mapWidth, mapHeight]);
+    onPanResponderTerminate: () => {
+      setMapView(current => {
+        gestureRef.current = { x: current.x, y: current.y, distance: 0, scale: current.scale, focalX: 0, focalY: 0, moved: false };
+        return current;
+      });
+    },
+    onPanResponderTerminationRequest: () => false
+  }), [mapView, canvasWidth, canvasHeight, mapWidth, mapHeight, places, openPlace]);
 
   return (
     <View
       style={[styles.map, { height: mapHeight }]}
-      {...panResponder.panHandlers}
     >
       <ImageBackground
+        {...panResponder.panHandlers}
         source={assets.townMap}
         style={[
           styles.mapCanvas,
