@@ -181,6 +181,142 @@ function clinicCareAvailableFor(world, agent) {
   return (world.agents || []).some(item => item.id !== agent.id && item.position === "clinic" && /医生|护士|医护|护理/.test(String(item.job || "")) && !isDead(item));
 }
 
+function placeId(agent) {
+  return agent?.position || agent?.place || "";
+}
+
+function isMedicalWorker(agent) {
+  const job = String(agent?.job || "");
+  return /医生|护士|医护|护理|doctor|nurse|clinic|鍖荤敓|鎶ゅ＋|鍖绘姢|鎶ょ悊/.test(job);
+}
+
+function nearbyAliveAgents(world, agent) {
+  const here = placeId(agent);
+  return (world.agents || []).filter(item => item?.id && item.id !== agent.id && !isDead(item) && placeId(item) === here);
+}
+
+function addEvent(agent, event) {
+  agent.eventQueue ||= [];
+  const key = `${event.type || ""}:${event.targetId || ""}:${event.clock || ""}`;
+  if (agent.eventQueue.some(item => item.key === key)) return false;
+  agent.eventQueue.unshift({ key, ...event });
+  agent.eventQueue = agent.eventQueue.slice(0, 12);
+  return true;
+}
+
+function addMemory(agent, text, importance = 3, layer = "short", clock = 0) {
+  ensureAgentShape(agent);
+  agent.memory[layer] ||= [];
+  if (agent.memory[layer].some(item => item?.text === text)) return;
+  agent.memory[layer].unshift({ text, importance, at: clock, source: "node-medical-escalation" });
+  agent.memory[layer] = agent.memory[layer].slice(0, 30);
+}
+
+function notifyNearbyForMedicalHelp(world, patient, level) {
+  const nearby = nearbyAliveAgents(world, patient);
+  const clock = world.clock || 0;
+  nearby.forEach(observer => {
+    addEvent(observer, {
+      type: "health_alert",
+      targetId: patient.id,
+      targetName: patient.name,
+      level,
+      priority: level === "critical" ? 100 : level === "urgent" ? 90 : 70,
+      place: placeId(patient),
+      clock,
+      summary: `${patient.name}身体明显不适，需要附近的人帮忙确认情况并考虑送往诊所。`
+    });
+    addMemory(observer, `${minutesToClock(clock).text}，在${placeId(patient)}看到${patient.name}身体不适，需要帮助。`, level === "critical" ? 5 : 4, "short", clock);
+  });
+  patient.medicalState ||= {};
+  patient.medicalState.knownBy = Array.from(new Set([...(patient.medicalState.knownBy || []), ...nearby.map(item => item.id)]));
+  if (nearby.length) patient.medicalState.discoveredAt ||= clock;
+  return nearby;
+}
+
+function applyMedicalEscalation(world, minutesPassed) {
+  world.medicalEscalations ||= [];
+  world.basicLifeDone ||= {};
+  const now = minutesToClock(world.clock || 0);
+  const slot = `${now.day}-${now.h}`;
+  (world.agents || []).forEach(agent => {
+    if (isDead(agent)) return;
+    ensureAgentShape(agent);
+    const health = Number(agent.needs?.health ?? 100);
+    const here = placeId(agent);
+    agent.terminalState ||= { criticalMinutes: 0, lastReasons: [], since: world.clock || 0 };
+    agent.medicalState ||= { knownBy: [], undiscoveredMinutes: 0, lastLevel: "none" };
+    if (health > 30) {
+      agent.medicalState.lastLevel = "none";
+      agent.medicalState.undiscoveredMinutes = 0;
+      return;
+    }
+    const level = health <= 0 ? "critical" : health <= 8 ? "urgent" : health <= 15 ? "alert" : "mild";
+    agent.medicalState.lastLevel = level;
+    agent.medicalState.lastCheckedAt = world.clock || 0;
+    const nearby = notifyNearbyForMedicalHelp(world, agent, level);
+    if (!nearby.length && here !== "clinic") {
+      agent.medicalState.undiscoveredMinutes = Number(agent.medicalState.undiscoveredMinutes || 0) + Number(minutesPassed || 0);
+    } else {
+      agent.medicalState.undiscoveredMinutes = 0;
+    }
+    if (level === "mild") {
+      if (!agent.currentTask) agent.currentTask = "身体不适，放慢节奏";
+      return;
+    }
+    agent.lifeStatus = health <= 8 ? "critical" : agent.lifeStatus;
+    agent.isSleeping = false;
+    if (here === "clinic") {
+      const staff = nearby.filter(isMedicalWorker);
+      if (staff.length) {
+        const key = `medical-care-${slot}-${agent.id}`;
+        if (!world.basicLifeDone[key]) {
+          adjustNeeds(agent, { health: health <= 0 ? 18 : 14, safety: 8, stress: 8, comfort: 5, hunger: agent.needs.hunger <= 5 ? 10 : 0 });
+          agent.currentTask = "在诊所接受基础救治";
+          agent.medicalState.treatedAt = world.clock || 0;
+          agent.terminalState.healthZeroMinutes = 0;
+          world.basicLifeDone[key] = true;
+          pushRecord(world, "基础救治", `${agent.name}在诊所有医护在场，获得基础救治。`, "medical", [agent.id, ...staff.slice(0, 3).map(item => item.id)]);
+        }
+      } else {
+        adjustNeeds(agent, { safety: 2, stress: 2, health: health <= 0 ? 1 : 0 });
+        agent.currentTask = "在诊所等待医护处理";
+        pushRecord(world, "候诊等待", `${agent.name}已经到诊所，但暂时没有可见医护，只能等待处理。`, "medical", [agent.id]);
+      }
+      return;
+    }
+    if (health <= 8) {
+      agent.activeProcess ||= {
+        goal: "寻求医疗帮助",
+        stage: nearby.length ? "ask_nearby_help" : "not_yet_discovered",
+        currentStep: nearby.length ? "向附近的人求助，准备前往诊所" : "身体不适但附近无人发现",
+        progress: 10,
+        blockedBy: nearby.length ? "waiting_for_escort" : "undiscovered",
+        updatedAt: world.clock || 0
+      };
+      agent.currentTask = nearby.length ? "请求附近人帮助前往诊所" : "身体严重不适，等待被发现";
+      const key = `medical-alert-${slot}-${agent.id}`;
+      if (!world.basicLifeDone[key]) {
+        world.medicalEscalations.unshift({
+          id: `medical-${world.clock || 0}-${agent.id}`,
+          patientId: agent.id,
+          patientName: agent.name,
+          level,
+          place: here,
+          knownBy: nearby.map(item => item.id),
+          clock: world.clock || 0,
+          status: nearby.length ? "known_by_nearby" : "undiscovered"
+        });
+        world.medicalEscalations = world.medicalEscalations.slice(0, 200);
+        pushRecord(world, "医疗求助", nearby.length
+          ? `${agent.name}身体严重不适，附近的${nearby.map(item => item.name).slice(0, 4).join("、")}已经注意到。`
+          : `${agent.name}身体严重不适，但附近暂时无人发现。`, "medical", [agent.id, ...nearby.slice(0, 6).map(item => item.id)]);
+        world.basicLifeDone[key] = true;
+      }
+    }
+  });
+}
+
 function applyBasicLifeMaintenance(world) {
   const now = minutesToClock(world.clock || 0);
   world.basicLifeDone ||= {};
@@ -246,6 +382,45 @@ function evaluateMortality(world) {
   });
 }
 
+function evaluateMortalityV2(world) {
+  (world.agents || []).forEach(agent => {
+    if (isDead(agent)) return;
+    ensureAgentShape(agent);
+    const n = agent.needs || {};
+    const critical = ["health", "hunger", "safety", "stress"].filter(key => Number(n[key] ?? 100) <= 0);
+    agent.terminalState ||= { criticalMinutes: 0, lastReasons: [], since: world.clock || 0 };
+    if (!critical.length) {
+      if (agent.lifeStatus === "critical") agent.lifeStatus = "alive";
+      agent.terminalState.healthZeroMinutes = 0;
+      agent.terminalState.hungerZeroMinutes = 0;
+      agent.terminalState.safetyZeroMinutes = 0;
+      agent.terminalState.stressZeroMinutes = 0;
+      return;
+    }
+    const tickMinutes = Number(world.config?.virtualMinutesPerPulse || 60);
+    agent.terminalState.criticalMinutes = Number(agent.terminalState.criticalMinutes || 0) + tickMinutes;
+    agent.terminalState.healthZeroMinutes = Number(n.health ?? 100) <= 0 ? Number(agent.terminalState.healthZeroMinutes || 0) + tickMinutes : 0;
+    agent.terminalState.hungerZeroMinutes = Number(n.hunger ?? 100) <= 0 ? Number(agent.terminalState.hungerZeroMinutes || 0) + tickMinutes : 0;
+    agent.terminalState.safetyZeroMinutes = Number(n.safety ?? 100) <= 0 ? Number(agent.terminalState.safetyZeroMinutes || 0) + tickMinutes : 0;
+    agent.terminalState.stressZeroMinutes = Number(n.stress ?? 100) <= 0 ? Number(agent.terminalState.stressZeroMinutes || 0) + tickMinutes : 0;
+    agent.terminalState.lastReasons = critical;
+    agent.lifeStatus = "critical";
+    const medical = agent.medicalState || {};
+    const hasRescue = placeId(agent) === "clinic"
+      || Number(medical.treatedAt || 0) >= Number((world.clock || 0) - 1440)
+      || (Array.isArray(medical.knownBy) && medical.knownBy.length > 0)
+      || (agent.activeProcess && /medical|clinic|help|escort|医疗|诊所|求助/.test(`${agent.activeProcess.goal || ""} ${agent.activeProcess.stage || ""} ${agent.activeProcess.blockedBy || ""}`));
+    const undiscoveredMinutes = Number(medical.undiscoveredMinutes || 0);
+    const healthZeroMinutes = Number(agent.terminalState.healthZeroMinutes || 0);
+    if ((n.health ?? 100) <= 0 && !hasRescue && healthZeroMinutes >= 1440 && undiscoveredMinutes >= 720) {
+      agent.lifeStatus = "dead";
+      agent.deathAt = world.clock || 0;
+      agent.deathCause = "健康归零且长期无人发现或救治";
+      pushRecord(world, "死亡", `${agent.name}因健康归零且长期无人发现或救治死亡。`, "death", [agent.id]);
+    }
+  });
+}
+
 function nodeStepPayload(payload, options = {}) {
   const next = JSON.parse(JSON.stringify(payload || {}));
   const world = next.world || next;
@@ -262,8 +437,9 @@ function nodeStepPayload(payload, options = {}) {
   updateSleepStates(world, minutes);
   applyTimeDecay(world, minutes);
   applyBasicLifeMaintenance(world);
+  applyMedicalEscalation(world, minutes);
   advanceMovement(world);
-  evaluateMortality(world);
+  evaluateMortalityV2(world);
   pushLog(world, "Node Core Tick", `纯 Node 核心推进 ${minutes} 分钟：睡眠、生理、基础维护、移动和死亡检查已结算。`);
   next.world = world;
   next.savedAt = new Date().toISOString();
