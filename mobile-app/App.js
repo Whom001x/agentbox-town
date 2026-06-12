@@ -38,7 +38,7 @@ const palette = {
   dark: "#07111b"
 };
 
-const MIN_MAP_SCALE = 0.62;
+const MIN_MAP_SCALE = 0.3;
 const MAX_MAP_SCALE = 5;
 
 const needLabels = {
