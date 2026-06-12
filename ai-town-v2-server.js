@@ -3714,32 +3714,49 @@ function setupFallbackRelationships(agents, places) {
     if (agent) unused.delete(agent.id);
     return agent || null;
   };
-  const addHousehold = (members, type, responsibilities = ["互相照看"]) => {
+  const relationForUnit = type => {
+    if (/single/.test(type)) return null;
+    if (/couple/.test(type)) return { type: "伴侣/同住者", trust: 76, intimacy: 72, respect: 62, familiarity: 86 };
+    if (/roommate|shared|friends/.test(type)) return { type: "合租熟人", trust: 58, intimacy: 38, respect: 50, familiarity: 70 };
+    if (/family|guardian|elder/.test(type)) return { type: "家人/照护关系", trust: 72, intimacy: 65, respect: 58, familiarity: 82 };
+    return { type: "同住熟人", trust: 60, intimacy: 45, respect: 50, familiarity: 72 };
+  };
+  const addHousehold = (members, type, responsibilities = ["保留基本联系"]) => {
     const ids = members.filter(Boolean).map(agent => agent.id);
     if (!ids.length) return;
     const id = `home_${households.length + 1}`;
-    households.push({ id, homePlace: home, members: ids, type, routines: ["晚间回家", "重要事情优先通知同住者"], responsibilities });
+    households.push({ id, homePlace: home, members: ids, type, routines: ["多数夜晚回到住处", "严重异常时同住者更容易发现"], responsibilities });
+    const relation = relationForUnit(type);
+    if (!relation) return;
     ids.forEach(from => ids.filter(to => to !== from).forEach(to => {
-      relations.push({ from, to, type: type === "single" ? "同住熟人" : "家人", trust: 72, intimacy: 65, respect: 58, debt: 0, familiarity: 80 });
+      relations.push({ from, to, ...relation, debt: 0 });
     }));
   };
   while (minors.some(agent => unused.has(agent.id))) {
-    const adultA = takeUnused(adults);
-    const adultB = Math.random() > 0.45 ? takeUnused(adults) : null;
     const childA = takeUnused(minors);
-    const childB = Math.random() > 0.55 ? takeUnused(minors) : null;
-    addHousehold([adultA, adultB, childA, childB], "family_with_children", ["照顾未成年人", "晚间同步重要消息"]);
+    const childB = Math.random() > 0.7 ? takeUnused(minors) : null;
+    const guardianA = takeUnused(adults) || takeUnused(elders);
+    const guardianB = Math.random() > 0.62 ? takeUnused(adults) : null;
+    addHousehold([guardianA, guardianB, childA, childB], guardianA ? "guardian_family" : "minor_shared_guardian_pending", ["未成年人需要稳定照看", "学校/健康异常优先通知监护人"]);
   }
   while (elders.some(agent => unused.has(agent.id))) {
     const elderA = takeUnused(elders);
-    const elderB = Math.random() > 0.65 ? takeUnused(elders) : null;
-    const caregiver = Math.random() > 0.72 ? takeUnused(adults) : null;
-    addHousehold([elderA, elderB, caregiver], caregiver ? "elder_with_caregiver" : elderB ? "elder_couple" : "single_elder", ["健康异常时通知家人或邻里"]);
+    const roll = Math.random();
+    const elderB = roll > 0.58 ? takeUnused(elders) : null;
+    const caregiver = roll > 0.82 ? takeUnused(adults) : null;
+    const type = caregiver ? "elder_with_caregiver" : elderB ? "elder_couple" : "single_elder";
+    addHousehold([elderA, elderB, caregiver], type, type === "single_elder" ? ["独居，健康异常依赖邻里或公共服务发现"] : ["健康异常时同住者优先发现"]);
   }
   while (adults.some(agent => unused.has(agent.id))) {
     const adultA = takeUnused(adults);
-    const adultB = Math.random() > 0.55 ? takeUnused(adults) : null;
-    addHousehold([adultA, adultB], adultB ? "couple_or_roommates" : "single", adultB ? ["分担日常事务"] : ["独居，重要异常依赖邻里发现"]);
+    const roll = Math.random();
+    if (roll < 0.42) {
+      addHousehold([adultA], "single_adult", ["独居，重要异常依赖邻里或同事发现"]);
+    } else if (roll < 0.74) {
+      addHousehold([adultA, takeUnused(adults)], "adult_couple", ["分担日常事务", "重要事情优先互相通知"]);
+    } else {
+      addHousehold([adultA, takeUnused(adults), roll > 0.9 ? takeUnused(adults) : null], "shared_roommates", ["合租或朋友同住，知道彼此作息但不等同家人"]);
+    }
   }
   places.forEach(place => {
     const members = agents.filter(agent => agent.place === place.id || agent.position === place.id).map(agent => agent.id);
