@@ -702,16 +702,7 @@
         const point = monitorPlacePoint(place, places.indexOf(place));
         return `<button class="place-pin compact" data-place="${esc(place.id)}" title="${esc(place.name || place.id)}" style="left:${point.x}%;top:${point.y}%" type="button"><span class="pin-body"></span></button>`;
       }).join("");
-      const agentHtml = agents.slice(0, 36).map((agent, index) => {
-        const place = places.find(item => item.id === (agent.position || agent.place)) || places[index % Math.max(1, places.length)] || { x: 50, y: 50 };
-        const point = monitorPlacePoint(place, places.indexOf(place));
-        const jitterX = ((index % 5) - 2) * 1.1;
-        const jitterY = ((Math.floor(index / 5) % 5) - 2) * 1.1;
-        const condition = agentCondition(agent);
-        const cls = condition === "异常" ? "warn" : condition === "空闲" ? "idle" : "";
-        return `<span class="agent-dot ${cls}" title="${esc(agent.name || agent.id)}｜${esc(place.name || place.id)}" style="left:${clamp(point.x + jitterX, 4, 96)}%;top:${clamp(point.y + jitterY + 2, 5, 95)}%"></span>`;
-      }).join("");
-      canvas.innerHTML = `${agentHtml}${pinHtml}${compactHtml}`;
+      canvas.innerHTML = `${pinHtml}${compactHtml}`;
       canvas.querySelectorAll("[data-place]").forEach(button => {
         button.addEventListener("click", () => {
           if (suppressMapClick) return;
