@@ -532,7 +532,8 @@
       mapBase.width = width;
       mapBase.height = height;
       mapBase.left = (rect.width - width) / 2;
-      mapBase.top = (rect.height - height) / 2;
+      const topSafeOffset = Math.min(110, Math.max(64, rect.height * 0.1));
+      mapBase.top = (rect.height - height) / 2 + topSafeOffset;
       world.style.width = `${width}px`;
       world.style.height = `${height}px`;
       world.style.left = `${mapBase.left}px`;
