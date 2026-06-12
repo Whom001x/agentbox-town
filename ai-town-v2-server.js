@@ -4138,13 +4138,15 @@ async function runNodeSetupCreate(body = {}) {
   seeds = setupNormalizeSeeds(setupSeedsFromSlots(defaultSlots, sourceSeeds, places), targetAgentCount, places);
   let blueprint = null;
   let relationships = null;
-  if (body.useAi !== false && publicConfig().aiEnabled) {
+  const aiSetupEnabled = body.useAi !== false && publicConfig().aiEnabled;
+  if (aiSetupEnabled) {
     updateRuntimeProgress("setup-blueprint", { phaseIndex: 2, currentTask: "AI blueprint" });
     try {
       blueprint = await aiRouter.run("setupBlueprintAgent", { premise: prompt, targetAgentCount, targetLocationCount, existingPlaces: places, existingAgents: sourceSeeds, requestedBatchSize: 10 });
       if (Array.isArray(blueprint.places) && blueprint.places.length) places = setupNormalizePlaces(blueprint.places, targetLocationCount);
     } catch (error) {
-      blueprint = { fallback: true, error: error.message };
+      failRuntimeProgress(error);
+      throw error;
     }
     updateRuntimeProgress("setup-agents", { phaseIndex: 3, currentTask: "AI agent batches" });
     const batchSize = 10;
@@ -4152,25 +4154,65 @@ async function runNodeSetupCreate(body = {}) {
     const slots = setupBuildSlotsFromBlueprint(blueprint, seeds, sourceSeeds, targetAgentCount, places);
     for (let i = 0; i < targetAgentCount; i += batchSize) batches.push(slots.slice(i, i + batchSize));
     try {
-      const results = await aiRouter.runBatch(batches, Math.min(20, batches.length), async (slots, index) => aiRouter.run("setupAgentBatchAgent", { premise: prompt, blueprint, places, slots, usedNames: sourceSeeds.map(seed => seed?.name).filter(Boolean), aiBatch: { index: index + 1, total: batches.length } }, { once: true }));
+      const results = await aiRouter.runBatch(batches, Math.min(20, batches.length), async (slots, index) => {
+        let attempt = 1;
+        while (true) {
+          updateRuntimeProgress("setup-agents", { phaseIndex: 3, currentTask: `AI agent batch ${index + 1}/${batches.length} attempt ${attempt}` });
+          const result = await aiRouter.run("setupAgentBatchAgent", { premise: prompt, blueprint, places, slots, usedNames: sourceSeeds.map(seed => seed?.name).filter(Boolean), aiBatch: { index: index + 1, total: batches.length, attempt } });
+          const agents = Array.isArray(result?.agents) ? result.agents : [];
+          if (agents.length >= slots.length) return result;
+          pushCallLog({
+            task: "setupAgentBatchAgent",
+            model: aiConfig.model,
+            keyIndex: 0,
+            agentId: "",
+            agentName: "",
+            status: "retry_wait",
+            durationMs: aiConfig.retryDelayMs || 1000,
+            error: `AI 人物批次 ${index + 1}/${batches.length} 只返回 ${agents.length}/${slots.length} 人，将继续重试，不使用本地模板`
+          });
+          attempt += 1;
+          await delay(aiConfig.retryDelayMs || 1000);
+        }
+      });
       const returned = results.flatMap(result => Array.isArray(result?.agents) ? result.agents : []);
-      if (returned.length) seeds = setupNormalizeSeeds(returned, targetAgentCount, places);
+      if (returned.length < targetAgentCount) throw new Error(`AI setup returned ${returned.length}/${targetAgentCount} agents`);
+      seeds = setupNormalizeSeeds(returned, targetAgentCount, places);
     } catch (error) {
-      blueprint = { ...(blueprint || {}), batchError: error.message };
+      failRuntimeProgress(error);
+      throw error;
     }
     updateRuntimeProgress("setup-relations", { phaseIndex: 4, currentTask: "AI relationship sketch" });
-    try {
-      relationships = await aiRouter.run("setupRelationSketchAgent", { premise: prompt, blueprint, places, agents: seeds.map(seed => ({ id: seed.id, name: seed.name, job: seed.job, ageYears: seed.ageYears, place: seed.place })), targetAgentCount });
-    } catch (error) {
-      relationships = { ...setupFallbackRelationships(seeds, places), error: error.message };
+    let relationAttempt = 1;
+    while (true) {
+      updateRuntimeProgress("setup-relations", { phaseIndex: 4, currentTask: `AI relationship sketch attempt ${relationAttempt}` });
+      relationships = await aiRouter.run("setupRelationSketchAgent", { premise: prompt, blueprint, places, agents: seeds.map(seed => ({ id: seed.id, name: seed.name, job: seed.job, ageYears: seed.ageYears, place: seed.place })), targetAgentCount, attempt: relationAttempt });
+      if ((Array.isArray(relationships?.households) && relationships.households.length)
+        && (Array.isArray(relationships?.groups) && relationships.groups.length)) break;
+      pushCallLog({
+        task: "setupRelationSketchAgent",
+        model: aiConfig.model,
+        keyIndex: 0,
+        agentId: "",
+        agentName: "",
+        status: "retry_wait",
+        durationMs: aiConfig.retryDelayMs || 1000,
+        error: `AI 关系草图为空，将继续重试，不使用本地关系模板`
+      });
+      relationAttempt += 1;
+      await delay(aiConfig.retryDelayMs || 1000);
     }
   }
   updateRuntimeProgress("setup-world", { phaseIndex: 5, currentTask: "assemble world" });
   const fallbackRelations = setupFallbackRelationships(seeds, places);
-  const safeRelationships = {
-    households: Array.isArray(relationships?.households) && relationships.households.length ? relationships.households : fallbackRelations.households,
-    groups: Array.isArray(relationships?.groups) && relationships.groups.length ? relationships.groups : fallbackRelations.groups,
-    relations: Array.isArray(relationships?.relations) && relationships.relations.length ? relationships.relations : fallbackRelations.relations
+  const safeRelationships = aiSetupEnabled ? {
+    households: Array.isArray(relationships?.households) ? relationships.households : [],
+    groups: Array.isArray(relationships?.groups) ? relationships.groups : [],
+    relations: Array.isArray(relationships?.relations) ? relationships.relations : []
+  } : {
+    households: fallbackRelations.households,
+    groups: fallbackRelations.groups,
+    relations: fallbackRelations.relations
   };
   const payload = setupMakeWorld({ slot, prompt, startClock, config: publicConfig(), places, seeds, relationships: safeRelationships, setupTables: { blueprint, agents: seeds, places, relationships: safeRelationships, createdAt: new Date().toISOString() } });
   updateRuntimeProgress("setup-save", { phaseIndex: 6, currentTask: "write save files" });
