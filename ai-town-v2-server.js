@@ -209,7 +209,27 @@ function ensureDir(dirPath) {
 function writeJsonFile(filePath, data) {
   const safePath = assertInsideSaveDir(filePath);
   fs.mkdirSync(path.dirname(safePath), { recursive: true });
-  fs.writeFileSync(safePath, JSON.stringify(data, null, 2), "utf8");
+  fs.writeFileSync(safePath, `${JSON.stringify(sanitizeForJson(data), null, 2)}\n`, "utf8");
+}
+
+function sanitizeForJson(value, seen = new WeakSet()) {
+  if (value === undefined || typeof value === "function" || typeof value === "symbol") return null;
+  if (typeof value === "number") return Number.isFinite(value) ? value : 0;
+  if (typeof value === "string") return value.replace(/\u0000/g, "").replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/g, "").replace(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "");
+  if (!value || typeof value !== "object") return value;
+  if (seen.has(value)) return null;
+  seen.add(value);
+  if (Array.isArray(value)) return value.map(item => sanitizeForJson(item, seen));
+  const output = {};
+  Object.entries(value).forEach(([key, item]) => {
+    if (item !== undefined && typeof item !== "function" && typeof item !== "symbol") output[key] = sanitizeForJson(item, seen);
+  });
+  seen.delete(value);
+  return output;
+}
+
+function safeJsonClone(value) {
+  return JSON.parse(JSON.stringify(sanitizeForJson(value)));
 }
 
 function pushCallLog(entry) {
@@ -847,6 +867,7 @@ function writeJudgementFiles(saveFolder, world = {}) {
 }
 
 function writeFolderSave(slot, payload) {
+  normalizeWorldBeforeSave(payload?.world || payload || {});
   const saveFolder = saveFolderFor(slot);
   ensureDir(saveFolder);
   writeJsonFile(path.join(saveFolder, "meta.json"), payload.meta || {});
@@ -948,17 +969,29 @@ function readSplitSavePayload(slot) {
 function readSavePayload(slot) {
   const folderPath = saveFolderFor(slot);
   const folderWorldPath = path.join(folderPath, "world.json");
-  if (fs.existsSync(folderWorldPath)) return JSON.parse(fs.readFileSync(folderWorldPath, "utf8"));
+  if (fs.existsSync(folderWorldPath)) {
+    const payload = readJsonIfExists(folderWorldPath, null);
+    if (payload) normalizeWorldBeforeSave(payload.world || payload || {});
+    return payload;
+  }
   const splitPayload = readSplitSavePayload(slot);
-  if (splitPayload) return splitPayload;
+  if (splitPayload) {
+    normalizeWorldBeforeSave(splitPayload.world || splitPayload || {});
+    return splitPayload;
+  }
   const jsonPath = savePathFor(slot);
-  if (fs.existsSync(jsonPath)) return JSON.parse(fs.readFileSync(jsonPath, "utf8"));
+  if (fs.existsSync(jsonPath)) {
+    const payload = readJsonIfExists(jsonPath, null);
+    if (payload) normalizeWorldBeforeSave(payload.world || payload || {});
+    return payload;
+  }
   return null;
 }
 
 function writeRuntimePayload(slot, payload) {
   const safeSlot = safeSaveName(slot);
   const metaName = payload?.meta?.name || safeSlot;
+  normalizeWorldBeforeSave(payload?.world || payload || {});
   writeFolderSave(safeSlot, {
     version: payload.version || 2,
     savedAt: new Date().toISOString(),
@@ -970,6 +1003,67 @@ function writeRuntimePayload(slot, payload) {
     world: payload.world || {},
     locationBoxes: payload.locationBoxes || {}
   });
+}
+
+function isDeadAgent(agent) {
+  return agent?.lifeStatus === "dead" || agent?.terminalState?.dead === true;
+}
+
+function normalizeMemoryLayers(agent, world = {}) {
+  agent.memory ||= {};
+  ["short", "long", "emotional", "secret", "rumor"].forEach(layer => {
+    if (!Array.isArray(agent.memory[layer])) agent.memory[layer] = [];
+  });
+  const now = Number(world.clock || 0);
+  const short = agent.memory.short;
+  const long = agent.memory.long;
+  const existing = new Set(long.map(item => String(item?.text || "")));
+  const promoted = [];
+  agent.memory.short = short.filter(item => {
+    const importance = Number(item?.importance || 0);
+    const age = now - Number(item?.at || 0);
+    const shouldPromote = importance >= 4 || age >= 1440 || /死亡|生病|冲突|承诺|家人|医院|诊所|学校|工作/.test(String(item?.text || ""));
+    if (shouldPromote && item?.text && !existing.has(String(item.text))) {
+      promoted.push({
+        ...item,
+        strength: Math.max(45, Number(item.strength || 50)),
+        source: item.source || "memory-consolidation",
+        consolidatedAt: now
+      });
+      existing.add(String(item.text));
+      return false;
+    }
+    return true;
+  }).slice(0, 30);
+  if (promoted.length) agent.memory.long = [...promoted, ...long].slice(0, 60);
+  ["emotional", "secret", "rumor"].forEach(layer => {
+    agent.memory[layer] = agent.memory[layer].slice(0, layer === "emotional" ? 40 : 30);
+  });
+}
+
+function freezeDeadAgent(agent, world = {}) {
+  if (!isDeadAgent(agent)) return false;
+  agent.lifeStatus = "dead";
+  agent.isSleeping = false;
+  agent.movement = null;
+  agent.activeProcess = null;
+  agent.actionPlan = [];
+  agent.eventQueue = [];
+  agent.currentTask = "已死亡，无行动";
+  agent.mood = "无生命体征";
+  agent.terminalState ||= {};
+  agent.terminalState.dead = true;
+  agent.terminalState.frozenAt ||= world.clock || agent.deathAt || 0;
+  return true;
+}
+
+function normalizeWorldBeforeSave(world = {}) {
+  if (!Array.isArray(world.agents)) return world;
+  world.agents.forEach(agent => {
+    normalizeMemoryLayers(agent, world);
+    freezeDeadAgent(agent, world);
+  });
+  return world;
 }
 
 function nodeRuntimePlaceId(world, agent) {
@@ -1023,7 +1117,7 @@ function nodeRuntimeCandidates(world) {
   const keyCapacity = Math.max(1, (aiConfig.apiKeys.length || (isLocalAiBaseUrl(aiConfig.baseUrl) ? 1 : 0)) * Math.max(1, Number(aiConfig.maxConcurrentPerKey || 1)));
   const maxActions = Math.max(1, Math.min(MAX_ACTIONS_HARD_LIMIT, keyCapacity, Number(world?.config?.maxActionsPerCycle || aiConfig.maxActionsPerCycle || 3)));
   return agents
-    .filter(agent => agent && agent.id && agent.lifeStatus !== "dead")
+    .filter(agent => agent && agent.id && !isDeadAgent(agent))
     .map(agent => ({ agent, pressure: nodeRuntimeNeedPressure(agent) }))
     .filter(item => item.pressure >= 18 || item.agent.activeProcess || (Array.isArray(item.agent.eventQueue) && item.agent.eventQueue.length))
     .sort((a, b) => b.pressure - a.pressure)
@@ -1075,7 +1169,7 @@ function nodeRuntimeSchedulerPayload(world, dueAgents) {
 }
 
 function nodeRuntimeWorldContext(world, agents = null) {
-  const selectedAgents = agents || (world.agents || []).filter(agent => agent?.id && agent.lifeStatus !== "dead").slice(0, 80).map(nodeRuntimeAgentBrief);
+  const selectedAgents = agents || (world.agents || []).filter(agent => agent?.id && !isDeadAgent(agent)).slice(0, 80).map(nodeRuntimeAgentBrief);
   return {
     time: nodeRuntimeClockText(world),
     virtualMinute: world.clock || 0,
@@ -1352,6 +1446,7 @@ function nodeRuntimeNormalizeTimePassage(raw = {}, payloadItem = {}, tickMinutes
 }
 
 async function nodeRuntimeRunTimePassage(world, actionItems) {
+  actionItems = actionItems.filter(item => item?.agent && !isDeadAgent(item.agent));
   if (!actionItems.length) return [];
   const payload = nodeRuntimeTimePassagePayload(world, actionItems);
   const result = await callAiWithRetry("timePassageAgent", payload);
@@ -1387,6 +1482,7 @@ function nodeRuntimeStateSettlementPayload(world, actionItems) {
 }
 
 async function nodeRuntimeRunStateSettlement(world, actionItems) {
+  actionItems = actionItems.filter(item => item?.agent && !isDeadAgent(item.agent));
   if (!actionItems.length) return [];
   const settled = await Promise.all(actionItems.map(async item => {
     const result = await callAiWithRetry("stateSettlementAgent", nodeRuntimeStateSettlementPayload(world, [item]));
@@ -1400,6 +1496,7 @@ function nodeRuntimeFindPatch(patches, item) {
 }
 
 function nodeRuntimeApplySettlementPatch(world, agent, patch) {
+  if (freezeDeadAgent(agent, world)) return;
   if (!patch || typeof patch !== "object") return;
   nodeRuntimeAdjustNeeds(agent, patch.needDelta || {}, 8);
   nodeRuntimeAdjustEmotion(agent, patch.emotionDelta || {}, 8);
@@ -1444,6 +1541,7 @@ function nodeRuntimeApplySettlementPatch(world, agent, patch) {
 }
 
 function nodeRuntimeApplyAction(world, agent, aiResult, timePassage = null, settlementPatch = null) {
+  if (freezeDeadAgent(agent, world)) return null;
   const action = aiResult?.action || {};
   agent.currentTask = String(action.currentTask || action.summary || agent.currentTask || "维持当前安排").slice(0, 80);
   agent.mood = String(action.mood || agent.mood || "").slice(0, 40);
@@ -1626,6 +1724,7 @@ async function runNodeRuntimeStep(slot) {
   const policy = nodeRuntimeSchedulePolicy(world, dueAgents);
   updateRuntimeProgress("candidates", { phaseIndex: 2, currentTask: `${dueAgents.length} candidates` });
   if (dueAgents.length) {
+    const byId = new Map((world.agents || []).map(agent => [agent.id, agent]));
     if (policy.runContext) {
       updateRuntimeProgress("context-agents", { phaseIndex: 3, currentTask: "context agents" });
       await nodeRuntimeRunLocationAndProcessAgents(world, dueAgents);
@@ -1637,21 +1736,25 @@ async function runNodeRuntimeStep(slot) {
     }
     updateRuntimeProgress("scheduler", { phaseIndex: 5, currentTask: "scheduler" });
     const scheduled = await callAiWithRetry("scheduler", nodeRuntimeSchedulerPayload(world, dueAgents));
-    const selected = Array.isArray(scheduled?.candidates) ? scheduled.candidates : [];
+    const selected = (Array.isArray(scheduled?.candidates) ? scheduled.candidates : [])
+      .filter(item => {
+        const agent = byId.get(item?.agentId);
+        return agent && !isDeadAgent(agent);
+      });
     const maxActions = Math.max(1, Math.min(MAX_ACTIONS_HARD_LIMIT, Number(world?.config?.maxActionsPerCycle || aiConfig.maxActionsPerCycle || 3)));
-    const byId = new Map((world.agents || []).map(agent => [agent.id, agent]));
     updateRuntimeProgress("agent-actions", { phaseIndex: 6, currentTask: `${Math.min(selected.length, maxActions)} action calls` });
     const actionCalls = selected
-      .filter(item => byId.has(item.agentId))
+      .filter(item => byId.has(item.agentId) && !isDeadAgent(byId.get(item.agentId)))
       .slice(0, maxActions)
       .map((candidate, index) => {
         const agent = byId.get(candidate.agentId);
+        if (freezeDeadAgent(agent, world)) return Promise.resolve({ status: "skipped", agent, candidate, reason: "dead" });
         return callAiWithRetry("agentAction", nodeRuntimeActionPayload(world, agent, candidate))
           .then(result => ({ status: "fulfilled", queueId: `node-${world.clock || 0}-${agent.id}-${index}`, agent, candidate, result: nodeRuntimeGuardAction(world, agent, result) }))
           .catch(error => ({ status: "rejected", agent, candidate, error }));
       });
     const actionResults = await Promise.all(actionCalls);
-    const successfulActions = actionResults.filter(item => item.status === "fulfilled");
+    const successfulActions = actionResults.filter(item => item.status === "fulfilled" && !isDeadAgent(item.agent));
     if (successfulActions.length) {
       updateRuntimeProgress("time-passage", { phaseIndex: 7, currentTask: `${successfulActions.length} actions` });
       const passages = await nodeRuntimeRunTimePassage(world, successfulActions);
@@ -3660,6 +3763,26 @@ async function handleApi(req, res) {
       send(res, 200, { ok: true, slot, saves: listSaves(), directory: SAVE_DIR });
     } catch (error) {
       send(res, 400, { error: { message: error.message, type: "save_error" } });
+    }
+    return;
+  }
+  if (apiPath.startsWith("/api/saves/") && apiPath.endsWith("/repair") && req.method === "POST") {
+    try {
+      const slotPart = apiPath.slice("/api/saves/".length, -"/repair".length);
+      const slot = safeSaveName(decodeURIComponent(slotPart));
+      const payload = readSavePayload(slot);
+      if (!payload) {
+        send(res, 404, { error: { message: "Save not found", type: "not_found" } });
+        return;
+      }
+      normalizeWorldBeforeSave(payload.world || payload || {});
+      payload.savedAt = new Date().toISOString();
+      payload.meta ||= {};
+      payload.meta.updatedAt = new Date().toISOString();
+      writeFolderSave(slot, payload);
+      send(res, 200, { ok: true, slot, meta: payload.meta, saves: listSaves(), directory: SAVE_DIR });
+    } catch (error) {
+      send(res, 400, { error: { message: error.message, type: "repair_save_error" } });
     }
     return;
   }
