@@ -6,7 +6,8 @@
   "main": "ai-town-v2-server.js",
   "scripts": {
     "start": "node ai-town-v2-server.js",
-    "check": "node --check ai-town-v2-server.js"
+    "check": "node --check ai-town-v2-server.js",
+    "export:sft": "node scripts/export-town-sft.js"
   },
   "engines": {
     "node": ">=18"

@@ -5,12 +5,14 @@ const os = require("os");
 const { nodeStepPayload, minutesToClock } = require("./ai-town-node-core");
 const { guardAction } = require("./ai-town-world-guard");
 const { createAiRouter } = require("./ai-town-ai-router");
+const { agentContextFromWorld, normalizeAction, exportTownSft, writeJsonl } = require("./ai-town-sft-exporter");
 
 const PORT = Number(process.env.AI_TOWN_V2_PORT || 8788);
 const HOST = String(process.env.AI_TOWN_V2_HOST || "0.0.0.0");
 const ROOT = __dirname;
 const CONFIG_PATH = path.join(ROOT, "ai-town-config.json");
 const SAVE_DIR = path.join(ROOT, "saves");
+const EXPORT_DIR = path.join(SAVE_DIR, "exports");
 const RUNTIME_PROGRESS_PATH = path.join(SAVE_DIR, "runtime-progress.json");
 const AI_TIMEOUT_MS = Number(process.env.AI_TOWN_TIMEOUT_MS || 180000);
 const MAX_REQUEST_BODY_BYTES = Number(process.env.AI_TOWN_MAX_REQUEST_BODY_BYTES || 10_000_000);
@@ -1540,9 +1542,33 @@ function nodeRuntimeApplySettlementPatch(world, agent, patch) {
   }
 }
 
+function nodeRuntimeStoreTrainingSample(world, agent, aiResult, timePassage = null, settlementPatch = null) {
+  if (!agent?.id || isDeadAgent(agent)) return;
+  const action = aiResult?.action || {};
+  const text = `${action.type || ""} ${action.summary || ""} ${action.currentTask || ""}`;
+  if (!action || typeof action !== "object") return;
+  if (/JSON 修复兜底|格式错误|越权|系统修正|已死亡|不能继续行动|AI 返回格式错误|停下整理思路/.test(text)) return;
+  if (!String(action.summary || action.currentTask || "").trim()) return;
+  world.trainingSamples ||= [];
+  world.trainingSamples.unshift({
+    task: "agentAction",
+    source: "node-runtime-agent-loop",
+    createdAt: new Date().toISOString(),
+    clock: world.clock || 0,
+    agentId: agent.id,
+    agentName: agent.name || "",
+    input: agentContextFromWorld(world, agent, { kind: "agent-action-live", time: nodeRuntimeClockText(world) }),
+    output: normalizeAction(action),
+    timePassage: timePassage ? nodeRuntimeCompactItem(timePassage, 160) : null,
+    settlementPatch: settlementPatch ? nodeRuntimeCompactItem(settlementPatch, 160) : null
+  });
+  world.trainingSamples = world.trainingSamples.slice(0, 5000);
+}
+
 function nodeRuntimeApplyAction(world, agent, aiResult, timePassage = null, settlementPatch = null) {
   if (freezeDeadAgent(agent, world)) return null;
   const action = aiResult?.action || {};
+  nodeRuntimeStoreTrainingSample(world, agent, aiResult, timePassage, settlementPatch);
   agent.currentTask = String(action.currentTask || action.summary || agent.currentTask || "维持当前安排").slice(0, 80);
   agent.mood = String(action.mood || agent.mood || "").slice(0, 40);
   nodeRuntimeAdjustEmotion(agent, action.emotionDelta || {}, 8);
@@ -3716,6 +3742,39 @@ async function handleApi(req, res) {
   }
   if (apiPath === "/api/calls" && req.method === "GET") {
     send(res, 200, { calls: callLogs.slice(0, 120) });
+    return;
+  }
+  if (apiPath === "/api/sft/export" && req.method === "POST") {
+    try {
+      const raw = await readBody(req);
+      const body = JSON.parse(raw || "{}");
+      const slot = safeSaveName(body.slot || runtimeSlot || listSaves()[0]?.slot || "autosave");
+      const payload = readSavePayload(slot);
+      if (!payload) {
+        send(res, 404, { error: { message: "Save not found", type: "not_found" } });
+        return;
+      }
+      const world = payload.world || payload || {};
+      const samples = exportTownSft(world, {
+        limit: body.limit || 5000,
+        includeFallback: body.includeFallback !== false
+      });
+      ensureDir(EXPORT_DIR);
+      const fileName = `${slot}-agent-action-sft-${new Date().toISOString().replace(/[:.]/g, "-")}.jsonl`;
+      const filePath = path.join(EXPORT_DIR, fileName);
+      writeJsonl(filePath, samples);
+      writeJsonFile(path.join(EXPORT_DIR, `${fileName}.meta.json`), {
+        slot,
+        fileName,
+        sampleCount: samples.length,
+        format: "minimind-conversations-jsonl",
+        createdAt: new Date().toISOString(),
+        note: "Each line contains conversations: system, user context JSON, assistant action JSON."
+      });
+      send(res, 200, { ok: true, slot, sampleCount: samples.length, file: filePath, fileName, directory: EXPORT_DIR });
+    } catch (error) {
+      send(res, 400, { error: { message: error.message, type: "sft_export_error" } });
+    }
     return;
   }
   if (apiPath === "/api/metrics/reset" && req.method === "POST") {
