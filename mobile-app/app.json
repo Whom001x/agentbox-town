@@ -12,6 +12,7 @@
     ],
     "android": {
       "package": "com.agentboxtown.mobile",
+      "usesCleartextTraffic": true,
       "adaptiveIcon": {
         "foregroundImage": "./assets/app-icon.png",
         "backgroundColor": "#0d1d2c"
