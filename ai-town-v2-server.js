@@ -4246,6 +4246,25 @@ async function handleApi(req, res) {
     send(res, 200, appVersion());
     return;
   }
+  if (apiPath === "/api/https/cert" && req.method === "GET") {
+    if (!HTTPS_CERT_PATH) {
+      send(res, 404, { error: { message: "HTTPS certificate is not configured", type: "cert_not_configured" } });
+      return;
+    }
+    try {
+      const certPath = path.resolve(HTTPS_CERT_PATH);
+      const cert = fs.readFileSync(certPath);
+      res.writeHead(200, {
+        "content-type": "application/x-x509-ca-cert",
+        "content-disposition": "attachment; filename=\"agentbox-town-local.crt\"",
+        "cache-control": "no-store"
+      });
+      res.end(cert);
+    } catch (error) {
+      send(res, 404, { error: { message: `Certificate not readable: ${error.message}`, type: "cert_read_error" } });
+    }
+    return;
+  }
   if (apiPath === "/api/config" && req.method === "GET") {
     loadConfig();
     send(res, 200, publicConfig());

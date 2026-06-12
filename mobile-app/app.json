@@ -27,7 +27,8 @@
       }
     },
     "plugins": [
-      "expo-font"
+      "expo-font",
+      "./plugins/withAndroidNetworkSecurity"
     ],
     "extra": {
       "eas": {

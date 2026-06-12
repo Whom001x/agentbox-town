@@ -25,6 +25,19 @@ npm start
 http://192.168.10.30:8788
 ```
 
+如果使用 HTTPS 局域网地址：
+
+```text
+https://192.168.5.6:8789
+```
+
+Expo Go 不能信任项目生成的自签 HTTPS 证书，会报 `Trust anchor for certification path not found`。需要打自定义开发包或正式 APK，并在手机系统里安装/信任后端证书；本项目已通过 `plugins/withAndroidNetworkSecurity.js` 为 Android 自定义包开启用户证书信任和明文 HTTP 兼容。
+
+开发期最快方式：
+
+- Expo Go：优先使用 `http://电脑局域网IP:8788`。
+- 自定义 APK：可以使用 `https://电脑局域网IP:8789`，但手机必须信任后端证书。
+
 ## 当前功能
 
 - 连接现有 Node 后端

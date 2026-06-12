@@ -74,6 +74,10 @@ function cleanBaseUrl(value) {
   return String(value || "").trim().replace(/\/+$/, "");
 }
 
+function normalizeMobileServerUrl(value) {
+  return cleanBaseUrl(value);
+}
+
 function isDead(agent) {
   return agent?.lifeStatus === "dead" || agent?.terminalState?.dead;
 }
@@ -91,7 +95,8 @@ function useTownApi(initialBaseUrl) {
   const [baseUrl, setBaseUrl] = useState(initialBaseUrl);
 
   const request = useCallback(async (path, options = {}) => {
-    const url = `${cleanBaseUrl(baseUrl)}${path}`;
+    const serverUrl = normalizeMobileServerUrl(baseUrl);
+    const url = `${serverUrl}${path}`;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), options.timeoutMs || 12000);
     try {
@@ -102,6 +107,12 @@ function useTownApi(initialBaseUrl) {
         throw new Error(message);
       }
       return data;
+    } catch (error) {
+      const message = String(error?.message || error || "");
+      if (/network request failed|ssl|cert|handshake|trust anchor/i.test(message)) {
+        throw new Error("手机未信任后端 HTTPS 证书。Expo Go 不能绕过自签证书，请安装受信任证书后使用自定义开发包，或使用真实 HTTPS 域名。");
+      }
+      throw error;
     } finally {
       clearTimeout(timer);
     }
@@ -200,7 +211,10 @@ export default function App() {
   }, [refresh, runtime?.state]);
 
   async function connectServer() {
-    setBaseUrl(cleanBaseUrl(serverInput));
+    const normalized = normalizeMobileServerUrl(serverInput);
+    setServerInput(normalized);
+    setBaseUrl(normalized);
+    setMessage("");
     setPayload(null);
     setSlot("");
     setTimeout(refresh, 50);
