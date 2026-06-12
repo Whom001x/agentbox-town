@@ -454,6 +454,44 @@
       return ["●", "blue"];
     }
 
+    const monitorMapPlacePresets = [
+      { re: /kindergarten|幼儿园/i, x: 66.5, y: 23.2 },
+      { re: /warehouse|仓库/i, x: 93.4, y: 37.4 },
+      { re: /library|图书室|图书馆/i, x: 35.2, y: 35.2 },
+      { re: /restaurant|饭馆|餐馆|饭店/i, x: 45.1, y: 31.2 },
+      { re: /breakfast|food|早餐|早餐店/i, x: 80.4, y: 12.0 },
+      { re: /market|菜市|菜市场|市场/i, x: 48.5, y: 71.2 },
+      { re: /square|plaza|center|public|广场|中心/i, x: 40.4, y: 52.8 },
+      { re: /school|education|学校/i, x: 56.1, y: 17.2 },
+      { re: /clinic|hospital|medical|诊所|医院|社区诊所/i, x: 26.6, y: 48.0 },
+      { re: /commercial|old_street|street|商业街|老街/i, x: 35.0, y: 74.0 },
+      { re: /store|shop|小卖|小卖部|商店/i, x: 20.0, y: 62.6 },
+      { re: /apartment|apartments|residence|home|new_block|居民|居民楼|住宅|小区|家/i, x: 82.2, y: 26.0 },
+      { re: /riverside|river|lake|water|河边|湖边|河畔/i, x: 81.3, y: 69.9 },
+      { re: /park|garden|公园|花园/i, x: 68.8, y: 52.3 },
+      { re: /farm|field|农田|菜地|田/i, x: 12.0, y: 43.0 },
+      { re: /mill|waterwheel|磨坊|水车/i, x: 14.0, y: 74.0 },
+      { re: /temple|shrine|寺|祠堂|古建筑/i, x: 26.0, y: 17.0 },
+      { re: /gate|arch|镇门|牌坊/i, x: 31.0, y: 90.0 },
+      { re: /pavilion|亭|湖心亭/i, x: 88.0, y: 75.0 },
+      { re: /waterfall|forest|mountain|瀑布|山林|山溪/i, x: 43.0, y: 11.0 },
+      { re: /bridge|桥|桥头/i, x: 66.0, y: 88.0 },
+      { re: /office|government|community|镇务|镇政|政府|办公|社区中心/i, x: 30.5, y: 14.2 },
+      { re: /police|security|警务|警务室|保安/i, x: 48.8, y: 34.7 },
+      { re: /factory|workshop|工坊|工点|小工|维修/i, x: 92.7, y: 17.2 },
+      { re: /bus|transport|公交|公交站|车站/i, x: 30.5, y: 67.8 }
+    ];
+
+    function monitorPlacePoint(place = {}, index = 0) {
+      const text = `${place.id || ""} ${place.name || ""} ${place.type || ""}`;
+      const preset = monitorMapPlacePresets.find(item => item.re.test(text));
+      if (preset) return preset;
+      return {
+        x: clamp(place.x ?? (15 + (index % 5) * 16), 5, 95),
+        y: clamp(place.y ?? (15 + Math.floor(index / 5) * 16), 5, 95)
+      };
+    }
+
     function placeStatus(place, count, box) {
       const localEvents = box?.localEvents || [];
       const runtime = box?.agentState?.status || box?.state?.tempo || "";
@@ -645,11 +683,12 @@
       const topPlaces = [...places].sort((a, b) => (counts[b.id] || 0) - (counts[a.id] || 0)).slice(0, 10);
       const compactPlaces = places.filter(place => !topPlaces.some(item => item.id === place.id));
       const pinHtml = topPlaces.map(place => {
+        const point = monitorPlacePoint(place, places.indexOf(place));
         const count = counts[place.id] || 0;
         const box = boxes[place.id] || {};
         const [icon, tone] = placeIcon(place);
         const [status, statusTone] = placeStatus(place, count, box);
-        return `<button class="place-pin ${place.id === selectedPlaceId ? "selected" : ""}" data-place="${esc(place.id)}" data-tone="${tone}" style="left:${clamp(place.x ?? 50, 5, 95)}%;top:${clamp(place.y ?? 50, 5, 95)}%" type="button">
+        return `<button class="place-pin ${place.id === selectedPlaceId ? "selected" : ""}" data-place="${esc(place.id)}" data-tone="${tone}" style="left:${point.x}%;top:${point.y}%" type="button">
           <span class="pin-icon">${icon}</span>
           <span class="pin-body">
             <span class="pin-title">${esc(place.name || place.id)}</span>
@@ -658,14 +697,18 @@
           </span>
         </button>`;
       }).join("");
-      const compactHtml = compactPlaces.map(place => `<button class="place-pin compact" data-place="${esc(place.id)}" title="${esc(place.name || place.id)}" style="left:${clamp(place.x ?? 50, 5, 95)}%;top:${clamp(place.y ?? 50, 5, 95)}%" type="button"><span class="pin-body"></span></button>`).join("");
+      const compactHtml = compactPlaces.map(place => {
+        const point = monitorPlacePoint(place, places.indexOf(place));
+        return `<button class="place-pin compact" data-place="${esc(place.id)}" title="${esc(place.name || place.id)}" style="left:${point.x}%;top:${point.y}%" type="button"><span class="pin-body"></span></button>`;
+      }).join("");
       const agentHtml = agents.slice(0, 36).map((agent, index) => {
         const place = places.find(item => item.id === (agent.position || agent.place)) || places[index % Math.max(1, places.length)] || { x: 50, y: 50 };
+        const point = monitorPlacePoint(place, places.indexOf(place));
         const jitterX = ((index % 5) - 2) * 1.1;
         const jitterY = ((Math.floor(index / 5) % 5) - 2) * 1.1;
         const condition = agentCondition(agent);
         const cls = condition === "异常" ? "warn" : condition === "空闲" ? "idle" : "";
-        return `<span class="agent-dot ${cls}" title="${esc(agent.name || agent.id)}｜${esc(place.name || place.id)}" style="left:${clamp((place.x ?? 50) + jitterX, 4, 96)}%;top:${clamp((place.y ?? 50) + jitterY + 2, 5, 95)}%"></span>`;
+        return `<span class="agent-dot ${cls}" title="${esc(agent.name || agent.id)}｜${esc(place.name || place.id)}" style="left:${clamp(point.x + jitterX, 4, 96)}%;top:${clamp(point.y + jitterY + 2, 5, 95)}%"></span>`;
       }).join("");
       canvas.innerHTML = `${agentHtml}${pinHtml}${compactHtml}`;
       canvas.querySelectorAll("[data-place]").forEach(button => {
