@@ -38,6 +38,9 @@ const palette = {
   dark: "#07111b"
 };
 
+const MIN_MAP_SCALE = 0.62;
+const MAX_MAP_SCALE = 2.4;
+
 const needLabels = {
   hunger: "饱腹",
   hygiene: "清洁",
@@ -447,15 +450,18 @@ function TownMap({ mapWidth, mapHeight, places, boxes, placeAgentCount, openPlac
   }, [initialView]);
 
   function clampMapView(next, current = mapView) {
-    const scale = clamp(next.scale ?? current.scale, 1, 2.4);
+    const scale = clamp(next.scale ?? current.scale, MIN_MAP_SCALE, MAX_MAP_SCALE);
     const scaledWidth = canvasWidth * scale;
     const scaledHeight = canvasHeight * scale;
-    const minX = Math.min(-24, mapWidth - scaledWidth + 24);
-    const minY = Math.min(-24, mapHeight - scaledHeight + 24);
+    const pad = 24;
+    const minX = scaledWidth <= mapWidth ? (mapWidth - scaledWidth) / 2 : mapWidth - scaledWidth + pad;
+    const maxX = scaledWidth <= mapWidth ? (mapWidth - scaledWidth) / 2 : pad;
+    const minY = scaledHeight <= mapHeight ? (mapHeight - scaledHeight) / 2 : mapHeight - scaledHeight + pad;
+    const maxY = scaledHeight <= mapHeight ? (mapHeight - scaledHeight) / 2 : pad;
     return {
       scale,
-      x: clamp(next.x ?? current.x, minX, 24),
-      y: clamp(next.y ?? current.y, minY, 24)
+      x: clamp(next.x ?? current.x, minX, maxX),
+      y: clamp(next.y ?? current.y, minY, maxY)
     };
   }
 
