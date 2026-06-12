@@ -689,6 +689,9 @@
         if (mapDrag.moved) {
           suppressMapClick = true;
           setTimeout(() => { suppressMapClick = false; }, 80);
+        } else {
+          const placeId = placeIdAtClientPoint(event.clientX, event.clientY);
+          if (placeId) selectPlace(placeId, lastPayload?.world);
         }
         mapDrag.active = false;
         world.classList.remove("dragging");
