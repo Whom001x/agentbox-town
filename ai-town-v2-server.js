@@ -2162,7 +2162,7 @@ function parseLooseJson(text) {
 
 function fallbackJson(task) {
   if (task === "worldSetupAgent") return { premise: "", places: [], agents: [], logs: [] };
-  if (task === "setupBlueprintAgent") return { premise: "", targetAgentCount: 0, targetLocationCount: 0, places: [], roleMix: [], roleBatches: [], relationshipPlan: {}, logs: [] };
+  if (task === "setupBlueprintAgent") return { premise: "", targetAgentCount: 0, targetLocationCount: 0, populationShape: "ordinary_mixed_town", householdPlan: {}, agePyramid: {}, institutions: {}, workPatterns: {}, places: [], roleMix: [], roleBatches: [], relationshipPlan: {}, logs: [] };
   if (task === "setupAgentBatchAgent") return { agents: [], logs: [] };
   if (task === "setupRelationSketchAgent") return { households: [], groups: [], relations: [], logs: [] };
   if (task === "setupAuditAgent") return { issues: [], fixAgents: [], households: [], groups: [], relations: [], logs: [] };
@@ -2294,7 +2294,7 @@ function systemPrompt(task) {
     return "你是虚拟小镇建镇 Agent。你只根据用户给的一句话设定和基础角色表，补全可信、普通、可长期模拟的小镇初始角色。每个角色必须有自然、唯一的中文姓名，不能用角色1、居民1、agent_1 这类占位名。输出严格 JSON，不要 Markdown。";
   }
   if (task === "setupBlueprintAgent") {
-    return `${common}\n你是 SetupBlueprintAgent。你的权限只有把用户的一句话建镇要求拆成建镇规划表：目标人数、目标地点数、地点草表、职业/年龄比例、人物批次和关系规模目标。你不能生成具体角色，不能生成行动、事件、记忆或剧情。人物 id 不在本阶段生成；地点 id 优先沿用 payload.existingPlaces；只有 existingPlaces 不足时才可新建稳定地点 id。roleBatches.batchId 可新建。输出只服务后续批处理。`;
+    return `${common}\n你是 SetupBlueprintAgent。你的权限只有把用户的一句话建镇要求拆成人口结构蓝图：小镇类型、家庭户型、年龄金字塔、学校/诊所/商业/公共机构规模、工作模式、地点草表、人物批次和关系规模目标。你不能直接生成具体角色，不能生成行动、事件、记忆或剧情。人物 id 不在本阶段生成；地点 id 优先沿用 payload.existingPlaces；只有 existingPlaces 不足时才可新建稳定地点 id。roleBatches.batchId 可新建，但必须来自人口结构推导，不要随便给固定职业比例。输出只服务后续批处理。`;
   }
   if (task === "setupAgentBatchAgent") {
     return `${common}\n你是 SetupAgentBatchAgent。你的权限只有为 payload.slots 中指定的一小批槽位补全初始人物基础资料。你必须使用 slots.id，不得新增槽位外角色，不得生成关系、家庭、事件、行动、当天经历或全镇背景。姓名必须自然、唯一、普通中文姓名，不能使用占位名或重复名。`;
@@ -2438,15 +2438,20 @@ function userPrompt(task, payload) {
   }
   if (task === "setupBlueprintAgent") {
     return JSON.stringify({
-      instruction: "返回 JSON：{\"premise\":\"\",\"targetAgentCount\":100,\"targetLocationCount\":20,\"places\":[{\"id\":\"\",\"name\":\"\",\"x\":50,\"y\":50,\"capacity\":30,\"visible\":[\"\"]}],\"roleMix\":[{\"role\":\"\",\"count\":10,\"ageRange\":\"20-60\",\"places\":[\"\"]}],\"roleBatches\":[{\"batchId\":\"\",\"start\":0,\"count\":10,\"roleHint\":\"\",\"notes\":\"\"}],\"relationshipPlan\":{\"householdTarget\":0,\"groupTarget\":0,\"relationTarget\":0,\"notes\":\"\"},\"logs\":[{\"title\":\"\",\"body\":\"\"}]}。",
+      instruction: "返回 JSON：{\"premise\":\"\",\"targetAgentCount\":100,\"targetLocationCount\":20,\"populationShape\":\"ordinary_mixed_town\",\"householdPlan\":{\"households\":32,\"singleElder\":3,\"familyWithChildren\":14,\"coupleOnly\":6,\"sharedOrRental\":4},\"agePyramid\":{\"children\":8,\"teens\":14,\"youngAdults\":12,\"adults\":42,\"elders\":24},\"institutions\":{\"school\":{\"students\":22,\"teachers\":3,\"staff\":1},\"clinic\":{\"doctor\":1,\"nurse\":1},\"shops\":{\"owners\":6,\"helpers\":3},\"publicOffice\":{\"staff\":3}},\"workPatterns\":{\"localWorkers\":22,\"commuters\":10,\"caregivers\":8,\"retired\":14,\"informalWork\":7},\"places\":[{\"id\":\"\",\"name\":\"\",\"x\":50,\"y\":50,\"capacity\":30,\"visible\":[\"\"]}],\"roleMix\":[{\"role\":\"\",\"count\":10,\"ageRange\":\"20-60\",\"places\":[\"\"]}],\"roleBatches\":[{\"batchId\":\"\",\"start\":0,\"count\":10,\"roleHint\":\"\",\"ageRange\":\"20-60\",\"placeHints\":[\"\"],\"notes\":\"\"}],\"relationshipPlan\":{\"householdTarget\":0,\"groupTarget\":0,\"relationTarget\":0,\"notes\":\"\"},\"logs\":[{\"title\":\"\",\"body\":\"\"}]}。",
       constraints: [
-        "本阶段只做建镇规划和数量拆分，不生成具体人物",
+        "本阶段只做建镇人口结构规划和数量拆分，不生成具体人物",
         "targetAgentCount 以 payload.targetAgentCount 和用户一句话为准；例如 100 人小镇就规划 100 人",
         "targetLocationCount 以 payload.targetLocationCount 为准，并保证地点足够支撑目标人数",
         "places 优先沿用 payload.existingPlaces 的 id；如需补地点，id 必须英文/数字/下划线、唯一、稳定",
-        "roleMix 只描述职业/年龄/地点比例，count 总和应接近 targetAgentCount",
-        "roleBatches 是后续并行人物批次；每批 count 尽量等于 payload.requestedBatchSize，100 人通常拆成约 10 批",
-        "relationshipPlan 只给家庭、群组、关系数量目标和原则，不写具体关系",
+        "populationShape 必须先判断小镇类型，例如 ordinary_mixed_town、agricultural_town、commuter_town、aging_town、factory_town、school_centered_town、tourism_town",
+        "householdPlan 要先估计家庭户数和户型；儿童/学生不能凭空存在，通常应有父母、祖辈、监护人或可联系成年人",
+        "agePyramid 的 children、teens、youngAdults、adults、elders 总和应接近 targetAgentCount；不要让 100 人小镇全是成年人或全是职业标签",
+        "institutions 必须按人口规模推导学校、诊所、商业和公共岗位；100 人小镇通常是诊所而不是完整医院，医生/护士数量要克制",
+        "workPatterns 要包含本地工作、通勤外出、家庭照护、退休、非固定职业；不要把成年人都塞进工坊",
+        "roleMix 是从 householdPlan、agePyramid、institutions、workPatterns 推导出的结果，不是随便列职业比例",
+        "roleBatches 是后续并行人物批次；每批 count 尽量等于 payload.requestedBatchSize，并且每批要带 roleHint、ageRange、placeHints",
+        "relationshipPlan 只给家庭、群组、关系数量目标和原则，不写具体关系；关系数量应与 householdPlan 和 groups 规模匹配",
         "不要输出 agents、households、groups、relations、memory、events、actions",
         "logs 只说明规划结果，不写小镇内已经发生的事",
         "字段短，不要 Markdown，不要换行"
@@ -3459,6 +3464,134 @@ function setupPlaceForRole(role, places, index) {
     || "square";
 }
 
+function setupPlaceHintsForRole(role, places = [], fallbackIndex = 0) {
+  const text = String(role || "");
+  const match = pattern => places.filter(place => pattern.test(`${place.id} ${place.name} ${place.type}`)).map(place => place.id);
+  const hints = /学生|老师|school|teacher|student|education/i.test(text) ? match(/school|学校|education/i)
+    : /医生|护士|医护|clinic|doctor|nurse|medical/i.test(text) ? match(/clinic|诊所|medical/i)
+      : /店|商|摊|shop|store|market|vendor|owner/i.test(text) ? match(/store|market|shop|breakfast|小卖|市场|早餐|food/i)
+        : /工|上班|通勤|worker|commuter|office|factory|work/i.test(text) ? match(/office|factory|work|工坊|办公/i)
+          : /老人|退休|照护|care|elder|retired/i.test(text) ? match(/apartment|home|居民|住宅/i)
+            : [];
+  const fallback = places[fallbackIndex % Math.max(1, places.length)]?.id || "square";
+  return [...new Set([...hints, fallback])].slice(0, 4);
+}
+
+function setupDefaultRolePlan(count, places = []) {
+  const n = Math.max(1, Number(count) || 1);
+  const pct = value => Math.max(0, Math.round(n * value));
+  const plan = [
+    { roleHint: "小学生/中学生", count: pct(0.20), ageRange: "7-18" },
+    { roleHint: "老师/校工", count: Math.max(1, Math.round(n / 35)), ageRange: "24-60" },
+    { roleHint: "医生/护士/药房人员", count: Math.max(1, Math.round(n / 55)), ageRange: "24-62" },
+    { roleHint: "店主/摊主/服务人员", count: pct(0.10), ageRange: "22-65" },
+    { roleHint: "本地工人/上班族/零工", count: pct(0.28), ageRange: "20-64" },
+    { roleHint: "通勤外出工作者", count: pct(0.08), ageRange: "22-60" },
+    { roleHint: "家庭照护/自由职业/待业", count: pct(0.08), ageRange: "20-64" },
+    { roleHint: "退休老人", count: pct(0.16), ageRange: "65-88" },
+    { roleHint: "镇务/保安/公共服务", count: Math.max(1, Math.round(n / 40)), ageRange: "25-62" }
+  ];
+  let total = plan.reduce((sum, item) => sum + item.count, 0);
+  while (total > n) {
+    const item = plan.filter(row => row.count > 0).sort((a, b) => b.count - a.count)[0];
+    item.count -= 1;
+    total -= 1;
+  }
+  while (total < n) {
+    plan.find(item => /工人|上班|零工/.test(item.roleHint)).count += 1;
+    total += 1;
+  }
+  return plan.map((item, index) => ({
+    ...item,
+    placeHints: setupPlaceHintsForRole(item.roleHint, places, index)
+  })).filter(item => item.count > 0);
+}
+
+function setupBlueprintRolePlan(blueprint = {}, count = 12, places = []) {
+  const rows = [];
+  const push = (roleHint, rawCount, ageRange = "", placeHints = []) => {
+    const c = Math.max(0, Math.round(Number(rawCount) || 0));
+    if (!c || !roleHint) return;
+    rows.push({
+      roleHint: String(roleHint).slice(0, 80),
+      count: c,
+      ageRange: String(ageRange || "").slice(0, 40),
+      placeHints: Array.isArray(placeHints) && placeHints.length ? placeHints.map(String).slice(0, 6) : setupPlaceHintsForRole(roleHint, places, rows.length)
+    });
+  };
+  (Array.isArray(blueprint.roleBatches) ? blueprint.roleBatches : []).forEach(batch => {
+    push(batch.roleHint || batch.role || batch.notes, batch.count, batch.ageRange, batch.placeHints || batch.places);
+  });
+  if (!rows.length) {
+    (Array.isArray(blueprint.roleMix) ? blueprint.roleMix : []).forEach(item => {
+      push(item.role || item.roleHint, item.count, item.ageRange, item.places || item.placeHints);
+    });
+  }
+  if (!rows.length) {
+    const institutions = blueprint.institutions || {};
+    if (institutions.school) {
+      push("学生", institutions.school.students, "7-18", ["school"]);
+      push("老师", institutions.school.teachers, "24-60", ["school"]);
+      push("校工/门卫", institutions.school.staff, "25-65", ["school"]);
+    }
+    if (institutions.clinic) {
+      push("医生", institutions.clinic.doctor, "26-62", ["clinic"]);
+      push("护士/药房人员", institutions.clinic.nurse || institutions.clinic.staff, "22-62", ["clinic"]);
+    }
+    if (institutions.shops) {
+      push("店主/摊主", institutions.shops.owners, "24-68", ["store", "market", "breakfast"]);
+      push("店铺帮手/服务人员", institutions.shops.helpers, "18-60", ["store", "market", "breakfast"]);
+    }
+    if (institutions.publicOffice) push("镇务/公共服务人员", institutions.publicOffice.staff, "25-62", ["office"]);
+    const work = blueprint.workPatterns || {};
+    push("本地工人/上班族/零工", work.localWorkers, "20-64", ["factory", "office"]);
+    push("通勤外出工作者", work.commuters, "22-60", ["bus_stop", "office"]);
+    push("家庭照护/自由职业/待业", work.caregivers, "20-64", ["apartments"]);
+    push("退休老人", work.retired, "65-88", ["apartments"]);
+    push("临时工/非固定职业", work.informalWork, "18-64", ["market", "square", "factory"]);
+  }
+  const base = rows.length ? rows : setupDefaultRolePlan(count, places);
+  let total = base.reduce((sum, item) => sum + item.count, 0);
+  const target = Math.max(1, Number(count) || 1);
+  while (total > target) {
+    const item = base.filter(row => row.count > 0).sort((a, b) => b.count - a.count)[0];
+    item.count -= 1;
+    total -= 1;
+  }
+  while (total < target) {
+    (base.find(item => /工人|上班|零工|local/i.test(item.roleHint)) || base[0]).count += 1;
+    total += 1;
+  }
+  return base.filter(item => item.count > 0);
+}
+
+function setupBuildSlotsFromBlueprint(blueprint, normalizedSeeds, sourceSeeds, count, places) {
+  const plan = setupBlueprintRolePlan(blueprint || {}, count, places);
+  const planned = [];
+  plan.forEach(item => {
+    for (let i = 0; i < item.count; i += 1) planned.push(item);
+  });
+  const source = Array.isArray(sourceSeeds) ? sourceSeeds : [];
+  const seeds = Array.isArray(normalizedSeeds) ? normalizedSeeds : [];
+  return Array.from({ length: count }, (_, index) => {
+    const existing = seeds[index] || {};
+    const raw = source[index] || {};
+    const item = planned[index] || plan[index % Math.max(1, plan.length)] || {};
+    const fixed = Boolean(raw.name || raw.job || raw.ageYears || raw.age || raw.place);
+    const roleHint = fixed && raw.job ? raw.job : item.roleHint || existing.job || setupRoleForIndex(index);
+    const placeHints = fixed && raw.place ? [raw.place] : item.placeHints || setupPlaceHintsForRole(roleHint, places, index);
+    return {
+      index,
+      id: setupSafeId(existing.id || raw.id, `agent_${index + 1}`),
+      fixed,
+      existing,
+      roleHint,
+      ageRange: fixed && (raw.ageYears || raw.age) ? String(raw.ageYears || raw.age) : item.ageRange || "",
+      placeHints
+    };
+  });
+}
+
 function setupNormalizeSeeds(input = [], count = 12, places = []) {
   const rows = [];
   const usedNames = new Set();
@@ -3569,16 +3702,17 @@ async function runNodeSetupCreate(body = {}) {
   const targetLocationCount = clampNumber(body.targetLocationCount || body.locationCount, 1, 120, Math.max(8, Math.ceil(targetAgentCount / 6)));
   const startClock = clampNumber(body.startClock, 0, 24 * 60 - 1, 8 * 60);
   const prompt = String(body.prompt || body.premise || "");
+  const sourceSeeds = Array.isArray(body.agents || body.seeds) ? (body.agents || body.seeds) : [];
   beginRuntimeProgress(slot, 7);
   updateRuntimeProgress("setup-places", { phaseIndex: 1, currentTask: "normalize places" });
   let places = setupNormalizePlaces(body.places || [], targetLocationCount);
-  let seeds = setupNormalizeSeeds(body.agents || body.seeds || [], targetAgentCount, places);
+  let seeds = setupNormalizeSeeds(sourceSeeds, targetAgentCount, places);
   let blueprint = null;
   let relationships = null;
   if (body.useAi !== false && publicConfig().aiEnabled) {
     updateRuntimeProgress("setup-blueprint", { phaseIndex: 2, currentTask: "AI blueprint" });
     try {
-      blueprint = await aiRouter.run("setupBlueprintAgent", { premise: prompt, targetAgentCount, targetLocationCount, existingPlaces: places, existingAgents: seeds, requestedBatchSize: 10 });
+      blueprint = await aiRouter.run("setupBlueprintAgent", { premise: prompt, targetAgentCount, targetLocationCount, existingPlaces: places, existingAgents: sourceSeeds, requestedBatchSize: 10 });
       if (Array.isArray(blueprint.places) && blueprint.places.length) places = setupNormalizePlaces(blueprint.places, targetLocationCount);
     } catch (error) {
       blueprint = { fallback: true, error: error.message };
@@ -3586,9 +3720,10 @@ async function runNodeSetupCreate(body = {}) {
     updateRuntimeProgress("setup-agents", { phaseIndex: 3, currentTask: "AI agent batches" });
     const batchSize = 10;
     const batches = [];
-    for (let i = 0; i < targetAgentCount; i += batchSize) batches.push(seeds.slice(i, i + batchSize).map((seed, offset) => ({ index: i + offset, id: seed.id, existing: seed, roleHint: seed.job, placeHints: [seed.place] })));
+    const slots = setupBuildSlotsFromBlueprint(blueprint, seeds, sourceSeeds, targetAgentCount, places);
+    for (let i = 0; i < targetAgentCount; i += batchSize) batches.push(slots.slice(i, i + batchSize));
     try {
-      const results = await aiRouter.runBatch(batches, Math.min(20, batches.length), async (slots, index) => aiRouter.run("setupAgentBatchAgent", { premise: prompt, blueprint, places, slots, usedNames: seeds.map(seed => seed.name), aiBatch: { index: index + 1, total: batches.length } }, { once: true }));
+      const results = await aiRouter.runBatch(batches, Math.min(20, batches.length), async (slots, index) => aiRouter.run("setupAgentBatchAgent", { premise: prompt, blueprint, places, slots, usedNames: sourceSeeds.map(seed => seed?.name).filter(Boolean), aiBatch: { index: index + 1, total: batches.length } }, { once: true }));
       const returned = results.flatMap(result => Array.isArray(result?.agents) ? result.agents : []);
       if (returned.length) seeds = setupNormalizeSeeds(returned, targetAgentCount, places);
     } catch (error) {
