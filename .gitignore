@@ -3,6 +3,7 @@ ai-town-config.json
 .env.local
 .env.*.local
 saves/
+certs/
 *.log
 *.tmp
 node_modules/

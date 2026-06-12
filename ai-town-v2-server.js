@@ -1,4 +1,5 @@
 const http = require("http");
+const https = require("https");
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
@@ -9,6 +10,9 @@ const { agentContextFromWorld, normalizeAction, exportTownSft, writeJsonl } = re
 
 const PORT = Number(process.env.AI_TOWN_V2_PORT || 8788);
 const HOST = String(process.env.AI_TOWN_V2_HOST || "0.0.0.0");
+const HTTPS_PORT = Number(process.env.AI_TOWN_HTTPS_PORT || 0);
+const HTTPS_KEY_PATH = process.env.AI_TOWN_HTTPS_KEY || "";
+const HTTPS_CERT_PATH = process.env.AI_TOWN_HTTPS_CERT || "";
 const ROOT = __dirname;
 const CONFIG_PATH = path.join(ROOT, "ai-town-config.json");
 const SAVE_DIR = path.join(ROOT, "saves");
@@ -4574,19 +4578,36 @@ loadConfig();
 ensureKeyHealth();
 loadRuntimeProgress();
 
-http.createServer((req, res) => {
+function handleRequest(req, res) {
   if (req.url.startsWith("/api/")) {
     handleApi(req, res);
     return;
   }
   serveFile(req, res);
-}).listen(PORT, HOST, () => {
-  console.log(`AI Town V2: http://localhost:${PORT}`);
+}
+
+function logServerUrls(label, protocol, port) {
+  console.log(`${label}: ${protocol}://localhost:${port}`);
   if (HOST === "0.0.0.0" || HOST === "::") {
-    const urls = lanUrls(PORT);
-    console.log(urls.length ? `LAN: ${urls.join("  ")}` : "LAN: no IPv4 LAN address detected");
+    const urls = lanUrls(port).map(url => url.replace(/^http:/, `${protocol}:`));
+    console.log(urls.length ? `LAN ${label}: ${urls.join("  ")}` : `LAN ${label}: no IPv4 LAN address detected`);
   } else {
-    console.log(`Host: ${HOST}`);
+    console.log(`${label} Host: ${HOST}`);
+  }
+}
+
+http.createServer(handleRequest).listen(PORT, HOST, () => {
+  logServerUrls("AI Town V2", "http", PORT);
+  if (HTTPS_PORT && HTTPS_KEY_PATH && HTTPS_CERT_PATH) {
+    try {
+      const key = fs.readFileSync(path.resolve(HTTPS_KEY_PATH));
+      const cert = fs.readFileSync(path.resolve(HTTPS_CERT_PATH));
+      https.createServer({ key, cert }, handleRequest).listen(HTTPS_PORT, HOST, () => {
+        logServerUrls("AI Town V2 HTTPS", "https", HTTPS_PORT);
+      });
+    } catch (error) {
+      console.error(`HTTPS disabled: ${error.message}`);
+    }
   }
   console.log(aiConfig.apiKeys.length
     ? `AI enabled: ${aiConfig.model}, ${aiConfig.apiKeys.length} key(s)`
