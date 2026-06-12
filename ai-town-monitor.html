@@ -179,7 +179,8 @@
       position: absolute;
       min-width: 150px;
       max-width: 220px;
-      transform: translate(-50%, -100%);
+      transform: translate(-50%, -100%) scale(var(--pin-scale, 1));
+      transform-origin: 50% 100%;
       border: 1px solid rgba(255,255,255,.13);
       border-radius: 20px;
       background: linear-gradient(135deg, rgba(10, 23, 34, .94), rgba(5, 15, 23, .86));
@@ -191,7 +192,7 @@
       user-select: none;
     }
     .place-pin:hover, .place-pin.selected {
-      transform: translate(-50%, -100%) scale(1.04);
+      transform: translate(-50%, -100%) scale(calc(var(--pin-scale, 1) * 1.04));
       border-color: rgba(31, 143, 255, .85);
       background: linear-gradient(135deg, rgba(15, 70, 119, .95), rgba(6, 20, 34, .9));
     }
@@ -201,7 +202,7 @@
       height: 28px;
       padding: 0;
       border-radius: 50%;
-      transform: translate(-50%, -50%);
+      transform: translate(-50%, -50%) scale(var(--pin-scale, 1));
       background: rgba(31, 143, 255, .8);
       box-shadow: 0 0 0 4px rgba(31,143,255,.18), 0 8px 22px rgba(0,0,0,.45);
     }
@@ -559,7 +560,11 @@
     function applyMapView() {
       clampMapView();
       const world = $("mapWorld");
-      if (world) world.style.transform = `translate3d(${mapView.x}px, ${mapView.y}px, 0) scale(${mapView.scale})`;
+      if (world) {
+        const pinScale = clamp(1 / mapView.scale, 0.55, 1.18);
+        world.style.transform = `translate3d(${mapView.x}px, ${mapView.y}px, 0) scale(${mapView.scale})`;
+        world.style.setProperty("--pin-scale", pinScale.toFixed(3));
+      }
     }
 
     function zoomMapAt(clientX, clientY, delta) {
