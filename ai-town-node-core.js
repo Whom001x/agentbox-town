@@ -195,6 +195,67 @@ function nearbyAliveAgents(world, agent) {
   return (world.agents || []).filter(item => item?.id && item.id !== agent.id && !isDead(item) && placeId(item) === here);
 }
 
+function relationScore(a, b) {
+  const rel = a?.relationshipMatrix?.[b?.id] || a?.relations?.[b?.id] || a?.relationships?.[b?.id] || 0;
+  if (typeof rel === "number") return rel;
+  return Math.max(
+    Number(rel.trust || 0),
+    Number(rel.intimacy || 0),
+    Number(rel.familiarity || 0),
+    Number(rel.dependency || 0)
+  );
+}
+
+function sharedGroupScore(world, a, b) {
+  const groups = Array.isArray(world.groups) ? world.groups : [];
+  return groups.reduce((score, group) => {
+    const members = Array.isArray(group.members) ? group.members : [];
+    if (!members.includes(a?.id) || !members.includes(b?.id)) return score;
+    const type = String(group.type || "");
+    if (/family|household/.test(type)) return Math.max(score, 95);
+    if (/class|student|teacher|school|authority/.test(type)) return Math.max(score, 75);
+    if (/cowork|work|office|clinic/.test(type)) return Math.max(score, 70);
+    if (/neighbor|regular/.test(type)) return Math.max(score, 55);
+    return Math.max(score, 35);
+  }, 0);
+}
+
+function householdScore(world, a, b) {
+  const households = Array.isArray(world.households) ? world.households : [];
+  return households.some(household => {
+    const members = Array.isArray(household.members) ? household.members : [];
+    return members.includes(a?.id) && members.includes(b?.id);
+  }) ? 100 : 0;
+}
+
+function careNetworkAgents(world, patient, level, nearby = []) {
+  if (level === "mild") return [];
+  const nearbyIds = new Set(nearby.map(item => item.id));
+  const all = (world.agents || []).filter(item => item?.id && item.id !== patient.id && !isDead(item));
+  const severity = level === "critical" ? 100 : level === "urgent" ? 85 : 65;
+  return all
+    .map(agent => {
+      const samePlace = nearbyIds.has(agent.id) ? 100 : 0;
+      const medical = isMedicalWorker(agent) ? (level === "critical" ? 100 : 82) : 0;
+      const household = householdScore(world, patient, agent);
+      const group = sharedGroupScore(world, patient, agent);
+      const rel = relationScore(patient, agent);
+      const score = Math.max(samePlace, medical, household, group, rel);
+      return { agent, score, samePlace: Boolean(samePlace), medical: Boolean(medical) };
+    })
+    .filter(item => item.score >= (level === "alert" ? 70 : 50))
+    .sort((a, b) => {
+      if (b.samePlace !== a.samePlace) return Number(b.samePlace) - Number(a.samePlace);
+      if (b.medical !== a.medical) return Number(b.medical) - Number(a.medical);
+      return b.score - a.score;
+    })
+    .slice(0, level === "critical" ? 12 : 6)
+    .map(item => {
+      item.agent.alertPriority = Math.max(severity, item.score);
+      return item.agent;
+    });
+}
+
 function addEvent(agent, event) {
   agent.eventQueue ||= [];
   const key = `${event.type || ""}:${event.targetId || ""}:${event.clock || ""}`;
@@ -215,22 +276,52 @@ function addMemory(agent, text, importance = 3, layer = "short", clock = 0) {
 function notifyNearbyForMedicalHelp(world, patient, level) {
   const nearby = nearbyAliveAgents(world, patient);
   const clock = world.clock || 0;
-  nearby.forEach(observer => {
+  const recipients = careNetworkAgents(world, patient, level, nearby);
+  recipients.forEach(observer => {
+    const isNearby = placeId(observer) === placeId(patient);
+    const isDoctor = isMedicalWorker(observer);
     addEvent(observer, {
       type: "health_alert",
       targetId: patient.id,
       targetName: patient.name,
       level,
-      priority: level === "critical" ? 100 : level === "urgent" ? 90 : 70,
+      priority: observer.alertPriority || (level === "critical" ? 100 : level === "urgent" ? 90 : 70),
       place: placeId(patient),
       clock,
-      summary: `${patient.name}身体明显不适，需要附近的人帮忙确认情况并考虑送往诊所。`
+      knownByMode: isNearby ? "seen" : isDoctor ? "medical_call" : "social_contact",
+      summary: isNearby
+        ? `${patient.name}身体明显不适，需要附近的人帮忙确认情况并考虑送往诊所。`
+        : isDoctor
+          ? `${patient.name}出现${level}级健康状况，需要医护尽快回到诊所或安排救助。`
+          : `${patient.name}出现健康状况，关系网络中有人把消息传到了这里，需要确认是否能帮忙。`
     });
-    addMemory(observer, `${minutesToClock(clock).text}，在${placeId(patient)}看到${patient.name}身体不适，需要帮助。`, level === "critical" ? 5 : 4, "short", clock);
+    addMemory(observer, isNearby
+      ? `${minutesToClock(clock).text}，在${placeId(patient)}看到${patient.name}身体不适，需要帮助。`
+      : `${minutesToClock(clock).text}，得知${patient.name}身体不适，需要医疗或熟人帮助。`, level === "critical" ? 5 : 4, "short", clock);
+    if (isDoctor && placeId(observer) !== "clinic" && (level === "critical" || level === "urgent")) {
+      observer.movement ||= {
+        from: placeId(observer),
+        to: "clinic",
+        startedAt: clock,
+        arriveAt: clock + (level === "critical" ? 20 : 35),
+        reason: "medical_alert"
+      };
+      observer.activeProcess ||= {
+        goal: "返回诊所处理急症",
+        stage: "return_to_clinic",
+        currentStep: `收到${patient.name}的健康求助，准备回诊所处理`,
+        progress: 5,
+        blockedBy: "needs_travel_to_clinic",
+        updatedAt: clock
+      };
+      observer.currentTask = "收到医疗求助，准备返回诊所";
+    }
   });
   patient.medicalState ||= {};
-  patient.medicalState.knownBy = Array.from(new Set([...(patient.medicalState.knownBy || []), ...nearby.map(item => item.id)]));
-  if (nearby.length) patient.medicalState.discoveredAt ||= clock;
+  patient.medicalState.knownBy = Array.from(new Set([...(patient.medicalState.knownBy || []), ...recipients.map(item => item.id)]));
+  patient.medicalState.nearbyKnownBy = nearby.map(item => item.id);
+  patient.medicalState.medicalKnownBy = recipients.filter(isMedicalWorker).map(item => item.id);
+  if (nearby.length || recipients.length) patient.medicalState.discoveredAt ||= clock;
   return nearby;
 }
 
@@ -255,7 +346,8 @@ function applyMedicalEscalation(world, minutesPassed) {
     agent.medicalState.lastLevel = level;
     agent.medicalState.lastCheckedAt = world.clock || 0;
     const nearby = notifyNearbyForMedicalHelp(world, agent, level);
-    if (!nearby.length && here !== "clinic") {
+    const knownCount = Array.isArray(agent.medicalState.knownBy) ? agent.medicalState.knownBy.length : 0;
+    if (!nearby.length && !knownCount && here !== "clinic") {
       agent.medicalState.undiscoveredMinutes = Number(agent.medicalState.undiscoveredMinutes || 0) + Number(minutesPassed || 0);
     } else {
       agent.medicalState.undiscoveredMinutes = 0;
