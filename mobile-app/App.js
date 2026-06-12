@@ -581,7 +581,6 @@ function TownMap({ mapWidth, mapHeight, places, boxes, placeAgentCount, openPlac
     <View
       style={[styles.map, { height: mapHeight }]}
     >
-      <View style={styles.mapGestureLayer} {...panResponder.panHandlers}>
       <ImageBackground
         source={assets.townMap}
         style={[
@@ -625,7 +624,7 @@ function TownMap({ mapWidth, mapHeight, places, boxes, placeAgentCount, openPlac
           );
         })}
       </ImageBackground>
-      </View>
+      <View style={styles.mapGestureLayer} {...panResponder.panHandlers} />
       <View style={styles.mapControls}>
         <Pressable style={styles.mapControlButton} onPress={() => zoomBy(0.18)}>
           <Text style={styles.mapControlText}>+</Text>
@@ -897,12 +896,13 @@ const styles = StyleSheet.create({
   },
   mapGestureLayer: {
     ...StyleSheet.absoluteFillObject,
-    overflow: "hidden"
+    zIndex: 4
   },
   mapCanvas: {
     position: "absolute",
     left: 0,
-    top: 0
+    top: 0,
+    zIndex: 1
   },
   mapImage: {
     resizeMode: "cover"
@@ -921,7 +921,8 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     backgroundColor: "rgba(8, 18, 29, 0.76)",
     borderWidth: 1,
-    borderColor: "rgba(147, 211, 255, 0.28)"
+    borderColor: "rgba(147, 211, 255, 0.28)",
+    zIndex: 8
   },
   mapControlButton: {
     width: 32,
