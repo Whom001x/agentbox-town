@@ -3981,6 +3981,9 @@ async function handleApi(req, res) {
     try {
       const raw = await readBody(req);
       const body = JSON.parse(raw || "{}");
+      if (setupJobRunning && runtimeProgress && runtimeProgress.running === false) {
+        setupJobRunning = false;
+      }
       if (setupJobRunning) {
         send(res, 409, { error: { message: "Setup job is already running", type: "setup_busy" }, progress: runtimeProgress });
         return;
