@@ -560,9 +560,16 @@ function TownMap({ mapWidth, mapHeight, places, boxes, placeAgentCount, openPlac
     touchRef.current = { x: currentView.x, y: currentView.y, scale: currentView.scale, startX: 0, startY: 0, distance: 0, focalX: 0, focalY: 0, moved: false };
   }
 
+  const renderTranslateX = mapView.x + (canvasWidth * (mapView.scale - 1)) / 2;
+  const renderTranslateY = mapView.y + (canvasHeight * (mapView.scale - 1)) / 2;
+
   return (
     <View
       style={[styles.map, { height: mapHeight }]}
+      onTouchStart={handleMapTouchStart}
+      onTouchMove={handleMapTouchMove}
+      onTouchEnd={handleMapTouchEnd}
+      onTouchCancel={handleMapTouchEnd}
     >
       <ImageBackground
         source={assets.townMap}
@@ -572,8 +579,8 @@ function TownMap({ mapWidth, mapHeight, places, boxes, placeAgentCount, openPlac
             width: canvasWidth,
             height: canvasHeight,
             transform: [
-              { translateX: mapView.x },
-              { translateY: mapView.y },
+              { translateX: renderTranslateX },
+              { translateY: renderTranslateY },
               { scale: mapView.scale }
             ]
           }
@@ -607,13 +614,6 @@ function TownMap({ mapWidth, mapHeight, places, boxes, placeAgentCount, openPlac
           );
         })}
       </ImageBackground>
-      <View
-        style={styles.mapGestureLayer}
-        onTouchStart={handleMapTouchStart}
-        onTouchMove={handleMapTouchMove}
-        onTouchEnd={handleMapTouchEnd}
-        onTouchCancel={handleMapTouchEnd}
-      />
       <View style={styles.mapControls}>
         <Pressable style={styles.mapControlButton} onPress={() => zoomBy(0.18)}>
           <Text style={styles.mapControlText}>+</Text>
@@ -880,13 +880,9 @@ const styles = StyleSheet.create({
   },
   map: {
     margin: 0,
+    position: "relative",
     overflow: "hidden",
     backgroundColor: "#2f543d"
-  },
-  mapGestureLayer: {
-    ...StyleSheet.absoluteFillObject,
-    zIndex: 4,
-    backgroundColor: "rgba(0,0,0,0.001)"
   },
   mapCanvas: {
     position: "absolute",
@@ -912,7 +908,8 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(8, 18, 29, 0.76)",
     borderWidth: 1,
     borderColor: "rgba(147, 211, 255, 0.28)",
-    zIndex: 8
+    zIndex: 8,
+    elevation: 8
   },
   mapControlButton: {
     width: 32,
