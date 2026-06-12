@@ -902,9 +902,10 @@
       lastCalls = calls;
       const select = $("saveSelect");
       const previous = select.value;
-      select.innerHTML = (savesData.saves || []).map(save => `<option value="${esc(save.slot)}">${esc(save.name || save.slot)}｜${save.agentCount || 0}人｜${esc(save.clockText || "")}</option>`).join("");
+      const realSaves = (savesData.saves || []).filter(save => save.slot !== "runtime-progress" && (save.format === "folder" || Number(save.agentCount || 0) > 0));
+      select.innerHTML = realSaves.map(save => `<option value="${esc(save.slot)}">${esc(save.name || save.slot)}｜${save.agentCount || 0}人｜${esc(save.clockText || "")}</option>`).join("");
       if (previous && [...select.options].some(item => item.value === previous)) select.value = previous;
-      const slot = selectedSlot() || savesData.saves?.[0]?.slot || "";
+      const slot = selectedSlot() || realSaves[0]?.slot || "";
       lastPayload = slot ? await api(`/api/saves/${encodeURIComponent(slot)}`) : { world: {}, locationBoxes: {} };
       const world = lastPayload.world || {};
       $("subtitle").textContent = `${lastPayload.meta?.name || slot || "无存档"} · ${fmtClock(world)} · ${world.agents?.length || 0} 人`;

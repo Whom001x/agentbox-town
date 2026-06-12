@@ -668,9 +668,12 @@ function saveMetaFromPayload(parsed, fallbackSlot, stat, format) {
 function listSaves() {
   ensureSaveDir();
   const bySlot = new Map();
+  const systemSlots = new Set(["runtime-progress"]);
   fs.readdirSync(SAVE_DIR).forEach(file => {
     const fullPath = path.join(SAVE_DIR, file);
     const stat = fs.statSync(fullPath);
+    const rawSlot = stat.isDirectory() ? file : path.basename(file, ".json");
+    if (systemSlots.has(rawSlot)) return;
     if (stat.isDirectory()) {
       const payload = readJsonIfExists(path.join(fullPath, "world.json"), readJsonIfExists(path.join(fullPath, "meta.json"), {}));
       bySlot.set(file, saveMetaFromPayload(payload, file, stat, "folder"));
