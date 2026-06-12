@@ -261,6 +261,39 @@
       background: linear-gradient(180deg, rgba(8, 20, 30, .94), rgba(5, 13, 20, .92));
       box-shadow: var(--shadow);
       padding: 16px;
+      transition: transform .22s ease, opacity .22s ease;
+    }
+    .right-panel.collapsed {
+      transform: translateX(calc(100% + 16px));
+      opacity: 0;
+      pointer-events: none;
+    }
+    .detail-toggle {
+      position: absolute;
+      right: 18px;
+      top: 42%;
+      z-index: 2;
+      width: 44px;
+      min-height: 112px;
+      display: grid;
+      place-items: center;
+      border: 1px solid var(--line-strong);
+      border-radius: 18px 0 0 18px;
+      background: rgba(7, 17, 26, .9);
+      color: #d8e9f5;
+      box-shadow: var(--shadow);
+      writing-mode: vertical-rl;
+      letter-spacing: 0;
+    }
+    .detail-close {
+      width: 36px;
+      height: 36px;
+      padding: 0;
+      border-radius: 50%;
+      display: grid;
+      place-items: center;
+      font-size: 20px;
+      background: rgba(255,255,255,.06);
     }
     .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
     .panel-title { display: flex; gap: 12px; align-items: center; min-width: 0; }
@@ -385,7 +418,8 @@
         <button class="tool" type="button" title="热力">◴</button>
         <button class="tool" type="button" title="定位">⌖</button>
       </nav>
-      <aside class="right-panel" id="detailPanel"></aside>
+      <button class="detail-toggle" id="detailToggle" type="button">地点详情</button>
+      <aside class="right-panel collapsed" id="detailPanel"></aside>
     </main>
 
     <footer class="bottom">
@@ -415,6 +449,7 @@
     let lastPayload = null;
     let lastRuntime = null;
     let lastCalls = null;
+    let detailOpen = false;
     const mapView = { x: 0, y: 0, scale: 1 };
     const mapBase = { width: 0, height: 0, left: 0, top: 0 };
     const mapDrag = { active: false, pointerId: 0, startX: 0, startY: 0, viewX: 0, viewY: 0, moved: false };
@@ -590,6 +625,14 @@
       applyMapView();
     }
 
+    function setDetailOpen(open) {
+      detailOpen = Boolean(open);
+      const panel = $("detailPanel");
+      const toggle = $("detailToggle");
+      if (panel) panel.classList.toggle("collapsed", !detailOpen);
+      if (toggle) toggle.textContent = detailOpen ? "收起详情" : "地点详情";
+    }
+
     function bindMapControls() {
       const world = $("mapWorld");
       const layer = document.querySelector(".map-layer");
@@ -711,6 +754,7 @@
         button.addEventListener("click", () => {
           if (suppressMapClick) return;
           selectedPlaceId = button.dataset.place;
+          setDetailOpen(true);
           renderMap(world);
           renderDetail(world);
         });
@@ -741,6 +785,7 @@
             </div>
           </div>
           <span class="badge">${esc(status)}</span>
+          <button class="detail-close" type="button" id="detailClose" title="收起">×</button>
         </div>
         <div class="tabs">
           <div class="tab active">概览</div>
@@ -767,6 +812,7 @@
           </div>
         </section>
       `;
+      $("detailClose")?.addEventListener("click", () => setDetailOpen(false));
     }
 
     function donutGradient(parts) {
@@ -869,6 +915,10 @@
     bindMapControls();
     document.querySelectorAll(".tool").forEach(button => {
       if (button.title === "定位") button.addEventListener("click", resetMapView);
+    });
+    $("detailToggle").addEventListener("click", () => {
+      if (!detailOpen && lastPayload?.world) renderDetail(lastPayload.world);
+      setDetailOpen(!detailOpen);
     });
     refresh().catch(error => {
       $("subtitle").textContent = error.message;
