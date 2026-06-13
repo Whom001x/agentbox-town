@@ -11729,7 +11729,7 @@
       const auditText = (agent.knowledgeAudit || [])
         .slice(0, 2)
         .map(item => `${item.time} ${item.note}`)
-        .join("；");
+        .join(" / ") || (agent.knowledgeJudgement?.summary || "");
       const stateNotes = (agent.multiDimensionalNotes || [])
         .slice(0, 2)
         .map(item => `${item.time} ${item.note}`)
@@ -11750,7 +11750,7 @@
         .slice(0, 3)
         .map(impact => `${impact.title}｜强度${impact.severity}`)
         .join("；");
-      const informationText = (world.informationFlow || [])
+      const informationText = ([...(world.informationFlow || []), ...(world.informationFlows || [])])
         .filter(flow => (flow.knownBy || []).includes(agent.id))
         .slice(0, 3)
         .map(flow => `${flow.fact}${flow.rumorRisk ? `｜流言${Math.round(flow.rumorRisk)}` : ""}`)
