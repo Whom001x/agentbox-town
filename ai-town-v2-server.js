@@ -1114,6 +1114,27 @@ function isDeadAgent(agent) {
   return agent?.lifeStatus === "dead" || agent?.terminalState?.dead === true;
 }
 
+function nodeRuntimeRelationScore(agent, target) {
+  const rel = agent?.relationshipMatrix?.[target?.id] || agent?.relations?.[target?.id] || agent?.relationships?.[target?.id] || 0;
+  if (typeof rel === "number") return rel;
+  return Math.max(
+    Number(rel.trust || 0),
+    Number(rel.intimacy || 0),
+    Number(rel.familiarity || 0),
+    Number(rel.dependency || 0),
+    Number(rel.respect || 0)
+  );
+}
+
+function nodeRuntimeShareGroup(world, aId, bId) {
+  if (!aId || !bId) return false;
+  const inGroup = (group) => Array.isArray(group?.members) && group.members.includes(aId) && group.members.includes(bId);
+  return (Array.isArray(world.households) && world.households.some(inGroup))
+    || (Array.isArray(world.groups) && world.groups.some(inGroup))
+    || (Array.isArray(world.socialStructures?.households) && world.socialStructures.households.some(inGroup))
+    || (Array.isArray(world.socialStructures?.groups) && world.socialStructures.groups.some(inGroup));
+}
+
 function normalizeMemoryLayers(agent, world = {}) {
   agent.memory ||= {};
   ["short", "long", "emotional", "secret", "rumor"].forEach(layer => {
@@ -1433,9 +1454,16 @@ function nodeRuntimeSchedulePolicy(world, dueAgents) {
 
 function nodeRuntimeVisibleAgents(world, agent) {
   const placeId = nodeRuntimePlaceId(world, agent);
+  const cap = placeId === "apartment" ? 5 : placeId === "clinic" ? 10 : placeId === "school" ? 8 : 6;
   return (world.agents || [])
     .filter(item => item?.id && item.id !== agent.id && item.lifeStatus !== "dead" && nodeRuntimePlaceId(world, item) === placeId)
-    .slice(0, 12)
+    .map(item => ({
+      item,
+      score: nodeRuntimeRelationScore(agent, item) + (nodeRuntimeShareGroup(world, agent.id, item.id) ? 35 : 0)
+    }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, cap)
+    .map(entry => entry.item)
     .map(nodeRuntimeAgentBrief);
 }
 
@@ -1487,6 +1515,94 @@ function nodeRuntimeCompactItem(item = {}, maxText = 180) {
     else compact[key] = typeof value === "string" ? value.slice(0, maxText) : value;
   });
   return compact;
+}
+
+function nodeRuntimeAgentIdSet(world) {
+  return new Set((world.agents || []).map(agent => agent?.id).filter(Boolean));
+}
+
+function nodeRuntimeFilterIds(ids, validIds, max = 8) {
+  return Array.from(new Set((Array.isArray(ids) ? ids : [])
+    .map(id => String(id || ""))
+    .filter(id => validIds.has(id))))
+    .slice(0, max);
+}
+
+function nodeRuntimePropagationSignature(item, keys = []) {
+  return keys
+    .map(key => {
+      const value = item?.[key];
+      return Array.isArray(value) ? value.slice().sort().join(",") : String(value || "").slice(0, 80);
+    })
+    .join("|");
+}
+
+function nodeRuntimeDedupBySignature(existing = [], incoming = [], keys = [], maxAgeMinutes = 720) {
+  const now = Number(incoming[0]?.at || 0);
+  const seen = new Set((existing || [])
+    .filter(item => !now || !item?.at || now - Number(item.at || 0) <= maxAgeMinutes)
+    .map(item => nodeRuntimePropagationSignature(item, keys)));
+  const result = [];
+  for (const item of incoming || []) {
+    const sig = nodeRuntimePropagationSignature(item, keys);
+    if (!sig || seen.has(sig)) continue;
+    seen.add(sig);
+    result.push(item);
+  }
+  return result;
+}
+
+function nodeRuntimeSanitizeEventImpacts(world, items = []) {
+  const validIds = nodeRuntimeAgentIdSet(world);
+  return (Array.isArray(items) ? items : []).slice(0, 12).map(item => {
+    const compact = nodeRuntimeCompactItem(item);
+    compact.directKnownBy = nodeRuntimeFilterIds(compact.directKnownBy || compact.knownBy, validIds, 6);
+    compact.affectedAgents = (Array.isArray(compact.affectedAgents) ? compact.affectedAgents : [])
+      .filter(affected => validIds.has(String(affected?.agentId || "")))
+      .slice(0, 4);
+    compact.relationshipHints = (Array.isArray(compact.relationshipHints) ? compact.relationshipHints : [])
+      .filter(hint => validIds.has(String(hint?.from || "")) && validIds.has(String(hint?.to || "")))
+      .slice(0, 4);
+    compact.at = world.clock || 0;
+    compact.source = "node-event-impact";
+    return compact;
+  }).filter(item => item.eventId || item.title || item.summary);
+}
+
+function nodeRuntimeSanitizeInformationFlows(world, items = []) {
+  const validIds = nodeRuntimeAgentIdSet(world);
+  return (Array.isArray(items) ? items : []).slice(0, 20).map(item => {
+    const compact = nodeRuntimeCompactItem(item);
+    const maxKnown = compact.public === true ? 12 : 8;
+    compact.knownBy = nodeRuntimeFilterIds(compact.knownBy, validIds, maxKnown);
+    compact.transmissions = (Array.isArray(compact.transmissions) ? compact.transmissions : [])
+      .filter(tx => validIds.has(String(tx?.from || "")) && validIds.has(String(tx?.to || "")))
+      .filter(tx => compact.public === true || String(tx.channel || "") !== "broadcast")
+      .slice(0, 8);
+    if (!compact.knownBy.length && compact.transmissions.length) {
+      compact.knownBy = nodeRuntimeFilterIds(compact.transmissions.flatMap(tx => [tx.from, tx.to]), validIds, maxKnown);
+    }
+    compact.at = world.clock || 0;
+    compact.source = "node-information-propagation";
+    return compact;
+  }).filter(item => item.fact && item.knownBy.length);
+}
+
+function nodeRuntimeSanitizeSocialProcesses(world, items = []) {
+  const validIds = nodeRuntimeAgentIdSet(world);
+  return (Array.isArray(items) ? items : []).slice(0, 20).map(item => {
+    const compact = nodeRuntimeCompactItem(item);
+    compact.participants = nodeRuntimeFilterIds(compact.participants, validIds, 8);
+    compact.knownBy = nodeRuntimeFilterIds(compact.knownBy, validIds, 8);
+    compact.hiddenFrom = nodeRuntimeFilterIds(compact.hiddenFrom, validIds, 8)
+      .filter(id => !compact.knownBy.includes(id));
+    compact.beliefs = (Array.isArray(compact.beliefs) ? compact.beliefs : [])
+      .filter(belief => validIds.has(String(belief?.agentId || "")))
+      .slice(0, 8);
+    compact.at = world.clock || 0;
+    compact.source = "node-social-process";
+    return compact;
+  }).filter(item => item.type && item.participants.length);
 }
 
 async function nodeRuntimeRunLocationAndProcessAgents(world, dueAgents) {
@@ -1931,7 +2047,12 @@ async function nodeRuntimeRunPostAgents(world, actionItems, settlementPatches = 
   }));
   const impact = await callAiWithRetry("eventImpactAgent", { ...nodeRuntimeWorldContext(world), actionEvents, events: actionEvents });
   if (!Array.isArray(world.eventImpacts)) world.eventImpacts = [];
-  world.eventImpacts.unshift(...(impact.eventImpacts || []).slice(0, 12).map(item => ({ ...nodeRuntimeCompactItem(item), at: world.clock || 0, source: "node-event-impact" })));
+  const eventImpacts = nodeRuntimeDedupBySignature(
+    world.eventImpacts,
+    nodeRuntimeSanitizeEventImpacts(world, impact.eventImpacts || []),
+    ["eventId", "title", "sourceAgentId", "place"]
+  );
+  world.eventImpacts.unshift(...eventImpacts);
   world.eventImpacts = world.eventImpacts.slice(0, 80);
   const propagationPayload = { ...nodeRuntimeWorldContext(world), eventImpacts: impact.eventImpacts || [] };
   const [propagation, dynamics, social] = await Promise.all([
@@ -1940,7 +2061,12 @@ async function nodeRuntimeRunPostAgents(world, actionItems, settlementPatches = 
     callAiWithRetry("socialProcessAgent", { ...propagationPayload, relationshipDynamics: world.relationshipDynamics || [] })
   ]);
   if (!Array.isArray(world.informationFlows)) world.informationFlows = [];
-  world.informationFlows.unshift(...(propagation.informationFlows || []).slice(0, 20).map(item => ({ ...nodeRuntimeCompactItem(item), at: world.clock || 0, source: "node-information-propagation" })));
+  const informationFlows = nodeRuntimeDedupBySignature(
+    world.informationFlows,
+    nodeRuntimeSanitizeInformationFlows(world, propagation.informationFlows || []),
+    ["impactId", "fact", "source", "knownBy"]
+  );
+  world.informationFlows.unshift(...informationFlows);
   world.informationFlows = world.informationFlows.slice(0, 120);
   if (!Array.isArray(world.relationshipDynamics)) world.relationshipDynamics = [];
   const relationItems = dynamics.pairDynamics || dynamics.relationshipDynamics || dynamics.relationUpdates || [];
@@ -1948,12 +2074,17 @@ async function nodeRuntimeRunPostAgents(world, actionItems, settlementPatches = 
   world.relationshipDynamics = world.relationshipDynamics.slice(0, 120);
   if (!Array.isArray(world.socialProcesses)) world.socialProcesses = [];
   const processItems = social.processes || social.socialProcesses || social.updates || [];
-  world.socialProcesses.unshift(...processItems.slice(0, 20).map(item => ({ ...nodeRuntimeCompactItem(item), at: world.clock || 0, source: "node-social-process" })));
+  const socialProcesses = nodeRuntimeDedupBySignature(
+    world.socialProcesses,
+    nodeRuntimeSanitizeSocialProcesses(world, processItems),
+    ["type", "participants", "truth", "stage"]
+  );
+  world.socialProcesses.unshift(...socialProcesses);
   world.socialProcesses = world.socialProcesses.slice(0, 120);
   world.logs ||= [];
   world.logs.unshift({
     title: "Node Post Agents",
-    body: `EventImpact ${impact.eventImpacts?.length || 0}; InformationPropagation ${propagation.informationFlows?.length || 0}; RelationshipDynamics ${relationItems.length}; SocialProcess ${processItems.length}`,
+    body: `EventImpact ${eventImpacts.length}/${impact.eventImpacts?.length || 0}; InformationPropagation ${informationFlows.length}/${propagation.informationFlows?.length || 0}; RelationshipDynamics ${relationItems.length}; SocialProcess ${socialProcesses.length}/${processItems.length}`,
     type: "node_runtime",
     time: nodeRuntimeClockText(world),
     clock: world.clock || 0,
