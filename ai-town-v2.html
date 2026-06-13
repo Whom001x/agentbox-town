@@ -10388,7 +10388,7 @@
           agent.energy = clamp(agent.energy + Math.floor(agent.sleepQuality / 8), 0, 100);
           agent.currentTask = "醒来整理";
           adjustEmotion(agent, agent.sleepQuality > 70 ? { tired: -18, hopeful: 5, calm: 4 } : { tired: 8, anxious: 2 });
-          pushRecord(`${agent.name} 醒来`, `${agent.name}结束睡眠，精力恢复到 ${agent.energy}。`, "sleep");
+          pushRecord(`${agent.name} 醒来`, `${agent.name}结束睡眠，精力恢复到 ${fmtStat(agent.energy)}。`, "sleep");
         }
         if (agent.isSleeping) {
           agent.energy = clamp(agent.energy + Math.max(1, Math.round(minutesPassed / 15)), 0, 100);
@@ -11595,11 +11595,17 @@
       });
     }
 
+    function fmtStat(value) {
+      const number = Number(value);
+      if (!Number.isFinite(number)) return "0";
+      return String(Math.round(number));
+    }
+
     function renderAgents() {
       byId("agentList").innerHTML = world.agents.map(agent => `
         <div class="agent-row ${agent.id === world.selected ? "selected" : ""} ${agent.lifeStatus === "critical" ? "critical" : ""} ${isDeadAgent(agent) ? "dead" : ""}" data-agent="${agent.id}">
           <strong>${agent.name}｜${agent.job}</strong>
-          <span>${agent.movement ? `路上：${placeName(agent.movement.from)}→${placeName(agent.movement.to)}` : placeName(agent.position)}｜${agent.simulationLevel}｜${lifeStatusText(agent)}｜${agent.isSleeping ? "睡眠中" : agent.mood}｜精力 ${agent.energy}｜需求 ${needProfile(agent).dominant.label}${needProfile(agent).dominant.value}</span>
+          <span>${agent.movement ? `路上：${placeName(agent.movement.from)}→${placeName(agent.movement.to)}` : placeName(agent.position)}｜${agent.simulationLevel}｜${lifeStatusText(agent)}｜${agent.isSleeping ? "睡眠中" : agent.mood}｜精力 ${fmtStat(agent.energy)}｜需求 ${needProfile(agent).dominant.label}${fmtStat(needProfile(agent).dominant.value)}</span>
         </div>
       `).join("");
       byId("agentList").querySelectorAll("[data-agent]").forEach(row => {
@@ -11763,7 +11769,7 @@
           <div class="field"><span>年龄</span><strong>${agent.ageYears || inferAgeYears(agent)}岁${agent.ageDays || 0}天｜${age.label}｜健康敏感${Math.round(age.healthFragility * 100)}% 安全敏感${Math.round(age.safetyFragility * 100)}%</strong></div>
           <div class="field"><span>AI 模型</span><strong>${agentModel}</strong></div>
           <div class="field"><span>当前任务</span><strong>${currentTask}</strong></div>
-          <div class="field"><span>精力/睡眠</span><strong>${agent.energy} / ${agent.sleepQuality}</strong></div>
+          <div class="field"><span>精力/睡眠</span><strong>${fmtStat(agent.energy)} / ${fmtStat(agent.sleepQuality)}</strong></div>
         </div>
         <div class="field"><span>模拟层级/移动</span><strong>${agent.simulationLevel}${agent.movement ? `｜${placeName(agent.movement.from)} → ${placeName(agent.movement.to)}，预计 ${minutesToClock(agent.movement.arriveAt).text} 到达` : ""}</strong></div>
         <div class="field"><span>地点影响</span><strong>${effects || "无明显影响"}</strong></div>
