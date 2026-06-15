@@ -2,153 +2,24 @@
 
 **中文** | [English](README.en.md)
 
-AgentBox Town 是一个实验性的 AI 虚拟小镇模拟器。每个角色都生活在独立的 AgentBox 里，拥有自己的位置、日程、关系、记忆、需求、情绪、事件队列、行动过程和长期人格状态。
+AgentBox Town 是一个实验性的 AI 虚拟小镇模拟器。它把多个 AI 角色放进同一个小镇世界里，每个角色都有位置、日程、关系、记忆、需求、情绪、行动过程和长期人格状态。
 
-这个项目关注“像真实小镇一样运行”的多智能体模拟，而不是单纯生成剧情。AI 模块负责局部判断，本地规则负责强约束：世界状态、知识边界、移动、死亡、存档和越权审查都由本地系统兜底。
+项目目标不是单纯生成剧情，而是让小镇像一个会持续运转的社会系统：AI 负责局部判断，本地规则负责世界约束、知识边界、移动、死亡、存档和越权审查。
 
-## 功能
+## 当前能力
 
-- 支持 100+ 角色的小镇模拟
-- 每个角色拥有记忆、关系、多维情绪、需求、人格核心和长期目标
-- 支持日期、天气、地点制度、地点链和地点运行状态
-- 支持事件传播、关系惯性、社交流程、承诺债务和家庭同步
-- 支持多 Key 分流、分批并发和每个 Agent/模块单独设置模型
-- 存档以文件夹保存，包含角色文件和 AG 判断文件
-- WorldGuard 本地审查，限制隐藏 NPC、全知信息、瞬移、越权死亡和不可能行动
+- 支持 100+ 角色的小镇模拟。
+- 每个角色拥有记忆、关系、多维情绪、需求、长期目标和人格核心。
+- 支持日期、天气、地点制度、地点事件链、地点运行状态和每日计划。
+- 支持事件传播、关系惯性、社交流程、承诺债务、家庭同步和职业服务。
+- 支持多 Key 分流、分批并发、失败重试和每个 Agent / 角色独立模型配置。
+- 支持文件夹式存档：每个存档一个文件夹，角色、记忆、判断文件分开保存。
+- 支持本地 AI：Ollama、LM Studio、vLLM、llama.cpp server 等 OpenAI 兼容接口。
+- 支持手机端 Expo App 和浏览器监控界面。
 
-## Node 后台迁移进度
+## 运行方式
 
-当前后台运行控制权已经迁到 Node。`node-core-v1` 不再依赖浏览器循环来推进基础世界状态，并且已经接入服务端 AI 行动链：
-
-- 每一步先从存档读取世界状态，挑选有需求压力、事件队列或未完成过程的候选角色。
-- Node 调用 `Scheduler` 选择本轮真正行动的角色。
-- Node 按角色并发调用 `AgentAction`，请求会按 Key 池和每 Key 并发上限分流。
-- `AgentAction` 结果会写回角色当前任务、情绪、记忆、行动过程、移动请求和行动记录。
-- `TimePassageAgent` 已迁入 Node 链路，用于判断每个行动的耗时、是否完成、剩余时间活动和跨回合过程。
-- `StateSettlementAgent` 已迁入 Node 链路，并按每个行动拆成并发小请求，避免大 JSON 失败；补丁会被本地 reducer 限幅写入需求、情绪、记忆、关系和结算说明。
-- `NeedIntent / ContextRule / CrisisTriage / KnowledgeJudge / OutcomeJudge` 已迁入 Node 行动前判断链。
-- `LocationRuntime / ProcessManager / ProfessionService / SocialPattern` 已迁入 Node 上下文链。
-- `EventImpact / InformationPropagation / RelationshipDynamics / SocialProcess` 已迁入 Node 后置链，并对返回内容做压缩后写入运行缓存。
-- `SocialEmbedding / LocationInstitution / LocationDaily / LocationChain / DailyPlanner / SelfNarrative / PersonalityConsistency` 已接入 Node 0 点日结链。
-- 所有行动落地后，再由 Node core 推进虚拟时间、睡眠、生理衰退、基础进食/救治、移动到达和死亡检查。
-- 后台循环是串行的：上一轮 Scheduler、AgentAction 和 Node tick 全部完成后，才会等待间隔并进入下一轮。
-- 单步接口会立即返回 `stepping`，完整链路在后台继续执行，完成后状态变为 `paused`。
-- 暂停或停止后台时，会取消当前 AI 重试，避免后台一直卡在旧请求上。
-
-保留的兼容路径是 `headless-browser-shim`。后续还可以继续把 `NeedIntent / ContextRule / CrisisTriage / KnowledgeJudge / OutcomeJudge`、`StateSettlement`、信息传播、关系惯性和社交流程等后置 Agent 迁到纯 Node。
-
-## 项目主界面
-
-主界面不是单纯聊天窗口，而是一个可运行的小镇控制台：
-
-- 顶部操作区：启动、暂停、重置、保存、打开设置和查看每回合流程。
-- 存档管理：首次打开进入管理界面，可以创建、读取、删除存档；每个存档写入独立文件夹。
-- 小镇地图：显示地点和角色位置；地点详情、头像和天气信息默认收起，点击后展开，避免 100 人小镇界面拥挤。
-- 角色面板：查看角色位置、生命状态、年龄、职业、需求、多维情绪、关系、记忆、长期目标、当前过程和事件队列。
-- 设置面板：配置 AI 地址、模型、Key 池、每 Key 并发、分批大小、每轮虚拟时间、自动间隔，以及每个 Agent/角色的模型。
-- 状态栏和调用日志：实时显示模型、Key、Agent、耗时、成功/失败、重试等待和取消状态。
-- 每回合流程图：可在界面内展开/关闭，用来检查这一轮哪些 Agent 串行、哪些 Agent 并行。
-
-## 每回合调用图表
-
-GitHub 会直接渲染下面的 Mermaid 图表。为了避免 GitHub 的 Mermaid 布局器报错，调用图被拆成几个小图。
-
-主循环：
-
-```mermaid
-flowchart TD
-  A[回合开始] --> B[快照锁]
-  B --> C[天气 Agent]
-  C --> D[地点事件和地点每日]
-  D --> E[地点链 Agent]
-  E --> F[地点运行和社会模式]
-  F --> G[过程管理和职业服务]
-  G --> H[行动前判断 Agents]
-  H --> I[调度器]
-  I --> J[角色行动 Agent]
-  J --> K[时间流逝 Agent]
-  K --> L[状态提交 Agent]
-  L --> M[WorldGuard 和 Reducer]
-  M --> N[事件影响链]
-  N --> O[后置 Agents]
-  O --> P[本地时间推进]
-  P --> Q[睡眠和基础生理]
-  Q --> R[生理调制 Agent]
-  R --> S[移动和地点影响]
-  S --> T[需求和情绪联动]
-  T --> U[死亡检查]
-  U --> V[家庭同步]
-  V --> W{进入新一天}
-  W -->|否| X[自动存档]
-  W -->|是| Y[每日结算]
-  Y --> X
-```
-
-并发与重试：
-
-```mermaid
-flowchart LR
-  A[大任务] --> B[拆成多个 Agent 单位]
-  B --> C[按 Key 池和并发上限运行]
-  C --> D{本轮结果}
-  D -->|成功| E[进入下一阶段]
-  D -->|失败| F[等待同批其他任务完成]
-  F --> G[1000ms 后只重试失败单位]
-  G --> C
-  H[手动停止] --> I[取消当前重试队列]
-```
-
-行动前判断：
-
-```mermaid
-flowchart LR
-  A[需求意图] --> F[调度器]
-  B[场景规则] --> F
-  C[危机分诊] --> F
-  D[知识边界] --> F
-  E[后果判断] --> F
-  F --> G[行动队列]
-```
-
-事件和行动后处理：
-
-```mermaid
-flowchart TD
-  A[WorldGuard 通过的结果] --> B[事件影响 Agent]
-  B --> C[信息传播 Agent 分批并发]
-  C --> D[关系惯性 Agent 分批并发]
-  D --> E[社交流程 Agent 分批并发]
-  E --> F[多维状态 Agent]
-  E --> G[承诺债务 Agent]
-  E --> H[叙事 Reporter]
-  F --> I[状态落地]
-  G --> I
-  H --> I
-```
-
-0 点日结：
-
-```mermaid
-flowchart TD
-  A[每日结构结算] --> B[社会落点 Agent]
-  A --> C[地点制度 Agent]
-  B --> D[地点每日 Agent]
-  C --> D
-  D --> E[地点链 Agent]
-  E --> F[每日计划 Agent]
-  F --> G[自我叙事 Agent]
-  G --> H[人格一致性 Agent]
-  H --> I[每日记忆衰退]
-  I --> J[自动存档]
-```
-
-## 运行
-
-环境要求：
-
-- 推荐 Windows，用 `start-ai-town-v2.cmd` 启动
-- Node.js 18 或更高版本
-- 不需要安装 npm 依赖
+推荐 Windows 下直接运行：
 
 ```bat
 start-ai-town-v2.cmd
@@ -160,89 +31,100 @@ start-ai-town-v2.cmd
 http://localhost:8788/
 ```
 
-同局域网设备访问：
+局域网访问：
 
-- 启动脚本默认监听 `0.0.0.0`，服务端启动时会打印 `LAN: http://本机IP:8788`
-- 手机或另一台电脑连接同一个 Wi-Fi 后，打开这个 LAN 地址
-- 如果打不开，通常是 Windows 防火墙拦截，需要允许 Node.js 访问专用网络，或放行 TCP `8788` 端口
+- 服务默认监听 `0.0.0.0`。
+- 启动后终端会显示 `LAN: http://本机IP:8788`。
+- 手机或其他电脑连接同一 Wi-Fi 后打开该地址。
+- 如果打不开，通常需要允许 Windows 防火墙放行 Node.js 或 TCP `8788`。
 
-显示端和后台运行：
-
-- 主界面：`http://localhost:8788/`，包含完整编辑、设置和模拟能力
-- 显示端：`http://localhost:8788/ai-town-monitor.html`，只读取后台存档和调用状态，不执行模拟计算
-- Node RuntimeController 负责维护后台状态：`running`、`paused`、`stepping`、`stopped`
-- 显示端里的“启动后台 / 暂停 / 单步 / 停止后台”都调用服务端 Runtime API
-- 当前计算引擎是 `node-core-v1`：服务端已能独立推进时间、睡眠、生理、基础进食/救治、移动到达和死亡检查，并写回存档
-- `headless-browser-shim` 保留为兼容回退；后续会继续把 Scheduler、AgentAction 和后置 Agent 链迁到纯 Node
-
-首次打开后，在应用设置里填写 AI 地址、模型和 API Key。
-
-也可以接入本地 AI，只要服务兼容 OpenAI `/v1/chat/completions`：
-
-- Ollama：API 地址填 `http://localhost:11434/v1`，模型填本机已安装模型，例如 `qwen2.5:7b`
-- LM Studio：API 地址通常填 `http://localhost:1234/v1`，模型填 LM Studio 当前加载模型名
-- vLLM / llama.cpp server：填对应的 OpenAI 兼容 `/v1` 地址和模型名
-
-本地 `localhost`、局域网地址和 `.local` 地址可以不填 API Key。系统会把本地 AI 当作 1 个可并发的虚拟 Key 池，仍然受“每 Key 并发上限”控制。
-
-也可以手动启动：
+手动启动：
 
 ```bash
 npm start
 ```
 
-## 配置
+## 首次配置
 
-项目支持两种配置方式。
+第一次打开后进入设置：
 
-应用内配置：
+- 云端 AI：填写 API 地址、模型和 API Key。
+- 本地 AI：填写 OpenAI 兼容 `/v1` 地址，API Key 可以留空。
+- 每 Key 并发、批大小、自动间隔、每步虚拟时间都可以在设置里调整。
 
-- 打开 `http://localhost:8788/`
-- 进入设置
-- 填写 AI 地址、模型、API Key、并发数、回合间隔和分批大小
-- 使用 Ollama / LM Studio 这类本地 AI 时，API Key 可以留空
-- 服务端会写入本地 `ai-town-config.json`
+常见本地 AI 地址：
 
-环境变量配置：
+- Ollama：`http://localhost:11434/v1`
+- LM Studio：`http://localhost:1234/v1`
+- vLLM / llama.cpp server：填写对应的 OpenAI 兼容 `/v1` 地址
 
-- `.env.example` 只是参考文件，服务端不会自动读取 `.env`
-- 如需用环境变量，手动运行 `npm start` 或 `node ai-town-v2-server.js`
-- `start-ai-town-v2.cmd` 会故意清空继承的 AI 环境变量，让新仓库首次打开进入配置模式
+本地配置会写入 `ai-town-config.json`，该文件已被 Git 忽略，不会上传。
 
-重要本地文件：
+## 主界面
 
-- `ai-town-config.json`：本地 AI 设置，已被 Git 忽略
-- `saves/`：项目当前目录下的本地存档文件夹，已被 Git 忽略
-- `.env` 和 `.env.local`：可选私有环境文件，已被 Git 忽略
+- 存档管理：创建、读取、删除存档。
+- 小镇地图：显示地点和角色位置，点击地点后查看详情。
+- 角色面板：查看需求、情绪、关系、记忆、目标、当前行动和事件队列。
+- 设置面板：配置 AI 地址、模型、Key 池、并发和各 Agent 模型。
+- 调用日志：查看每次模型调用、Key、耗时、成功、失败和重试。
+- 每回合流程：查看当前 Tick 的 Agent 调用链和并发情况。
+- 关系蛛网：查看角色之间的家庭、熟人、同事、同学和社会关系。
 
-存档路径固定为 `ai-town-v2-server.js` 所在目录下的 `saves/`。例如在仓库根目录运行时，存档会写入 `./saves/`。
+## 后台模拟流程
 
-主要环境变量：
+当前计算核心已经迁到 Node 后台。浏览器负责显示和控制，真正的模拟推进由服务端完成。
 
-| 名称 | 用途 | 默认值 |
-| --- | --- | --- |
-| `AI_TOWN_V2_PORT` | 本地服务端口 | `8788` |
-| `AI_TOWN_V2_HOST` | 监听地址；`0.0.0.0` 允许局域网访问 | `0.0.0.0` |
-| `AI_TOWN_API_KEYS` | AI Key 列表，可用逗号、分号或换行分隔；本地 AI 可为空 | 空 |
-| `AI_TOWN_BASE_URL` | OpenAI 兼容接口地址 | `https://api.openai.com/v1` |
-| `AI_TOWN_MODEL` | 默认模型 | `gpt-4.1-mini` |
-| `AI_TOWN_MAX_CONCURRENT_PER_KEY` | 每个 Key 的并发上限 | `20` |
-| `AI_TOWN_TIMEOUT_MS` | 上游请求超时时间 | `180000` |
-| `AI_TOWN_MAX_REQUEST_BODY_BYTES` | 本地接口请求体上限 | `10000000` |
-| `AI_TOWN_RETRY_DELAY_MS` | 临时上游错误重试等待 | `1000` |
+每轮大致流程：
 
-不要提交真实 API Key。
+1. 读取存档和运行状态。
+2. Life Engine 先处理简单本地生活动作，例如吃饭、睡觉、移动、休息。
+3. 调度候选角色，运行地点、过程、职业服务、社会模式等上下文 Agent。
+4. 运行需求意图、场景规则、危机分诊、知识边界、后果判断。
+5. Scheduler 选择本轮行动角色。
+6. AgentAction 生成角色行动。
+7. TimePassage 判断行动耗时、剩余时间和跨回合过程。
+8. WorldMaster 与 WorldGuard 审查行动是否能在当前世界成立。
+9. StateSettlement 结算需求、情绪、记忆、关系和地点影响。
+10. 事件影响、信息传播、关系惯性、社交流程等后置 Agent 更新世界。
+11. Node Core 推进虚拟时间、睡眠、生理衰退、基础救治、移动到达和死亡检查。
+12. 保存到存档文件夹。
 
-## 主要文件
+每日 0 点还会运行社会落点、地点制度、每日计划、自我叙事、人格一致性和记忆反思。
 
-- `ai-town-v2.html`：前端界面和模拟循环
-- `ai-town-v2-server.js`：本地 Node.js 服务端和 AI 代理
-- `start-ai-town-v2.cmd`：Windows 启动脚本
-- `package.json`：Node.js 脚本和版本要求
-- `.env.example`：环境变量参考
-- `ai-town-config.example.json`：本地配置参考
-- `AI虚拟小镇V2项目说明.md`：项目设计说明
+## 关键文件
+
+- `ai-town-v2-server.js`：Node 服务端、运行控制器和 AI 代理。
+- `ai-town-node-core.js`：本地时间、生理、移动、死亡等核心推进。
+- `ai-town-life-engine.js`：简单生活行为和计划执行。
+- `ai-town-interruptions.js`：危机打断和低状态倾向判断。
+- `ai-town-memory-stream.js`：记忆写入、检索和每日反思。
+- `ai-town-world-master.js` / `ai-town-world-guard.js`：行动落地审查。
+- `ai-town-v2.html`：PC 浏览器主界面。
+- `ai-town-monitor.html`：只读监控界面。
+- `mobile-app/`：Expo 手机 App。
+- `scripts/`：本地检查脚本。
+
+## 本地文件
+
+这些文件不会上传到 GitHub：
+
+- `ai-town-config.json`
+- `.env`
+- `saves/`
+- `certs/`
+- `node_modules/`
+- `mobile-app/android/`
+- `mobile-app/.gradle-local/`
+
+## 检查
+
+```bash
+npm run check:all
+npm run check:life
+npm run check:life-engine
+npm run check:memory
+```
 
 ## 说明
 
-这是本地 Demo 和研究原型，不是生产级系统。AI 输出会受到提示词和本地审查约束，但模拟质量仍依赖模型能力和接口稳定性。
+这是本地 Demo 和研究原型，不是生产级系统。AI 输出会被本地审查器约束，但模拟质量仍取决于模型能力、提示词质量和接口稳定性。

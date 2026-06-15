@@ -2,153 +2,24 @@
 
 [中文](README.md) | **English**
 
-AgentBox Town is an experimental AI virtual town simulator. Each character lives inside an independent AgentBox with its own position, schedule, relationships, memories, needs, emotions, event queue, action process, and long-term personality state.
+AgentBox Town is an experimental AI virtual town simulator. It places many AI characters inside one persistent town, where each character has a location, schedule, relationships, memories, needs, emotions, action process, and long-term identity state.
 
-The project focuses on believable multi-agent town simulation rather than simple story generation. AI modules judge local decisions, while local guards enforce world rules, knowledge boundaries, movement, mortality, and persistence.
+The goal is not simple story generation. The project tries to make a small town run like a continuing social system: AI modules judge local decisions, while local rules enforce world constraints, knowledge boundaries, movement, mortality, persistence, and permission checks.
 
-## Features
+## Current Features
 
-- Multi-agent virtual town with 100+ character support
-- Per-character memory, relationships, emotions, needs, identity core, and long-term goals
-- Weather, date, location institutions, location chains, and location runtime state
-- Event propagation, relationship dynamics, social processes, obligations, and family sync
-- Parallel AI task batching with configurable key pool and per-key concurrency
-- Folder-based save system with per-character files and AG judgement files
-- WorldGuard local validation to reduce hidden NPCs, omniscient knowledge, teleportation, and impossible actions
-
-## Node Runtime Migration Status
-
-Background runtime ownership has moved to Node. `node-core-v1` no longer depends on the browser loop for basic world progression, and it now runs a server-side AI action chain:
-
-- Each step reads the save folder and selects candidate characters with need pressure, event queues, or unfinished processes.
-- Node calls `Scheduler` to choose which characters act this round.
-- Node calls `AgentAction` for selected characters in parallel, distributed through the key pool and per-key concurrency limit.
-- `AgentAction` results are written back to character current tasks, emotions, memories, active processes, movement requests, and action records.
-- `TimePassageAgent` now runs in the Node chain to judge action duration, completion, remaining low-grain activity, and cross-round process state.
-- `StateSettlementAgent` now runs in the Node chain as one small parallel request per action to avoid large JSON failures; local reducers clamp and apply need, emotion, memory, relationship, and settlement-note patches.
-- `NeedIntent / ContextRule / CrisisTriage / KnowledgeJudge / OutcomeJudge` now run in the Node pre-judgement chain.
-- `LocationRuntime / ProcessManager / ProfessionService / SocialPattern` now run in the Node context chain.
-- `EventImpact / InformationPropagation / RelationshipDynamics / SocialProcess` now run in the Node post-action chain, with compacted runtime caches.
-- `SocialEmbedding / LocationInstitution / LocationDaily / LocationChain / DailyPlanner / SelfNarrative / PersonalityConsistency` are connected to the Node midnight settlement chain.
-- After actions are applied, Node core advances virtual time, sleep, physiological decay, basic eating/care, movement arrival, and mortality checks.
-- The background loop is serial: the next round is scheduled only after Scheduler, AgentAction, and Node tick have all completed.
-- The step API returns `stepping` immediately while the full chain continues in the background; status becomes `paused` when the step finishes.
-- Pausing or stopping the background runtime cancels current AI retries so old requests do not keep the backend stuck.
-
-`headless-browser-shim` remains as a compatibility fallback. Later stages can continue moving `NeedIntent / ContextRule / CrisisTriage / KnowledgeJudge / OutcomeJudge`, `StateSettlement`, information propagation, relationship dynamics, and social processes into pure Node.
-
-## Main Interface
-
-The main screen is a runnable town console, not just a chat window:
-
-- Top controls: start, pause, reset, save, open settings, and show the per-cycle flow.
-- Save manager: first launch opens the management screen; saves can be created, loaded, and deleted, with each save written to its own folder.
-- Town map: shows locations and character positions. Location details, avatars, and weather are collapsed until selected to keep 100-person towns readable.
-- Character panel: inspect position, life state, age, job, needs, multi-dimensional emotions, relationships, memories, long-term goals, active process, and event queue.
-- Settings panel: configure AI base URL, model, key pool, per-key concurrency, batch size, virtual minutes per cycle, automatic interval, and per-Agent/per-character models.
-- Status bar and call log: display model, key, Agent, duration, success/failure, retry wait, and cancellation state in real time.
-- Per-cycle flow panel: can be opened or closed inside the UI to inspect which Agents run serially and which run in parallel.
-
-## Per-Cycle Call Graph
-
-GitHub renders the following Mermaid charts directly in the repository page. The call graph is split into smaller sections so GitHub's Mermaid renderer can lay it out reliably.
-
-Main cycle:
-
-```mermaid
-flowchart TD
-  A[Cycle Start] --> B[Snapshot Lock]
-  B --> C[Weather Agent]
-  C --> D[Location Event and Daily Plan]
-  D --> E[Location Chain Agent]
-  E --> F[Location Runtime and Social Pattern]
-  F --> G[Process Manager and Profession Service]
-  G --> H[Pre-Judgement Agents]
-  H --> I[Scheduler]
-  I --> J[Agent Action]
-  J --> K[Time Passage Agent]
-  K --> L[State Settlement Agent]
-  L --> M[WorldGuard and Reducer]
-  M --> N[Event Impact Chain]
-  N --> O[Post Agents]
-  O --> P[Local Time Advance]
-  P --> Q[Sleep and Basic Life]
-  Q --> R[Time Decay Agent]
-  R --> S[Movement and Location Influence]
-  S --> T[Need and Emotion Coupling]
-  T --> U[Mortality Check]
-  U --> V[Family Sync]
-  V --> W{New Day}
-  W -->|No| X[Auto Save]
-  W -->|Yes| Y[Daily Settlement]
-  Y --> X
-```
-
-Concurrency and retry:
-
-```mermaid
-flowchart LR
-  A[Large Task] --> B[Split into Agent Units]
-  B --> C[Run by Key Pool and Concurrency Limit]
-  C --> D{Round Result}
-  D -->|Success| E[Continue to Next Stage]
-  D -->|Failure| F[Wait for Other Units in Same Round]
-  F --> G[Retry Failed Units after 1000ms]
-  G --> C
-  H[Manual Stop] --> I[Cancel Current Retry Queue]
-```
-
-Pre-judgement fan-in:
-
-```mermaid
-flowchart LR
-  A[Need Intent] --> F[Scheduler]
-  B[Context Rule] --> F
-  C[Crisis Triage] --> F
-  D[Knowledge Judge] --> F
-  E[Outcome Judge] --> F
-  F --> G[Action Queue]
-```
-
-Event and post-action chain:
-
-```mermaid
-flowchart TD
-  A[WorldGuard Approved Result] --> B[Event Impact Agent]
-  B --> C[Information Propagation Agent Batched Parallel]
-  C --> D[Relationship Dynamics Agent Batched Parallel]
-  D --> E[Social Process Agent Batched Parallel]
-  E --> F[MultiDimensional State Agent]
-  E --> G[Obligation Agent]
-  E --> H[Reporter]
-  F --> I[State Applied]
-  G --> I
-  H --> I
-```
-
-Midnight settlement:
-
-```mermaid
-flowchart TD
-  A[Daily Structural Settlement] --> B[Social Embedding Agent]
-  A --> C[Location Institution Agent]
-  B --> D[Location Daily Agent]
-  C --> D
-  D --> E[Location Chain Agent]
-  E --> F[Daily Planner]
-  F --> G[Self Narrative Agent]
-  G --> H[Personality Consistency Agent]
-  H --> I[Daily Memory Decay]
-  I --> J[Auto Save]
-```
+- 100+ character town simulation.
+- Per-character memory, relationships, multi-dimensional emotions, needs, long-term goals, and identity core.
+- Date, weather, location institutions, location chains, runtime location state, and daily plans.
+- Event propagation, relationship dynamics, social processes, obligations, family sync, and profession services.
+- Multi-key routing, batched parallel calls, retry handling, and per-Agent / per-character model settings.
+- Folder-based saves with per-character files, memory files, and AG judgement files.
+- Local AI support through OpenAI-compatible APIs such as Ollama, LM Studio, vLLM, and llama.cpp server.
+- Browser UI, read-only monitor UI, and Expo mobile app.
 
 ## Run
 
-Requirements:
-
-- Windows is recommended for `start-ai-town-v2.cmd`
-- Node.js 18 or newer
-- No npm dependencies are required
+On Windows, use:
 
 ```bat
 start-ai-town-v2.cmd
@@ -162,28 +33,10 @@ http://localhost:8788/
 
 LAN access:
 
-- The launcher listens on `0.0.0.0` by default, and the server prints `LAN: http://your-pc-ip:8788`
-- Open that LAN URL from a phone or another computer on the same Wi-Fi
-- If it does not open, Windows Firewall is usually blocking it; allow Node.js on private networks or allow TCP port `8788`
-
-Display and background runtime:
-
-- Main UI: `http://localhost:8788/`, with full editing, settings, and simulation controls
-- Display UI: `http://localhost:8788/ai-town-monitor.html`, which only reads saves and call status without running the simulation loop
-- Node RuntimeController owns background state: `running`, `paused`, `stepping`, and `stopped`
-- The display UI's start, pause, step, and stop buttons all call server-side Runtime APIs
-- The current compute engine is `node-core-v1`: the server can now advance time, sleep, physiology, basic eating/care, movement arrival, and mortality checks directly, then write the save back
-- `headless-browser-shim` remains as a compatibility fallback; later stages will move Scheduler, AgentAction, and post-Agent chains into pure Node
-
-On first launch, configure your AI base URL, model, and API keys in the app settings.
-
-Local AI is supported when the server exposes an OpenAI-compatible `/v1/chat/completions` API:
-
-- Ollama: use `http://localhost:11434/v1`, with an installed model such as `qwen2.5:7b`
-- LM Studio: usually `http://localhost:1234/v1`, with the currently loaded model name
-- vLLM / llama.cpp server: use the corresponding OpenAI-compatible `/v1` base URL and model name
-
-For `localhost`, LAN, and `.local` base URLs, API keys may be left empty. The server treats local AI as one virtual key pool and still applies the per-key concurrency limit.
+- The server listens on `0.0.0.0` by default.
+- The launcher prints `LAN: http://your-pc-ip:8788`.
+- Open that address from a phone or another computer on the same Wi-Fi.
+- If it does not load, allow Node.js or TCP `8788` through Windows Firewall.
 
 Manual startup:
 
@@ -191,66 +44,87 @@ Manual startup:
 npm start
 ```
 
-## Configuration
+## First Setup
 
-There are two supported configuration paths.
+Open settings on first launch:
 
-In-app configuration:
+- Cloud AI: set API base URL, model, and API keys.
+- Local AI: set an OpenAI-compatible `/v1` base URL; the API key can be empty.
+- Per-key concurrency, batch size, auto interval, and virtual minutes per step are configurable.
 
-- Open `http://localhost:8788/`
-- Open settings
-- Fill in AI base URL, model, API keys, concurrency, tick interval, and batch size
-- For local AI such as Ollama or LM Studio, the API key field can stay empty
-- The server writes `ai-town-config.json`
+Common local AI URLs:
 
-Environment variables:
+- Ollama: `http://localhost:11434/v1`
+- LM Studio: `http://localhost:1234/v1`
+- vLLM / llama.cpp server: use the corresponding OpenAI-compatible `/v1` endpoint
 
-- Copy `.env.example` only as a reference; the server does not auto-load `.env`
-- Start manually with `npm start` or `node ai-town-v2-server.js`
-- `start-ai-town-v2.cmd` intentionally clears inherited AI environment variables so a fresh checkout opens in setup mode
+Local settings are written to `ai-town-config.json`, which is ignored by Git.
 
-Important local files:
+## Main UI
 
-- `ai-town-config.json` - generated local AI settings; ignored by Git
-- `saves/` - local save folders inside the project directory; ignored by Git
-- `.env` and `.env.local` - optional private environment files; ignored by Git
+- Save manager: create, load, and delete save folders.
+- Town map: inspect places and character positions.
+- Character panel: inspect needs, emotions, relationships, memories, goals, current action, and event queue.
+- Settings panel: configure AI endpoint, models, key pool, concurrency, and per-Agent models.
+- Call log: inspect model calls, keys, latency, success, failure, and retry state.
+- Per-cycle flow: inspect the current Tick call chain and parallel stages.
+- Relationship web: inspect family, acquaintance, coworker, classmate, and social relationships.
 
-Saves are fixed to the `saves/` directory beside `ai-town-v2-server.js`. For example, when running from the repository root, saves are written to `./saves/`.
+## Runtime Flow
 
-Main environment variables:
+The simulation core now runs in Node. The browser displays and controls the simulation; the server advances the world.
 
-| Name | Purpose | Default |
-| --- | --- | --- |
-| `AI_TOWN_V2_PORT` | Local server port | `8788` |
-| `AI_TOWN_V2_HOST` | Bind address; `0.0.0.0` allows LAN access | `0.0.0.0` |
-| `AI_TOWN_API_KEYS` | Comma/newline/semicolon separated AI keys; can be empty for local AI | empty |
-| `AI_TOWN_BASE_URL` | OpenAI-compatible base URL | `https://api.openai.com/v1` |
-| `AI_TOWN_MODEL` | Default model | `gpt-4.1-mini` |
-| `AI_TOWN_MAX_CONCURRENT_PER_KEY` | Per-key request concurrency | `20` |
-| `AI_TOWN_TIMEOUT_MS` | Upstream request timeout | `180000` |
-| `AI_TOWN_MAX_REQUEST_BODY_BYTES` | Max local API body size | `10000000` |
-| `AI_TOWN_RETRY_DELAY_MS` | Retry wait for temporary upstream errors | `1000` |
+Each round roughly does this:
 
-Never commit real API keys.
+1. Load save and runtime state.
+2. Life Engine handles simple local actions such as eating, sleeping, moving, and resting.
+3. Context Agents update location, process, profession service, and social-pattern context.
+4. Pre-judgement Agents run need intent, context rules, crisis triage, knowledge checks, and outcome checks.
+5. Scheduler selects characters for the round.
+6. AgentAction generates character actions.
+7. TimePassage judges duration, remaining time, and cross-round process state.
+8. WorldMaster and WorldGuard validate whether the action can happen in the current world.
+9. StateSettlement applies needs, emotions, memories, relationships, and location effects.
+10. Post Agents update event impact, information propagation, relationship dynamics, and social processes.
+11. Node Core advances time, sleep, physiology, basic care, movement arrival, and mortality checks.
+12. Save files are written back to the save folder.
 
-## Main Files
+At midnight, the server also runs social embedding, location institutions, daily plans, self narrative, personality consistency, and memory reflection.
 
-- `ai-town-v2.html` - frontend UI and simulation loop
-- `ai-town-v2-server.js` - local Node.js API server and AI proxy
-- `start-ai-town-v2.cmd` - Windows launcher
-- `package.json` - Node.js scripts and engine requirement
-- `.env.example` - optional environment variable reference
-- `ai-town-config.example.json` - local config file reference
-- `AI虚拟小镇V2项目说明.md` - project design notes
+## Key Files
 
-## Notes
+- `ai-town-v2-server.js`: Node server, runtime controller, and AI proxy.
+- `ai-town-node-core.js`: local time, physiology, movement, and mortality progression.
+- `ai-town-life-engine.js`: simple life actions and plan execution.
+- `ai-town-interruptions.js`: crisis interruption and low-state preference logic.
+- `ai-town-memory-stream.js`: memory write, retrieval, and daily reflection.
+- `ai-town-world-master.js` / `ai-town-world-guard.js`: action validation.
+- `ai-town-v2.html`: desktop browser UI.
+- `ai-town-monitor.html`: read-only monitor UI.
+- `mobile-app/`: Expo mobile app.
+- `scripts/`: local check scripts.
 
-This is a local demo and research prototype. It is not production hardened. AI outputs are constrained by prompts and local validation, but the simulator still depends on model quality and configured API reliability.
+## Local Files
 
-## Node Engineering Update
+These are intentionally not uploaded:
 
-- Added backend setup creation API: `POST /api/setup/create`.
-- Added split-file save read fallback from `characters/`, `places/`, `events/`, `relations/`, and `runtime/`.
-- Added persistent runtime progress at `saves/runtime-progress.json`.
-- Split AI routing helper into `ai-town-ai-router.js`.
-- Split local action validation into `ai-town-world-guard.js`.
+- `ai-town-config.json`
+- `.env`
+- `saves/`
+- `certs/`
+- `node_modules/`
+- `mobile-app/android/`
+- `mobile-app/.gradle-local/`
+
+## Checks
+
+```bash
+npm run check:all
+npm run check:life
+npm run check:life-engine
+npm run check:memory
+```
+
+## Note
+
+This is a local demo and research prototype, not a production system. Local guards constrain AI output, but simulation quality still depends on model capability, prompt quality, and API stability.
