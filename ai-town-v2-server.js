@@ -7,6 +7,13 @@ const { nodeStepPayload, minutesToClock } = require("./ai-town-node-core");
 const { guardAction } = require("./ai-town-world-guard");
 const { createAiRouter } = require("./ai-town-ai-router");
 const { agentContextFromWorld, normalizeAction, exportTownSft, writeJsonl } = require("./ai-town-sft-exporter");
+const jsonUtils = require("./ai-town-json-utils");
+const { ensureDailyPlans, currentPlanItem, normalizeDailyPlan } = require("./ai-town-planner");
+const { detectInterruption } = require("./ai-town-interruptions");
+const { runLifeEngine } = require("./ai-town-life-engine");
+const { appendMemory, retrieveRelevantMemories, runDailyReflection } = require("./ai-town-memory-stream");
+const { aggregateDecision } = require("./ai-town-decision-aggregator");
+const { judgeAction, mergeWorldMasterJudgement, applyWorldMasterPatch } = require("./ai-town-world-master");
 
 const PORT = Number(process.env.AI_TOWN_V2_PORT || 8788);
 const HOST = String(process.env.AI_TOWN_V2_HOST || "0.0.0.0");
@@ -21,7 +28,7 @@ const RUNTIME_PROGRESS_PATH = path.join(SAVE_DIR, "runtime-progress.json");
 const AI_TIMEOUT_MS = Number(process.env.AI_TOWN_TIMEOUT_MS || 180000);
 const MAX_REQUEST_BODY_BYTES = Number(process.env.AI_TOWN_MAX_REQUEST_BODY_BYTES || 10_000_000);
 const DEFAULT_MAX_CONCURRENT_PER_KEY = Number(process.env.AI_TOWN_MAX_CONCURRENT_PER_KEY || 20);
-const MAX_ACTIONS_HARD_LIMIT = 200;
+const MAX_ACTIONS_HARD_LIMIT = 30;
 const AI_RETRY_DELAY_MS = Number(process.env.AI_TOWN_RETRY_DELAY_MS || 1000);
 
 const aiConfig = {
@@ -36,7 +43,7 @@ const aiConfig = {
   maxConcurrentPerKey: DEFAULT_MAX_CONCURRENT_PER_KEY,
   judgementBatchSize: 5,
   schedulerIntervalMs: 2500,
-  virtualMinutesPerPulse: 5,
+  virtualMinutesPerPulse: 30,
   maxActionsPerCycle: 3
 };
 
@@ -213,29 +220,15 @@ function ensureDir(dirPath) {
 }
 
 function writeJsonFile(filePath, data) {
-  const safePath = assertInsideSaveDir(filePath);
-  fs.mkdirSync(path.dirname(safePath), { recursive: true });
-  fs.writeFileSync(safePath, `${JSON.stringify(sanitizeForJson(data), null, 2)}\n`, "utf8");
+  return jsonUtils.writeJsonFile(filePath, data, { assertPath: assertInsideSaveDir });
 }
 
 function sanitizeForJson(value, seen = new WeakSet()) {
-  if (value === undefined || typeof value === "function" || typeof value === "symbol") return null;
-  if (typeof value === "number") return Number.isFinite(value) ? value : 0;
-  if (typeof value === "string") return value.replace(/\u0000/g, "").replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/g, "").replace(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "");
-  if (!value || typeof value !== "object") return value;
-  if (seen.has(value)) return null;
-  seen.add(value);
-  if (Array.isArray(value)) return value.map(item => sanitizeForJson(item, seen));
-  const output = {};
-  Object.entries(value).forEach(([key, item]) => {
-    if (item !== undefined && typeof item !== "function" && typeof item !== "symbol") output[key] = sanitizeForJson(item, seen);
-  });
-  seen.delete(value);
-  return output;
+  return jsonUtils.sanitizeForJson(value, seen);
 }
 
 function safeJsonClone(value) {
-  return JSON.parse(JSON.stringify(sanitizeForJson(value)));
+  return jsonUtils.safeJsonClone(value);
 }
 
 function pushCallLog(entry) {
@@ -541,6 +534,7 @@ function modelForTask(task, payload) {
   if (task === "knowledgeJudgeAgent") return aiConfig.moduleModels.knowledgeJudgeAgent || aiConfig.moduleModels.review || aiConfig.moduleModels.memory || aiConfig.model;
   if (task === "outcomeJudgeAgent") return aiConfig.moduleModels.outcomeJudgeAgent || aiConfig.moduleModels.review || aiConfig.moduleModels.heaven || aiConfig.model;
   if (task === "familySyncAgent") return aiConfig.moduleModels.familySyncAgent || aiConfig.moduleModels.memory || aiConfig.moduleModels.relation || aiConfig.model;
+  if (task === "worldMasterAgent") return aiConfig.moduleModels.worldMasterAgent || aiConfig.moduleModels.review || aiConfig.moduleModels.stateSettlementAgent || aiConfig.moduleModels.heaven || aiConfig.model;
   if (task === "timePassageAgent") return aiConfig.moduleModels.timePassageAgent || aiConfig.moduleModels.processManagerAgent || aiConfig.moduleModels.stateSettlementAgent || aiConfig.moduleModels.agentAction || aiConfig.model;
   if (task === "reporter") return aiConfig.moduleModels.reporter || aiConfig.model;
   if (task === "dailyPlanner") return aiConfig.moduleModels.dailyPlanner || aiConfig.moduleModels.heaven || aiConfig.moduleModels.memory || aiConfig.model;
@@ -633,12 +627,7 @@ function publicMetrics() {
 }
 
 function readJsonIfExists(filePath, fallback = null) {
-  try {
-    if (!fs.existsSync(filePath)) return fallback;
-    return JSON.parse(fs.readFileSync(filePath, "utf8").replace(/^\uFEFF/, ""));
-  } catch {
-    return fallback;
-  }
+  return jsonUtils.readJsonIfExists(filePath, fallback);
 }
 
 function folderSize(dirPath) {
@@ -729,7 +718,13 @@ function agentStateSnapshot(agent = {}) {
     mood: agent.mood,
     currentTask: agent.currentTask,
     activeProcess: agent.activeProcess || null,
-    actionPlan: agent.actionPlan || []
+    actionPlan: agent.actionPlan || [],
+    dailyPlan: agent.dailyPlan || [],
+    dailyPlanDay: agent.dailyPlanDay ?? null,
+    planGeneratedAt: agent.planGeneratedAt || 0,
+    decisionState: agent.decisionState || null,
+    reflection: agent.reflection || null,
+    worldMasterJudgement: agent.worldMasterJudgement || null
   };
 }
 
@@ -742,6 +737,8 @@ function agentJudgementSnapshot(agent = {}) {
     crisisTriage: agent.crisisTriage || null,
     knowledgeJudgement: agent.knowledgeJudgement || null,
     outcomeJudgement: agent.outcomeJudgement || null,
+    decisionState: agent.decisionState || null,
+    worldMasterJudgement: agent.worldMasterJudgement || null,
     lastTimePassage: agent.lastTimePassage || null,
     multiDimensionalNotes: agent.multiDimensionalNotes || [],
     knowledgeAudit: agent.knowledgeAudit || [],
@@ -829,6 +826,9 @@ function writeWorldTables(saveFolder, world = {}) {
       professionServiceState: world.professionServiceState || null,
       socialPatterns: world.socialPatterns || null,
       dailyAgentState: world.dailyAgentState || null,
+      lifeEngineState: world.lifeEngineState || null,
+      memoryReflectionState: world.memoryReflectionState || null,
+      worldMasterState: world.worldMasterState || null,
       progress: runtimeProgress
     }]
   ];
@@ -848,6 +848,14 @@ function writeWorldTables(saveFolder, world = {}) {
   });
 }
 
+function writeSaveRuntimeProgress(slot, progress = runtimeProgress) {
+  try {
+    const runtimeDir = path.join(saveFolderFor(slot), "runtime");
+    ensureDir(runtimeDir);
+    writeJsonFile(path.join(runtimeDir, "progress.json"), progress || runtimeProgress);
+  } catch {}
+}
+
 function writeJudgementFiles(saveFolder, world = {}) {
   const agDir = path.join(saveFolder, "ag-judgements");
   if (fs.existsSync(agDir)) fs.rmSync(assertInsideSaveDir(agDir), { recursive: true, force: true });
@@ -859,6 +867,8 @@ function writeJudgementFiles(saveFolder, world = {}) {
   writeJsonFile(path.join(agDir, "crisis-triage.json"), pickAgentField("crisisTriage"));
   writeJsonFile(path.join(agDir, "knowledge-judgement.json"), pickAgentField("knowledgeJudgement"));
   writeJsonFile(path.join(agDir, "outcome-judgement.json"), pickAgentField("outcomeJudgement"));
+  writeJsonFile(path.join(agDir, "decision-state.json"), pickAgentField("decisionState"));
+  writeJsonFile(path.join(agDir, "world-master.json"), pickAgentField("worldMasterJudgement"));
   writeJsonFile(path.join(agDir, "time-passage.json"), pickAgentField("lastTimePassage"));
   writeJsonFile(path.join(agDir, "process-runtime.json"), world.processRuntime || { updates: [], logs: [], updatedAt: 0 });
   writeJsonFile(path.join(agDir, "social-patterns.json"), world.socialPatterns || { households: [], groups: [], pairs: [], notes: [], updatedAt: 0 });
@@ -868,7 +878,7 @@ function writeJudgementFiles(saveFolder, world = {}) {
   writeJsonFile(path.join(agDir, "location-runtime.json"), world.locationRuntime || {});
   writeJsonFile(path.join(agDir, "profession-services.json"), world.professionServiceRequests || []);
   writeJsonFile(path.join(agDir, "event-impacts.json"), world.eventImpacts || []);
-  writeJsonFile(path.join(agDir, "information-flow.json"), world.informationFlow || []);
+  writeJsonFile(path.join(agDir, "information-flow.json"), world.informationFlows || world.informationFlow || []);
   writeJsonFile(path.join(agDir, "relationship-dynamics.json"), world.relationshipDynamics || { pairs: [], notes: [], updatedAt: 0 });
   writeJsonFile(path.join(agDir, "social-processes.json"), world.socialProcesses || []);
   writeJsonFile(path.join(agDir, "personality-profiles.json"), agents.map(agent => ({ id: agent.id, name: agent.name, personalityProfile: agent.personalityProfile || null, identityCore: agent.identityCore || null, identityStability: agent.identityStability || null })));
@@ -955,7 +965,7 @@ function readSplitSavePayload(slot) {
     places: Array.isArray(places) ? places : worldState.places || [],
     records: events.records || worldState.records || [],
     eventImpacts: events.eventImpacts || worldState.eventImpacts || [],
-    informationFlows: events.informationFlows || worldState.informationFlows || [],
+    informationFlows: events.informationFlows || worldState.informationFlows || worldState.informationFlow || [],
     socialProcesses: events.socialProcesses || worldState.socialProcesses || [],
     relationshipDynamics: relations.relationshipDynamics || worldState.relationshipDynamics || [],
     households: relations.households || worldState.households || [],
@@ -964,7 +974,10 @@ function readSplitSavePayload(slot) {
     processRuntimeState: runtime.processRuntimeState || worldState.processRuntimeState || null,
     professionServiceState: runtime.professionServiceState || worldState.professionServiceState || null,
     socialPatterns: runtime.socialPatterns || worldState.socialPatterns || null,
-    dailyAgentState: runtime.dailyAgentState || worldState.dailyAgentState || null
+    dailyAgentState: runtime.dailyAgentState || worldState.dailyAgentState || null,
+    lifeEngineState: runtime.lifeEngineState || worldState.lifeEngineState || null,
+    memoryReflectionState: runtime.memoryReflectionState || worldState.memoryReflectionState || null,
+    worldMasterState: runtime.worldMasterState || worldState.worldMasterState || null
   };
   return {
     version: 2,
@@ -1286,6 +1299,8 @@ function setupEnsureHouseholdCoverage(world = {}) {
 
 function setupRepairPlacement(world = {}) {
   const places = Array.isArray(world.places) ? world.places : [];
+  const validPlaceIds = new Set(places.map(place => String(place?.id || "")).filter(Boolean));
+  const isValidPlace = place => validPlaceIds.has(String(place || ""));
   const clock = minutesToClock(Number(world.clock || world.startClock || 8 * 60));
   const h = clock.h;
   const school = setupFindPlace(places, [/school|学校|education/i], "");
@@ -1297,17 +1312,38 @@ function setupRepairPlacement(world = {}) {
   const park = setupFindPlace(places, [/park|公园|river|河|leisure/i], square);
   const shopPlaces = places.filter(place => /store|shop|market|breakfast|restaurant|小卖|店|市场|早餐|饭馆|food/i.test(`${place.id || ""} ${place.name || ""} ${place.type || ""}`)).map(place => place.id);
   const setPlace = (agent, place) => {
-    if (!place || !places.some(item => item.id === place)) return;
+    if (!isValidPlace(place)) return false;
     agent.place = place;
     agent.position = place;
+    return true;
+  };
+  const keepRuntimePlace = agent => {
+    const position = String(agent.position || "");
+    const place = String(agent.place || "");
+    if (isValidPlace(position)) {
+      agent.position = position;
+      agent.place = position;
+      return true;
+    }
+    if (isValidPlace(place)) {
+      agent.position = place;
+      agent.place = place;
+      return true;
+    }
+    return false;
   };
   (world.agents || []).forEach((agent, index) => {
     if (!agent || agent.lifeStatus === "dead") return;
+    if (keepRuntimePlace(agent)) return;
     const job = String(agent.job || "");
     const age = Number(agent.ageYears || ((agent.ageDays || 0) / 365) || 30);
     const home = setupHouseholdHome(world, agent);
     const isStudent = /学生|小学|中学|student/i.test(job) || age < 18;
     if (isStudent) {
+      setPlace(agent, h >= 7 && h < 17 ? school : home);
+      return;
+    }
+    if (/老师|教师|校工|校医|teacher|school/i.test(job)) {
       setPlace(agent, h >= 7 && h < 17 ? school : home);
       return;
     }
@@ -1341,6 +1377,8 @@ function setupRepairPlacement(world = {}) {
 
 function normalizeWorldBeforeSave(world = {}) {
   if (!Array.isArray(world.agents)) return world;
+  normalizeWorldEventTimes(world);
+  normalizeLocationRuntimeStaff(world);
   const existingSocial = world.socialStructures && typeof world.socialStructures === "object" ? world.socialStructures : {};
   if (!Array.isArray(world.households) && Array.isArray(existingSocial.households)) world.households = cloneSocialRows(existingSocial.households);
   if (!Array.isArray(world.groups) && Array.isArray(existingSocial.groups)) world.groups = cloneSocialRows(existingSocial.groups);
@@ -1374,6 +1412,53 @@ function normalizeWorldBeforeSave(world = {}) {
   return world;
 }
 
+function normalizeLocationRuntimeStaff(world = {}) {
+  const byId = new Map((world.agents || []).map(agent => [agent.id, agent]));
+  const normalizeOne = location => {
+    if (!location || typeof location !== "object") return location;
+    const placeId = String(location.placeId || location.id || "");
+    if (!placeId) return location;
+    if (Array.isArray(location.staffPresent)) {
+      location.staffPresent = location.staffPresent
+        .map(id => String(id || ""))
+        .filter(id => {
+          const agent = byId.get(id);
+          return agent && (agent.position || agent.place) === placeId && agent.lifeStatus !== "dead";
+        });
+    }
+    return location;
+  };
+  if (Array.isArray(world.locationRuntimeState)) world.locationRuntimeState = world.locationRuntimeState.map(normalizeOne);
+  else if (world.locationRuntimeState && typeof world.locationRuntimeState === "object") Object.values(world.locationRuntimeState).forEach(normalizeOne);
+  return world;
+}
+
+function normalizeWorldEventTimes(world = {}) {
+  const clock = Number(world.clock || 0);
+  const time = nodeRuntimeClockText(world);
+  const normalize = event => {
+    if (!event || typeof event !== "object") return event;
+    const parsedClock = clockFromEventTime(event.time);
+    if (!Number.isFinite(Number(event.clock))) event.clock = Number.isFinite(parsedClock) ? parsedClock : clock;
+    if (!event.time) event.time = time;
+    if (!event.source) event.source = "node-runtime";
+    return event;
+  };
+  ["records", "logs", "publicEvents"].forEach(key => {
+    if (Array.isArray(world[key])) world[key] = world[key].map(normalize);
+  });
+  return world;
+}
+
+function clockFromEventTime(timeText = "") {
+  const match = String(timeText || "").match(/(\d{1,2}):(\d{2})/);
+  if (!match) return NaN;
+  const hour = Number(match[1]);
+  const minute = Number(match[2]);
+  if (!Number.isFinite(hour) || !Number.isFinite(minute)) return NaN;
+  return hour * 60 + minute;
+}
+
 function nodeRuntimePlaceId(world, agent) {
   return agent?.position || agent?.place || "";
 }
@@ -1387,7 +1472,176 @@ function nodeRuntimePlace(world, placeId) {
   return places.find(place => place.id === placeId) || { id: placeId, name: placeId || "unknown" };
 }
 
-function nodeRuntimeAgentBrief(agent) {
+function nodeRuntimeMemoryItems(agent = {}) {
+  const memory = agent.memory && typeof agent.memory === "object" ? agent.memory : {};
+  const layerWeight = { emotional: 1.5, long: 1.25, secret: 1.15, short: 1.0, rumor: 0.65 };
+  return Object.entries(layerWeight).flatMap(([layer, multiplier]) => {
+    const items = Array.isArray(memory[layer]) ? memory[layer] : [];
+    return items.slice(0, layer === "short" ? 12 : 8).map(item => {
+      const text = String(item?.text || item || "").trim();
+      const importance = clampNumber(item?.importance, 1, 5, 3);
+      const strength = Number.isFinite(Number(item?.strength)) ? clampNumber(item.strength, 0, 100, 50) / 50 : 1;
+      return { layer, text, weight: Math.max(1, Math.round(importance * multiplier * strength)) };
+    }).filter(item => item.text);
+  });
+}
+
+function nodeRuntimeBumpWeighted(list, id, name, weight, reason, max = 8) {
+  if (!id && !name) return;
+  const key = id || name;
+  const existing = list.find(item => (item.id || item.name) === key);
+  if (existing) {
+    existing.weight = clampNumber(Number(existing.weight || 0) + weight, 0, 100, 0);
+    if (reason && !existing.reasons.includes(reason)) existing.reasons.push(reason);
+  } else {
+    list.push({ id, name, weight: clampNumber(weight, 0, 100, 0), reasons: reason ? [reason] : [] });
+  }
+  list.sort((a, b) => Number(b.weight || 0) - Number(a.weight || 0));
+  list.splice(max);
+}
+
+function nodeRuntimeEmotionModulation(agent = {}) {
+  const e = agent.emotionVector || agent.emotions || {};
+  const identity = agent.identityCore || {};
+  const biases = identity.biases || agent.personalityProfile?.identityBiases || {};
+  const value = (key, fallback = 50) => clampNumber(e[key], 0, 100, fallback);
+  const bias = (key, fallback = 50) => clampNumber(biases[key], 0, 100, fallback);
+  const curious = value("curious", 30);
+  const anxious = value("anxious", 25);
+  const angry = value("angry", 10);
+  const tired = value("tired", 25);
+  const lonely = value("lonely", 20);
+  const hopeful = value("hopeful", 45);
+  const calm = value("calm", 45);
+  const sad = value("sad", 15);
+  const happy = value("happy", 45);
+  const riskAvoidance = bias("riskAvoidance", 50);
+  const askForHelp = bias("askForHelp", 50);
+  const conflictAvoidance = bias("conflictAvoidance", 50);
+  return {
+    curious,
+    anxious,
+    angry,
+    tired,
+    lonely,
+    hopeful,
+    calm,
+    sad,
+    happy,
+    riskAvoidance,
+    askForHelp,
+    conflictAvoidance,
+    explorationDrive: clampNumber(curious * 0.55 + hopeful * 0.2 + happy * 0.12 - anxious * 0.18 - tired * 0.22, 0, 100, 30),
+    avoidanceDrive: clampNumber(anxious * 0.42 + tired * 0.18 + riskAvoidance * 0.24 + sad * 0.12 - calm * 0.18 - hopeful * 0.08, 0, 100, 40),
+    helpDrive: clampNumber(lonely * 0.35 + anxious * 0.2 + askForHelp * 0.3 + hopeful * 0.1 - conflictAvoidance * 0.12, 0, 100, 40),
+    conflictCoolingDrive: clampNumber(angry * 0.42 + anxious * 0.18 + conflictAvoidance * 0.25 - calm * 0.18, 0, 100, 30)
+  };
+}
+
+function nodeRuntimeScaleWeightedList(list = [], factor = 1) {
+  list.forEach(item => {
+    item.weight = clampNumber(Math.round(Number(item.weight || 0) * factor), 0, 100, 0);
+  });
+  list.sort((a, b) => Number(b.weight || 0) - Number(a.weight || 0));
+}
+
+function nodeRuntimeMemoryActionWeights(world = {}, agent = {}) {
+  const items = nodeRuntimeMemoryItems(agent);
+  const places = Array.isArray(world.places) ? world.places : [];
+  const agents = Array.isArray(world.agents) ? world.agents : [];
+  const mood = nodeRuntimeEmotionModulation(agent);
+  const weights = {
+    priorityDelta: 0,
+    preferredActions: [],
+    avoidPlaces: [],
+    seekPlaces: [],
+    avoidAgents: [],
+    seekAgents: [],
+    notes: []
+  };
+  const addAction = (action, weight, reason) => nodeRuntimeBumpWeighted(weights.preferredActions, action, action, weight, reason, 10);
+  const hasNegative = text => /摔|伤|疼|病|怕|危险|事故|冲突|争吵|威胁|火灾|车祸|偷|抢|袭|糟|失败|晕|unsafe|hurt|accident|conflict|fear|danger|threat|injur/i.test(text);
+  const hasPositive = text => /帮|救|陪|照顾|安心|安全|熟悉|喜欢|常去|习惯|顺利|食物|吃|早餐|午餐|晚餐|医生|护士|诊所|help|rescue|safe|food|clinic|doctor|nurse/i.test(text);
+  const hasFood = text => /饿|饭|食物|早餐|午餐|晚餐|餐馆|小卖部|breakfast|restaurant|store|food|eat|meal/i.test(text);
+  const hasMedical = text => /病|疼|晕|医生|护士|诊所|医院|复查|medicine|medical|clinic|doctor|nurse|hurt/i.test(text);
+  const hasSocialHelp = text => /帮|救|陪|照顾|家人|邻居|同事|朋友|老师|help|rescue|escort|family|neighbor|friend/i.test(text);
+
+  items.forEach(item => {
+    const text = item.text;
+    const negative = hasNegative(text);
+    const positive = hasPositive(text);
+    if (!negative && !positive && !hasFood(text) && !hasMedical(text) && !hasSocialHelp(text)) return;
+    const base = item.weight;
+    if (negative) {
+      addAction("avoid_risk", base + 2, item.layer);
+      addAction("seek_safe_place", base, item.layer);
+      weights.priorityDelta += Math.min(8, base);
+    }
+    if (hasFood(text)) addAction("eat_or_buy_food", base + 2, item.layer);
+    if (hasMedical(text)) addAction("visit_clinic_or_seek_care", base + 2, item.layer);
+    if (hasSocialHelp(text)) addAction("seek_help_or_check_in", base + 1, item.layer);
+
+    places.forEach(place => {
+      const id = String(place.id || "");
+      const name = String(place.name || "");
+      if (!id && !name) return;
+      if (!text.includes(id) && (!name || !text.includes(name))) return;
+      if (negative) nodeRuntimeBumpWeighted(weights.avoidPlaces, id, name, base + 4, item.layer);
+      if (positive || hasFood(text) || hasMedical(text)) nodeRuntimeBumpWeighted(weights.seekPlaces, id, name, base + 3, item.layer);
+    });
+    agents.forEach(other => {
+      if (!other?.id || other.id === agent.id) return;
+      const name = String(other.name || "");
+      if (!text.includes(other.id) && (!name || !text.includes(name))) return;
+      if (negative && /冲突|争吵|威胁|害怕|conflict|threat|fear/i.test(text)) nodeRuntimeBumpWeighted(weights.avoidAgents, other.id, name, base + 4, item.layer);
+      if (positive || hasSocialHelp(text)) nodeRuntimeBumpWeighted(weights.seekAgents, other.id, name, base + 3, item.layer);
+    });
+  });
+
+  const currentPlace = nodeRuntimePlaceId(world, agent);
+  const currentAvoid = weights.avoidPlaces.find(place => place.id === currentPlace);
+  if (currentAvoid) {
+    weights.priorityDelta += Math.min(12, Number(currentAvoid.weight || 0));
+    addAction("leave_current_place", Math.min(10, Number(currentAvoid.weight || 0)), "current_place_memory");
+  }
+
+  const avoidFactor = clampNumber(0.75 + mood.avoidanceDrive / 70 - mood.explorationDrive / 180, 0.55, 1.85, 1);
+  const seekPlaceFactor = clampNumber(0.8 + mood.explorationDrive / 110 + mood.hopeful / 300 - mood.tired / 260, 0.65, 1.65, 1);
+  const seekAgentFactor = clampNumber(0.75 + mood.helpDrive / 95 + mood.lonely / 250 - mood.conflictAvoidance / 420, 0.65, 1.75, 1);
+  nodeRuntimeScaleWeightedList(weights.avoidPlaces, avoidFactor);
+  nodeRuntimeScaleWeightedList(weights.avoidAgents, clampNumber(avoidFactor + mood.conflictCoolingDrive / 180, 0.65, 1.9, 1));
+  nodeRuntimeScaleWeightedList(weights.seekPlaces, seekPlaceFactor);
+  nodeRuntimeScaleWeightedList(weights.seekAgents, seekAgentFactor);
+
+  if (mood.explorationDrive >= 55) addAction("observe_or_investigate", Math.round((mood.explorationDrive - 45) / 3), "curiosity");
+  if (mood.avoidanceDrive >= 60) addAction("avoid_risk", Math.round((mood.avoidanceDrive - 50) / 3), "anxiety_tiredness");
+  if (mood.helpDrive >= 58) addAction("seek_help_or_check_in", Math.round((mood.helpDrive - 48) / 3), "lonely_help_drive");
+  if (mood.conflictCoolingDrive >= 55) addAction("cool_down_or_avoid_conflict", Math.round((mood.conflictCoolingDrive - 45) / 3), "anger_conflict_modulation");
+  if (mood.tired >= 70) addAction("rest_or_go_home", Math.round((mood.tired - 55) / 3), "tired");
+  weights.priorityDelta += Math.round((mood.avoidanceDrive - 50) / 6) + Math.round((mood.helpDrive - 55) / 8) + Math.round((mood.explorationDrive - 70) / 10);
+  weights.priorityDelta = clampNumber(weights.priorityDelta, -10, 30, 0);
+  weights.emotionModulation = {
+    explorationDrive: Math.round(mood.explorationDrive),
+    avoidanceDrive: Math.round(mood.avoidanceDrive),
+    helpDrive: Math.round(mood.helpDrive),
+    conflictCoolingDrive: Math.round(mood.conflictCoolingDrive)
+  };
+  weights.notes = [
+    `emotion exploration ${weights.emotionModulation.explorationDrive}`,
+    `emotion avoidance ${weights.emotionModulation.avoidanceDrive}`,
+    `emotion help ${weights.emotionModulation.helpDrive}`,
+    ...weights.avoidPlaces.slice(0, 2).map(item => `avoid place ${item.name || item.id}`),
+    ...weights.seekPlaces.slice(0, 2).map(item => `seek place ${item.name || item.id}`),
+    ...weights.seekAgents.slice(0, 2).map(item => `seek ${item.name || item.id}`)
+  ].slice(0, 6);
+  return weights;
+}
+
+function nodeRuntimeAgentBrief(agent, world = null) {
+  const memoryActionWeights = world && typeof world === "object" ? nodeRuntimeMemoryActionWeights(world, agent) : null;
+  const planItem = world && typeof world === "object" ? currentPlanItem(world, agent) : null;
+  const interruption = world && typeof world === "object" ? detectInterruption(world, agent) : null;
+  const decision = world && typeof world === "object" ? aggregateDecision(world, agent, { plan: planItem, interruption }) : null;
   return {
     id: agent.id,
     name: agent.name,
@@ -1405,7 +1659,15 @@ function nodeRuntimeAgentBrief(agent) {
     eventQueue: Array.isArray(agent.eventQueue) ? agent.eventQueue.slice(0, 5) : [],
     longTermGoals: Array.isArray(agent.longTermGoals) ? agent.longTermGoals.slice(0, 3) : [],
     identityCore: agent.identityCore || null,
-    personalityProfile: agent.personalityProfile || null
+    personalityProfile: agent.personalityProfile || null,
+    dailyPlan: Array.isArray(agent.dailyPlan) ? agent.dailyPlan.slice(0, 24) : [],
+    currentPlanItem: planItem,
+    interruption,
+    decision,
+    decisionState: agent.decisionState || null,
+    reflection: agent.reflection || null,
+    worldMasterJudgement: agent.worldMasterJudgement || null,
+    memoryActionWeights
   };
 }
 
@@ -1426,10 +1688,25 @@ function nodeRuntimeCandidates(world) {
   const maxActions = Math.max(1, Math.min(MAX_ACTIONS_HARD_LIMIT, keyCapacity, Number(world?.config?.maxActionsPerCycle || aiConfig.maxActionsPerCycle || 3)));
   return agents
     .filter(agent => agent && agent.id && !isDeadAgent(agent))
-    .map(agent => ({ agent, pressure: nodeRuntimeNeedPressure(agent) }))
-    .filter(item => item.pressure >= 18 || item.agent.activeProcess || (Array.isArray(item.agent.eventQueue) && item.agent.eventQueue.length))
+    .map(agent => {
+      const memoryWeights = nodeRuntimeMemoryActionWeights(world, agent);
+      const planItem = currentPlanItem(world, agent);
+      const interruption = detectInterruption(world, agent);
+      const decision = aggregateDecision(world, agent, { plan: planItem, interruption });
+      const planPressure = planItem ? Number(planItem.priority || 45) : 0;
+      const interruptionPressure = interruption ? Number(interruption.priority || 0) : 0;
+      return {
+        agent,
+        pressure: Math.max(nodeRuntimeNeedPressure(agent), planPressure, interruptionPressure, decision.priority || 0) + Number(memoryWeights.priorityDelta || 0),
+        memoryWeights,
+        planItem,
+        interruption,
+        decision
+      };
+    })
+    .filter(item => item.decision?.route !== "skip" && (item.pressure >= 18 || item.agent.activeProcess || (Array.isArray(item.agent.eventQueue) && item.agent.eventQueue.length)))
     .sort((a, b) => b.pressure - a.pressure)
-    .map(item => nodeRuntimeAgentBrief(item.agent));
+    .map(item => ({ ...nodeRuntimeAgentBrief(item.agent, world), schedulingPressure: Math.round(item.pressure), memoryActionWeights: item.memoryWeights }));
 }
 
 function nodeRuntimeCounters(world) {
@@ -1479,7 +1756,8 @@ function nodeRuntimeSchedulerPayload(world, dueAgents) {
     places: Array.isArray(world.places) ? world.places.map(place => ({ id: place.id, name: place.name, type: place.type || "" })).slice(0, 120) : [],
     recentRecords: Array.isArray(world.records) ? world.records.slice(0, 12) : [],
     recentLogs: Array.isArray(world.logs) ? world.logs.slice(0, 12) : [],
-    simulationLevel: "node-core-v1"
+    simulationLevel: "node-core-v1",
+    memoryActionGuidance: "memoryActionWeights is extracted locally from memory and modulated by multidimensional emotion. Use priorityDelta, preferredActions, avoidPlaces, seekPlaces, avoidAgents, seekAgents and emotionModulation as behavior weights, not as new facts."
   };
 }
 
@@ -1605,6 +1883,88 @@ function nodeRuntimeSanitizeSocialProcesses(world, items = []) {
   }).filter(item => item.type && item.participants.length);
 }
 
+function nodeRuntimeSeedSocialProcesses(world, eventImpacts = [], informationFlows = []) {
+  const validIds = nodeRuntimeAgentIdSet(world);
+  const seeds = [];
+  const push = item => {
+    const participants = nodeRuntimeFilterIds(item.participants || [], validIds, 8);
+    if (participants.length < 2) return;
+    seeds.push({
+      id: item.id || `local-social-${world.clock || 0}-${seeds.length}`,
+      type: item.type,
+      participants,
+      knownBy: nodeRuntimeFilterIds(item.knownBy || participants, validIds, 8),
+      hiddenFrom: [],
+      truth: compactText(item.truth || item.title || "", "", 180),
+      beliefs: participants.map(agentId => ({ agentId, believes: compactText(item.belief || item.truth || item.title || "", "", 120), confidence: 70 })),
+      stage: item.stage || "noticed",
+      status: item.status || "open",
+      tension: clampNumber(item.tension, 0, 100, 35),
+      trustImpact: clampNumber(item.trustImpact, -30, 30, 0),
+      history: [compactText(item.history || item.truth || item.title || "", "", 160)].filter(Boolean),
+      nextPossibleActions: item.nextPossibleActions || ["询问情况", "提供帮助", "转告相关的人"],
+      updatedAt: world.clock || 0,
+      source: "local-social-seed",
+      at: world.clock || 0
+    });
+  };
+  const medicalRecords = (world.records || [])
+    .filter(record => record?.type === "medical")
+    .slice(0, 10);
+  medicalRecords.forEach(record => {
+    const participants = Array.isArray(record.agents) ? record.agents : [];
+    if (participants.length >= 2) {
+      push({
+        id: `medical-care-${record.clock || world.clock || 0}-${participants.slice(0, 4).join("-")}`,
+        type: "clarification",
+        participants,
+        knownBy: participants,
+        title: record.title,
+        truth: record.body || record.title,
+        belief: "有人身体严重不适，需要确认、照护或送医",
+        stage: "noticed",
+        tension: 55,
+        trustImpact: 2,
+        nextPossibleActions: ["确认病人状态", "协助送医", "通知家人或医护"]
+      });
+    }
+  });
+  (eventImpacts || []).forEach(impact => {
+    const direct = impact.directKnownBy || impact.knownBy || [];
+    const affected = (impact.affectedAgents || []).map(item => item.agentId);
+    const participants = [impact.sourceAgentId, ...direct, ...affected].filter(Boolean);
+    const text = `${impact.title || ""} ${impact.summary || ""} ${impact.fact || ""}`;
+    if (/冲突|误会|隐瞒|道歉|争执|吵|拒绝|求助|严重|送医|医疗/.test(text)) {
+      push({
+        id: `impact-social-${impact.eventId || impact.id || world.clock || 0}`,
+        type: /冲突|争执|吵/.test(text) ? "conflict" : /误会|隐瞒/.test(text) ? "misunderstanding" : "clarification",
+        participants,
+        knownBy: direct.length ? direct : participants,
+        truth: impact.summary || impact.title || text,
+        belief: impact.summary || impact.title || "这件事需要后续确认",
+        stage: "noticed",
+        tension: clampNumber(impact.severity, 1, 5, 2) * 15
+      });
+    }
+  });
+  (informationFlows || []).forEach(flow => {
+    const participants = nodeRuntimeFilterIds([...(flow.knownBy || []), ...(flow.transmissions || []).flatMap(tx => [tx.from, tx.to])], validIds, 8);
+    if (participants.length >= 2 && /求助|严重|身体|医疗|诊所|冲突|误会|拒绝/.test(`${flow.fact || ""}`)) {
+      push({
+        id: `flow-social-${flow.impactId || flow.id || world.clock || 0}`,
+        type: "clarification",
+        participants,
+        knownBy: participants,
+        truth: flow.fact,
+        belief: flow.fact,
+        stage: "noticed",
+        tension: clampNumber(flow.rumorRisk, 0, 100, 25)
+      });
+    }
+  });
+  return nodeRuntimeSanitizeSocialProcesses(world, seeds);
+}
+
 async function nodeRuntimeRunLocationAndProcessAgents(world, dueAgents) {
   const activeProcessAgents = (world.agents || []).filter(agent => agent?.activeProcess && agent.lifeStatus !== "dead").slice(0, 40).map(nodeRuntimeAgentBrief);
   const requests = (world.agents || [])
@@ -1682,11 +2042,22 @@ function nodeRuntimeActionPayload(world, agent, candidate = {}) {
   const placeId = nodeRuntimePlaceId(world, agent);
   const place = nodeRuntimePlace(world, placeId);
   const visibleAgents = nodeRuntimeVisibleAgents(world, agent);
+  const memoryActionWeights = nodeRuntimeMemoryActionWeights(world, agent);
+  const planItem = currentPlanItem(world, agent);
+  const interruption = detectInterruption(world, agent);
+  const decision = aggregateDecision(world, agent, { plan: planItem, interruption });
+  const relevantMemories = retrieveRelevantMemories(agent, {
+    clock: world.clock || 0,
+    type: decision.actionHint || interruption?.type || planItem?.localAction || "",
+    place: placeId,
+    title: planItem?.title || "",
+    reason: decision.reason || interruption?.reason || ""
+  }, 8);
   return {
-    agent: nodeRuntimeAgentBrief(agent),
+    agent: nodeRuntimeAgentBrief(agent, world),
     candidate,
     clock: world.clock || 0,
-    tickMinutes: Number(world?.config?.virtualMinutesPerPulse || aiConfig.virtualMinutesPerPulse || 60),
+    tickMinutes: Number(world?.config?.virtualMinutesPerPulse || aiConfig.virtualMinutesPerPulse || 30),
     calendar: world.weatherBox?.calendar || {},
     currentLocation: {
       ...place,
@@ -1703,6 +2074,15 @@ function nodeRuntimeActionPayload(world, agent, candidate = {}) {
     visibleKnowledge: Array.isArray(agent.knownFacts) ? agent.knownFacts.slice(0, 12) : [],
     memorySummary: agent.memorySummary || "",
     memory: agent.memory || {},
+    dailyPlan: Array.isArray(agent.dailyPlan) ? agent.dailyPlan.slice(0, 24) : [],
+    currentPlanItem: planItem,
+    interruption,
+    decision,
+    relevantMemories,
+    reflection: agent.reflection || null,
+    lifeEngineGuidance: "Local life engine already handled simple actions such as eating, commuting, resting, cleaning up, sleeping, and routine work. If this payload still reaches AgentAction, focus on complex conversation, social meaning, blocked process, unusual decision, or plan exception. If interruption exists, it overrides ordinary plan unless the plan is non-interruptible and no health/safety/hunger risk exists.",
+    memoryActionWeights,
+    memoryActionGuidance: "Use memoryActionWeights as soft behavior weights. emotionModulation.explorationDrive means curiosity/hope can support cautious exploration; avoidanceDrive means anxiety/tiredness/risk sensitivity strengthens avoidance; helpDrive means loneliness/help-seeking supports asking or checking in; conflictCoolingDrive means anger/conflict pressure supports cooling down. Health, safety or hunger urgency can override soft memory avoidance.",
     intentState: agent.intentState || null,
     contextJudgement: agent.contextJudgement || null,
     crisisTriage: agent.crisisTriage || null,
@@ -1739,67 +2119,52 @@ function nodeRuntimeAdjustEmotion(agent, changes = {}, limit = 8) {
   agent.emotions = agent.emotionVector;
 }
 
-function nodeRuntimeGuardAction(world, agent, aiResult) {
-  return guardAction({ world, agent, aiResult, visibleAgents: nodeRuntimeVisibleAgents(world, agent) });
+function nodeRuntimeApplyMemoryActionGuard(world, agent, guarded) {
+  const action = guarded?.action || {};
+  const targetPlace = String(action.newLocation || "");
+  if (!targetPlace) return guarded;
+  const weights = nodeRuntimeMemoryActionWeights(world, agent);
+  const mood = nodeRuntimeEmotionModulation(agent);
+  const safetyLow = Math.max(0, 45 - Number(agent.needs?.safety ?? 100));
+  const dynamicThreshold = clampNumber(
+    10 + mood.explorationDrive / 8 + mood.calm / 14 + mood.hopeful / 18 - mood.avoidanceDrive / 8 - mood.tired / 18 - safetyLow / 5,
+    5,
+    22,
+    10
+  );
+  const avoided = (weights.avoidPlaces || []).find(place => place.id === targetPlace && Number(place.weight || 0) >= dynamicThreshold);
+  if (!avoided) return guarded;
+  const text = `${action.type || ""} ${action.summary || ""} ${action.currentTask || ""} ${action.reason || ""}`;
+  const urgent = /emergency|urgent|clinic|medical|doctor|nurse|help|rescue|safety|health|hunger|求助|急|诊所|医院|医生|护士|安全|健康|饥|饿/.test(text)
+    || ["health", "safety", "hunger"].some(key => Number(agent.needs?.[key] ?? 100) <= (key === "hunger" ? 12 : 18));
+  if (urgent) return guarded;
+  const reason = `memory avoid ${avoided.name || avoided.id}`;
+  return {
+    ...guarded,
+    action: {
+      ...action,
+      type: "observe",
+      newLocation: "",
+      summary: `A strong memory bias discourages going to ${avoided.name || avoided.id}; the agent pauses and chooses a safer next step.`,
+      currentTask: "avoid risky remembered place",
+      memoryGuard: {
+        blockedLocation: avoided.id,
+        weight: avoided.weight,
+        threshold: Math.round(dynamicThreshold),
+        emotionModulation: weights.emotionModulation,
+        reason
+      }
+    }
+  };
 }
 
-function nodeRuntimeLegacyGuardAction(world, agent, aiResult) {
-  const action = aiResult?.action || {};
-  const guarded = { ...aiResult, action: { ...action } };
-  const text = `${action.type || ""} ${action.summary || ""} ${action.currentTask || ""}`;
-  const visible = nodeRuntimeVisibleAgents(world, agent);
-  const hasStaff = visible.some(item => /医生|护士|老师|店员|老板|职员|工作人员|医护/.test(String(item.job || "")));
-  const otherCount = visible.length;
-  const cnStaff = /医生|护士|老师|店员|老板|职员|工作人员|医护|收银|服务员/;
-  const cnSocial = /聊天|交谈|询问|寒暄|讨论|安慰|陪伴|社交|谈话/;
-  const cnForbidden = /死亡|死了|复活|全镇|所有人都知道|大家都知道|瞬间到达|立刻到达|凭空知道|上帝视角|系统|调度|队列/;
-  const visibleHasStaff = hasStaff || visible.some(item => cnStaff.test(String(item.job || "")));
-  if (!visibleHasStaff && cnStaff.test(text)) {
-    guarded.action.summary = "当前地点没有可见的对应工作人员，先维持当前状态并观察下一步机会。";
-    guarded.action.currentTask = "观察等待";
-    guarded.action.type = "wait";
-    guarded.action.newLocation = "";
-  }
-  if (otherCount === 0 && cnSocial.test(text)) {
-    guarded.action.summary = "周围没有可交谈的人，先独自整理思路。";
-    guarded.action.currentTask = "独自整理思路";
-    guarded.action.type = "wait";
-    guarded.action.relationChanges = [];
-  }
-  if (cnForbidden.test(text)) {
-    guarded.action.summary = "行动内容越权，角色只能做当前地点内可见、可执行的小动作。";
-    guarded.action.currentTask = "维持当前安排";
-    guarded.action.type = "wait";
-    guarded.action.newLocation = "";
-    guarded.action.newEvents = [];
-  }
-  if (guarded.action.newLocation && !(world.places || []).some(place => place.id === guarded.action.newLocation)) {
-    guarded.action.newLocation = "";
-  }
-  if (!hasStaff && /医生|护士|老师|店员|老板|服务员|收银|工作人员/.test(text)) {
-    guarded.action.summary = "没有合适的在场工作人员，先维持当前状态并观察下一步机会。";
-    guarded.action.currentTask = "观察等待";
-    guarded.action.type = "wait";
-    guarded.action.newLocation = "";
-  }
-  if (otherCount === 0 && /聊天|交谈|寒暄|询问|social|talk/.test(text)) {
-    guarded.action.summary = "周围没有可交谈的人，先独自整理思路。";
-    guarded.action.currentTask = "独自整理思路";
-    guarded.action.type = "wait";
-    guarded.action.relationChanges = [];
-  }
-  if (/死亡|复活|全镇|所有人都知道|瞬间到达/.test(text)) {
-    guarded.action.summary = "行动内容越权，角色只做当前地点内可见的小动作。";
-    guarded.action.currentTask = "维持当前安排";
-    guarded.action.type = "wait";
-    guarded.action.newLocation = "";
-    guarded.action.newEvents = [];
-  }
-  return guarded;
+function nodeRuntimeGuardAction(world, agent, aiResult) {
+  const guarded = guardAction({ world, agent, aiResult, visibleAgents: nodeRuntimeVisibleAgents(world, agent) });
+  return nodeRuntimeApplyMemoryActionGuard(world, agent, guarded);
 }
 
 function nodeRuntimeTimePassagePayload(world, actionItems) {
-  const tickMinutes = Math.max(1, Math.min(240, Number(world?.config?.virtualMinutesPerPulse || aiConfig.virtualMinutesPerPulse || 60)));
+  const tickMinutes = Math.max(1, Math.min(240, Number(world?.config?.virtualMinutesPerPulse || aiConfig.virtualMinutesPerPulse || 30)));
   return {
     time: nodeRuntimeClockText(world),
     virtualMinute: world.clock || 0,
@@ -1860,6 +2225,90 @@ async function nodeRuntimeRunTimePassage(world, actionItems) {
   });
 }
 
+function nodeRuntimeWorldMasterPayload(world, actionItems) {
+  return {
+    time: nodeRuntimeClockText(world),
+    virtualMinute: world.clock || 0,
+    locations: Array.isArray(world.places) ? world.places.map(place => ({ id: place.id, name: place.name, type: place.type || "" })).slice(0, 120) : [],
+    recentRecords: Array.isArray(world.records) ? world.records.slice(0, 10) : [],
+    recentLogs: Array.isArray(world.logs) ? world.logs.slice(0, 8) : [],
+    items: actionItems.map(item => {
+      const visibleAgents = nodeRuntimeVisibleAgents(world, item.agent);
+      return {
+        queueId: item.queueId,
+        agentId: item.agent.id,
+        agent: nodeRuntimeAgentBrief(item.agent, world),
+        currentLocation: nodeRuntimePlace(world, nodeRuntimePlaceId(world, item.agent)),
+        visibleAgents,
+        action: item.result?.action || {},
+        timePassage: item.timePassage || null,
+        candidate: nodeRuntimeCompactItem(item.candidate || {}, 140),
+        localJudgement: item.localWorldMasterJudgement || item.worldMasterJudgement || null,
+        allowedKnowledgeIds: [item.agent.id, ...visibleAgents.map(agent => agent.id)],
+        allowedPlaces: [
+          nodeRuntimePlaceId(world, item.agent),
+          item.result?.action?.newLocation || ""
+        ].filter(Boolean),
+        rule: "Only judge whether the action can actually land in this world. Do not create new actions, hidden NPCs, global knowledge, death, resurrection, weather, or completed outcomes without visible/local support."
+      };
+    })
+  };
+}
+
+function nodeRuntimeFindWorldMasterJudgement(result, item) {
+  const list = Array.isArray(result?.judgements)
+    ? result.judgements
+    : Array.isArray(result?.worldJudgements)
+      ? result.worldJudgements
+      : Array.isArray(result?.items)
+        ? result.items
+        : [];
+  const found = list.find(judgement => judgement?.queueId === item.queueId || judgement?.agentId === item.agent.id);
+  if (found) return found;
+  if (result && typeof result === "object" && (result.route || result.allowed !== undefined || result.reason)) return result;
+  return {};
+}
+
+async function nodeRuntimeRunWorldMaster(world, actionItems) {
+  actionItems = actionItems.filter(item => item?.agent && !isDeadAgent(item.agent));
+  if (!actionItems.length) return [];
+  const keyCapacity = Math.max(1, (aiConfig.apiKeys.length || (isLocalAiBaseUrl(aiConfig.baseUrl) ? 1 : 0) || 1) * Math.max(1, Number(aiConfig.maxConcurrentPerKey || 1)));
+  const concurrency = Math.max(1, Math.min(actionItems.length, keyCapacity));
+  const results = await aiRouter.runBatch(actionItems, concurrency, async item => {
+    const local = judgeAction(world, item.agent, item.result, {
+      candidate: item.candidate,
+      timePassage: item.timePassage,
+      decision: item.candidate?.decision
+    });
+    item.localWorldMasterJudgement = local;
+    const result = await callAiWithRetry("worldMasterAgent", nodeRuntimeWorldMasterPayload(world, [item]));
+    const aiJudgement = nodeRuntimeFindWorldMasterJudgement(result, item);
+    item.worldMasterJudgement = mergeWorldMasterJudgement(local, aiJudgement);
+    return item.worldMasterJudgement;
+  });
+  world.worldMasterState = {
+    lastRunClock: world.clock || 0,
+    mode: "local-plus-ai-per-action",
+    concurrency,
+    judgements: actionItems.map(item => ({
+      queueId: item.queueId,
+      agentId: item.agent.id,
+      agentName: item.agent.name || "",
+      ...(item.worldMasterJudgement || {})
+    })).slice(0, 80)
+  };
+  world.logs ||= [];
+  world.logs.unshift({
+    title: "WorldMasterAgent",
+    body: `AI assisted world judgement completed for ${results.length} actions; concurrency ${concurrency}.`,
+    type: "node_runtime",
+    time: nodeRuntimeClockText(world),
+    clock: world.clock || 0,
+    source: "node-world-master"
+  });
+  return results;
+}
+
 function nodeRuntimeStateSettlementPayload(world, actionItems) {
   return {
     time: nodeRuntimeClockText(world),
@@ -1895,7 +2344,41 @@ async function nodeRuntimeRunStateSettlement(world, actionItems) {
 }
 
 function nodeRuntimeFindPatch(patches, item) {
-  return (patches || []).find(patch => patch.queueId === item.queueId || patch.agentId === item.agent.id) || null;
+  const matches = (patches || []).filter(patch => patch.queueId === item.queueId || patch.agentId === item.agent.id);
+  if (!matches.length) return null;
+  if (matches.length === 1) return matches[0];
+  return matches.reduce((merged, patch) => ({
+    ...merged,
+    ...patch,
+    needDelta: { ...(merged.needDelta || {}), ...(patch.needDelta || {}) },
+    emotionDelta: { ...(merged.emotionDelta || {}), ...(patch.emotionDelta || {}) },
+    memoryWrites: [...(merged.memoryWrites || []), ...(patch.memoryWrites || [])].slice(0, 4),
+    relationImpacts: [...(merged.relationImpacts || []), ...(patch.relationImpacts || [])].slice(0, 6),
+    explanation: [merged.explanation || merged.reason, patch.explanation || patch.reason].filter(Boolean).join(" | ")
+  }), {});
+}
+
+function nodeRuntimeWorldMasterPatch(world, item) {
+  const judgement = item?.worldMasterJudgement;
+  if (!judgement || !item?.agent) return null;
+  applyWorldMasterPatch(item.agent, { ...judgement, at: world.clock || 0 });
+  const patch = {
+    queueId: item.queueId,
+    agentId: item.agent.id,
+    needDelta: judgement.needDelta || {},
+    emotionDelta: judgement.emotionDelta || {},
+    memoryWrites: judgement.memoryWrites || [],
+    explanation: `WorldMaster: ${judgement.reason || judgement.route || "checked"}`
+  };
+  if (judgement.allowed === false || judgement.route === "blocked") {
+    item.result ||= {};
+    item.result.action ||= {};
+    item.result.action.type = "wait";
+    item.result.action.summary = "WorldMaster blocked the action because it would change the world without valid conditions.";
+    item.result.action.currentTask = "waiting for valid conditions";
+    item.result.action.newLocation = "";
+  }
+  return patch;
 }
 
 function nodeRuntimeApplySettlementPatch(world, agent, patch) {
@@ -1904,19 +2387,17 @@ function nodeRuntimeApplySettlementPatch(world, agent, patch) {
   nodeRuntimeAdjustNeeds(agent, patch.needDelta || {}, 8);
   nodeRuntimeAdjustEmotion(agent, patch.emotionDelta || {}, 8);
   if (Array.isArray(patch.memoryWrites)) {
-    agent.memory ||= { short: [], long: [], emotional: [], secret: [], rumor: [] };
     patch.memoryWrites.slice(0, 2).forEach(memory => {
       const layer = ["short", "long", "emotional", "secret", "rumor"].includes(memory.layer) ? memory.layer : "short";
       const text = String(memory.text || "").slice(0, 180);
       if (!text) return;
-      agent.memory[layer] ||= [];
-      agent.memory[layer].unshift({
+      appendMemory(agent, {
         text,
+        layer,
         importance: Math.max(1, Math.min(5, Number(memory.importance || 3))),
         at: world.clock || 0,
         source: "node-state-settlement"
       });
-      agent.memory[layer] = agent.memory[layer].slice(0, 30);
     });
   }
   if (Array.isArray(patch.relationImpacts)) {
@@ -1996,16 +2477,14 @@ function nodeRuntimeApplyAction(world, agent, aiResult, timePassage = null, sett
     }
   }
   if (action.memory?.text) {
-    agent.memory ||= { short: [], long: [], emotional: [], secret: [], rumor: [] };
     const layer = ["short", "long", "emotional", "secret", "rumor"].includes(action.memory.layer) ? action.memory.layer : "short";
-    agent.memory[layer] ||= [];
-    agent.memory[layer].unshift({
+    appendMemory(agent, {
       text: String(action.memory.text).slice(0, 180),
+      layer,
       importance: Math.max(1, Math.min(5, Number(action.memory.importance || 3))),
       at: world.clock || 0,
       source: "node-agent-action"
     });
-    agent.memory[layer] = agent.memory[layer].slice(0, 30);
   }
   const targetPlace = String(action.newLocation || "");
   const exists = targetPlace && Array.isArray(world.places) && world.places.some(place => place.id === targetPlace);
@@ -2014,7 +2493,7 @@ function nodeRuntimeApplyAction(world, agent, aiResult, timePassage = null, sett
       from: nodeRuntimePlaceId(world, agent),
       to: targetPlace,
       startedAt: world.clock || 0,
-      arriveAt: Number(world.clock || 0) + Math.max(10, Math.min(90, Number(timePassage?.movement?.routeMinutes || timePassage?.spentMinutes || Number(world?.config?.virtualMinutesPerPulse || 60) / 2)))
+      arriveAt: Number(world.clock || 0) + Math.max(10, Math.min(90, Number(timePassage?.movement?.routeMinutes || timePassage?.spentMinutes || Number(world?.config?.virtualMinutesPerPulse || aiConfig.virtualMinutesPerPulse || 30) / 2)))
     };
   }
   nodeRuntimeApplySettlementPatch(world, agent, settlementPatch);
@@ -2054,11 +2533,11 @@ async function nodeRuntimeRunPostAgents(world, actionItems, settlementPatches = 
   );
   world.eventImpacts.unshift(...eventImpacts);
   world.eventImpacts = world.eventImpacts.slice(0, 80);
-  const propagationPayload = { ...nodeRuntimeWorldContext(world), eventImpacts: impact.eventImpacts || [] };
+  const propagationPayload = { ...nodeRuntimeWorldContext(world), eventImpacts: eventImpacts.length ? eventImpacts : world.eventImpacts.slice(0, 20), informationFlows: world.informationFlows || [] };
   const [propagation, dynamics, social] = await Promise.all([
     callAiWithRetry("informationPropagationAgent", propagationPayload),
     callAiWithRetry("relationshipDynamicsAgent", { ...propagationPayload, informationFlows: world.informationFlows || [] }),
-    callAiWithRetry("socialProcessAgent", { ...propagationPayload, relationshipDynamics: world.relationshipDynamics || [] })
+    callAiWithRetry("socialProcessAgent", { ...propagationPayload, relationshipDynamics: world.relationshipDynamics || [], existingProcesses: world.socialProcesses || [] })
   ]);
   if (!Array.isArray(world.informationFlows)) world.informationFlows = [];
   const informationFlows = nodeRuntimeDedupBySignature(
@@ -2074,9 +2553,10 @@ async function nodeRuntimeRunPostAgents(world, actionItems, settlementPatches = 
   world.relationshipDynamics = world.relationshipDynamics.slice(0, 120);
   if (!Array.isArray(world.socialProcesses)) world.socialProcesses = [];
   const processItems = social.processes || social.socialProcesses || social.updates || [];
+  const localSocialSeeds = nodeRuntimeSeedSocialProcesses(world, eventImpacts, informationFlows);
   const socialProcesses = nodeRuntimeDedupBySignature(
     world.socialProcesses,
-    nodeRuntimeSanitizeSocialProcesses(world, processItems),
+    [...nodeRuntimeSanitizeSocialProcesses(world, processItems), ...localSocialSeeds],
     ["type", "participants", "truth", "stage"]
   );
   world.socialProcesses.unshift(...socialProcesses);
@@ -2099,6 +2579,7 @@ function nodeRuntimeIsMidnightCross(beforeClock, afterClock) {
 }
 
 async function nodeRuntimeRunDailyAgents(world) {
+  runDailyReflection(world);
   const agents = (world.agents || []).filter(agent => agent?.id && agent.lifeStatus !== "dead").slice(0, 80).map(nodeRuntimeAgentBrief);
   const payload = nodeRuntimeWorldContext(world, agents);
   const [socialEmbedding, locationInstitution, locationDaily, locationChain, planner, narrative, personality] = await Promise.all([
@@ -2123,7 +2604,13 @@ async function nodeRuntimeRunDailyAgents(world) {
   (planner.agentPlans || []).forEach(item => {
     const agent = byId.get(item.agentId);
     if (!agent) return;
-    agent.actionPlan = Array.isArray(item.plans) ? item.plans.slice(0, 4) : agent.actionPlan || [];
+    const hourly = normalizeDailyPlan(item.hourlyPlan || item.dailyPlan || item.plans || [], world, agent);
+    if (hourly.length) {
+      agent.dailyPlan = hourly;
+      agent.dailyPlanDay = Math.floor(Number(world.clock || 0) / 1440);
+      agent.planGeneratedAt = world.clock || 0;
+    }
+    agent.actionPlan = Array.isArray(item.plans) ? item.plans.slice(0, 8) : agent.actionPlan || [];
   });
   (narrative.agentNarratives || narrative.narratives || []).forEach(item => {
     const agent = byId.get(item.agentId);
@@ -2139,7 +2626,7 @@ async function nodeRuntimeRunDailyAgents(world) {
   world.logs ||= [];
   world.logs.unshift({
     title: "Node Daily Agents",
-    body: "SocialEmbedding / LocationInstitution / LocationDaily / LocationChain / DailyPlanner / SelfNarrative / PersonalityConsistency completed",
+    body: "SocialEmbedding / LocationInstitution / LocationDaily / LocationChain / DailyPlanner / SelfNarrative / PersonalityConsistency / LocalReflection completed",
     type: "node_runtime",
     time: nodeRuntimeClockText(world),
     clock: world.clock || 0,
@@ -2149,7 +2636,7 @@ async function nodeRuntimeRunDailyAgents(world) {
 
 async function runNodeRuntimeStep(slot) {
   const safeSlot = safeSaveName(slot || runtimeSlot || listSaves()[0]?.slot || "autosave");
-  beginRuntimeProgress(safeSlot, 11);
+  beginRuntimeProgress(safeSlot, 14);
   try {
   updateRuntimeProgress("load", { phaseIndex: 1, currentTask: "load save" });
   const payload = readSavePayload(safeSlot);
@@ -2162,29 +2649,77 @@ async function runNodeRuntimeStep(slot) {
   const beforeClock = Number(world.clock || 0);
   const counters = nodeRuntimeCounters(world);
   counters.tick = Number(counters.tick || 0) + 1;
-  const dueAgents = nodeRuntimeCandidates(world);
+  ensureDailyPlans(world);
+  updateRuntimeProgress("life-engine", { phaseIndex: 2, currentTask: "local life actions" });
+  const lifeResult = runLifeEngine(world, { maxLocalActions: Number(world?.config?.maxLocalActionsPerTick || 10000) });
+  if (lifeResult.localActions.length) {
+    world.records ||= [];
+    lifeResult.localActions.slice(0, 40).forEach(action => {
+      world.records.unshift({
+        title: `${action.agentName || action.agentId} local life action`,
+        body: String(action.summary || action.type || "local life action").slice(0, 260),
+        type: "local_life_action",
+        agents: [action.agentId],
+        time: nodeRuntimeClockText(world),
+        clock: world.clock || 0,
+        source: "life-engine"
+      });
+    });
+    world.records = world.records.slice(0, 300);
+    world.logs ||= [];
+    world.logs.unshift({
+      title: "Life Engine",
+      body: `Local actions ${lifeResult.localActions.length}; AI candidates ${lifeResult.aiCandidates.length}`,
+      type: "node_runtime",
+      time: nodeRuntimeClockText(world),
+      clock: world.clock || 0,
+      source: "life-engine"
+    });
+  }
+  const handledByLife = new Set(lifeResult.handledIds || []);
+  const dueAgents = nodeRuntimeCandidates(world).filter(agent => !handledByLife.has(agent.id));
   const policy = nodeRuntimeSchedulePolicy(world, dueAgents);
-  updateRuntimeProgress("candidates", { phaseIndex: 2, currentTask: `${dueAgents.length} candidates` });
+  updateRuntimeProgress("candidates", { phaseIndex: 3, currentTask: `${dueAgents.length} candidates` });
   if (dueAgents.length) {
     const byId = new Map((world.agents || []).map(agent => [agent.id, agent]));
     if (policy.runContext) {
-      updateRuntimeProgress("context-agents", { phaseIndex: 3, currentTask: "context agents" });
+      updateRuntimeProgress("context-agents", { phaseIndex: 4, currentTask: "context agents" });
       await nodeRuntimeRunLocationAndProcessAgents(world, dueAgents);
       counters.context = Number(counters.context || 0) + 1;
     }
     if (policy.runPreJudgement) {
-      updateRuntimeProgress("pre-judgement", { phaseIndex: 4, currentTask: "pre judgement agents" });
+      updateRuntimeProgress("pre-judgement", { phaseIndex: 5, currentTask: "pre judgement agents" });
       await nodeRuntimeRunPreJudgement(world, dueAgents);
     }
-    updateRuntimeProgress("scheduler", { phaseIndex: 5, currentTask: "scheduler" });
+    updateRuntimeProgress("scheduler", { phaseIndex: 6, currentTask: "scheduler" });
     const scheduled = await callAiWithRetry("scheduler", nodeRuntimeSchedulerPayload(world, dueAgents));
     const selected = (Array.isArray(scheduled?.candidates) ? scheduled.candidates : [])
       .filter(item => {
         const agent = byId.get(item?.agentId);
         return agent && !isDeadAgent(agent);
+      })
+      .map(item => {
+        const agent = byId.get(item.agentId);
+        const decision = aggregateDecision(world, agent);
+        agent.decisionState = {
+          at: world.clock || 0,
+          time: nodeRuntimeClockText(world),
+          route: decision.route,
+          priority: decision.priority,
+          actionHint: decision.actionHint,
+          reason: decision.reason,
+          source: "node-decision-aggregator"
+        };
+        return {
+          ...item,
+          memoryActionWeights: nodeRuntimeMemoryActionWeights(world, agent),
+          currentPlanItem: currentPlanItem(world, agent),
+          interruption: detectInterruption(world, agent),
+          decision
+        };
       });
     const maxActions = Math.max(1, Math.min(MAX_ACTIONS_HARD_LIMIT, Number(world?.config?.maxActionsPerCycle || aiConfig.maxActionsPerCycle || 3)));
-    updateRuntimeProgress("agent-actions", { phaseIndex: 6, currentTask: `${Math.min(selected.length, maxActions)} action calls` });
+    updateRuntimeProgress("agent-actions", { phaseIndex: 7, currentTask: `${Math.min(selected.length, maxActions)} action calls` });
     const actionCalls = selected
       .filter(item => byId.has(item.agentId) && !isDeadAgent(byId.get(item.agentId)))
       .slice(0, maxActions)
@@ -2198,26 +2733,30 @@ async function runNodeRuntimeStep(slot) {
     const actionResults = await Promise.all(actionCalls);
     const successfulActions = actionResults.filter(item => item.status === "fulfilled" && !isDeadAgent(item.agent));
     if (successfulActions.length) {
-      updateRuntimeProgress("time-passage", { phaseIndex: 7, currentTask: `${successfulActions.length} actions` });
+      updateRuntimeProgress("time-passage", { phaseIndex: 8, currentTask: `${successfulActions.length} actions` });
       const passages = await nodeRuntimeRunTimePassage(world, successfulActions);
       successfulActions.forEach(item => {
         item.timePassage = passages.find(passage => passage.queueId === item.queueId || passage.agentId === item.agent.id) || null;
       });
-      updateRuntimeProgress("state-settlement", { phaseIndex: 8, currentTask: `${successfulActions.length} settlements` });
-      const patches = await nodeRuntimeRunStateSettlement(world, successfulActions);
-      updateRuntimeProgress("apply-actions", { phaseIndex: 9, currentTask: "apply guarded actions" });
+      updateRuntimeProgress("world-master", { phaseIndex: 9, currentTask: `${successfulActions.length} world judgements` });
+      await nodeRuntimeRunWorldMaster(world, successfulActions);
+      updateRuntimeProgress("state-settlement", { phaseIndex: 10, currentTask: `${successfulActions.length} settlements` });
+      const aiPatches = await nodeRuntimeRunStateSettlement(world, successfulActions);
+      const worldMasterPatches = successfulActions.map(item => nodeRuntimeWorldMasterPatch(world, item)).filter(Boolean);
+      const patches = [...worldMasterPatches, ...aiPatches];
+      updateRuntimeProgress("apply-actions", { phaseIndex: 11, currentTask: "apply guarded actions" });
       successfulActions.forEach(item => {
         nodeRuntimeApplyAction(world, item.agent, item.result, item.timePassage, nodeRuntimeFindPatch(patches, item));
       });
       if (policy.runPost) {
-        updateRuntimeProgress("post-agents", { phaseIndex: 10, currentTask: "post agents" });
+        updateRuntimeProgress("post-agents", { phaseIndex: 12, currentTask: "post agents" });
         await nodeRuntimeRunPostAgents(world, successfulActions, patches);
         counters.post = Number(counters.post || 0) + 1;
       }
       world.logs ||= [];
       world.logs.unshift({
         title: "Node AI Action Chain",
-        body: `Scheduler selected ${selected.length}; AgentAction ${successfulActions.length}; TimePassage ${passages.length}; StateSettlement ${patches.length}; policy=${policy.mode}`,
+        body: `Scheduler selected ${selected.length}; AgentAction ${successfulActions.length}; TimePassage ${passages.length}; WorldMaster ${successfulActions.length}; StateSettlement ${patches.length}; policy=${policy.mode}`,
         type: "node_runtime",
         time: nodeRuntimeClockText(world),
         clock: world.clock || 0,
@@ -2236,13 +2775,13 @@ async function runNodeRuntimeStep(slot) {
       });
     });
   }
-  updateRuntimeProgress("node-core", { phaseIndex: 10, currentTask: "advance world clock" });
+  updateRuntimeProgress("node-core", { phaseIndex: 13, currentTask: "advance world clock" });
   const result = nodeStepPayload(payload);
   if (policy.runDaily && nodeRuntimeIsMidnightCross(beforeClock, result.payload?.world?.clock || 0)) {
-    updateRuntimeProgress("daily-agents", { phaseIndex: 10, currentTask: "daily agents" });
+    updateRuntimeProgress("daily-agents", { phaseIndex: 13, currentTask: "daily agents" });
     await nodeRuntimeRunDailyAgents(result.payload.world);
   }
-  updateRuntimeProgress("save", { phaseIndex: 11, currentTask: "write save files" });
+  updateRuntimeProgress("save", { phaseIndex: 14, currentTask: "write save files" });
   const resultWorld = result.payload?.world || result.payload;
   const resultCounters = nodeRuntimeCounters(resultWorld);
   resultCounters.saveSplit = Number(resultCounters.saveSplit || 0) + 1;
@@ -2250,6 +2789,7 @@ async function runNodeRuntimeStep(slot) {
   runtimeSlot = safeSlot;
   runtimeLastMessage = `Node tick completed: ${result.summary.clockText}`;
   completeRuntimeProgress(`tick ${result.summary.clockText}`);
+  writeSaveRuntimeProgress(safeSlot, runtimeProgress);
   runtimeLastMessage = `Node tick 完成：${result.summary.clockText}`;
   runtimeLastMessage = `Node tick completed: ${result.summary.clockText}`;
   return result.summary;
@@ -2605,6 +3145,7 @@ function fallbackJson(task) {
   if (task === "knowledgeJudgeAgent") return { agentKnowledge: [], logs: [] };
   if (task === "outcomeJudgeAgent") return { agentOutcomes: [], logs: [] };
   if (task === "familySyncAgent") return { householdSyncs: [], logs: [] };
+  if (task === "worldMasterAgent") return { judgements: [], logs: [] };
   if (task === "agentAction") return { action: { type: "wait", summary: "AI 返回格式错误，角色暂时停在原地整理思路。", newLocation: "", mood: "", emotionDelta: {}, currentTask: "停下整理思路", actionSteps: [{ title: "停下整理思路", status: "blocked", reason: "JSON 修复兜底" }], processUpdate: { goal: "整理当前状况", stage: "blocked", progressDelta: 5, currentStep: "停下整理思路", completedSteps: [], blockedBy: "JSON 修复兜底", finished: false }, relationChanges: [], newEvents: [] } };
   if (task === "timePassageAgent") return { passages: [], logs: [] };
   if (task === "reporter") return { logs: [], digest: "" };
@@ -2794,6 +3335,9 @@ function systemPrompt(task) {
   }
   if (task === "familySyncAgent") {
     return `${common}\n你是 FamilySyncAgent。你的权限只有在晚间家庭成员同处可沟通窗口时，判断家人之间会同步哪些已知信息、谁会关心谁、是否留下明晚家庭沟通计划。你不能创造新事实，不能让非家庭成员知道，不能全镇广播，不能替角色白天行动。`;
+  }
+  if (task === "worldMasterAgent") {
+    return `${common}\n你是 WorldMasterAgent，行动落地裁判。你不扮演角色，不写剧情，不做状态结算；你只判断 AgentAction + TimePassage 给出的行动结果是否真的能在当前世界成立。必须尊重 currentLocation、visibleAgents、allowedKnowledgeIds、allowedPlaces、localJudgement 和 timePassage。不能制造隐藏 NPC，不能让全镇凭空知道，不能宣布死亡/复活，不能把未完成的看病/购买/上课/上班写成完成，不能改变天气、地点制度、承诺或关系。你只能输出 accepted/process/downgrade/blocked 这类裁判建议，必要时给很小的 needDelta/emotionDelta 和角色本人可记住的 memoryWrites。`;
   }
   if (task === "agentAction") {
     return `${common}\n你正在模拟 payload.agent 这个生活在小镇上的人。你不是上帝视角、旁白或系统管理员；你只知道这个人亲眼看到、亲耳听到、记得、被告知或通过公开广播知道的信息。你不知道全镇日志、别人的记忆、别人的内心、未公开事件和未来结果。你只能基于这个人的身份、年龄、日程、地点、关系、记忆、情绪、需求和可见环境，做出当下一个很小的生活行动。不能越权改变世界，不能替地点/天气/承诺/多维状态 Agent 做结算，不能直接声明“已经到达”或“全镇知道”。若角色 isSleeping 且没有紧急事件，应保持睡眠。行动可以包含 2-4 个 actionSteps，表示本行动内部的微步骤和下一步阻塞点。输出仍必须是严格 JSON。`;
@@ -3311,6 +3855,26 @@ function userPrompt(task, payload) {
         "memoryNotes 只能写该 agent 合理会记住的家庭同步内容；不要写他人内心或未知事实",
         "如果家庭成员不足、都睡了、没有可同步事实，返回空 householdSyncs",
         "字段内容必须短，不要 Markdown，不要换行"
+      ],
+      world: payload
+    });
+  }
+  if (task === "worldMasterAgent") {
+    return JSON.stringify({
+      instruction: "返回 JSON：{\"judgements\":[{\"queueId\":\"\",\"agentId\":\"\",\"allowed\":true,\"route\":\"accepted|process|downgrade|blocked\",\"reason\":\"\",\"requiredFollowups\":[\"\"],\"needDelta\":{\"hunger\":0,\"hygiene\":0,\"health\":0,\"social\":0,\"responsibility\":0,\"stress\":0,\"comfort\":0,\"safety\":0},\"emotionDelta\":{\"happy\":0,\"anxious\":0,\"angry\":0,\"sad\":0,\"tired\":0,\"lonely\":0,\"hopeful\":0,\"calm\":0,\"curious\":0},\"memoryWrites\":[{\"layer\":\"short|long|emotional|secret|rumor\",\"text\":\"\",\"importance\":3}]}],\"logs\":[{\"title\":\"\",\"body\":\"\"}]}。",
+      constraints: [
+        "只判断 payload.items 里的行动结果能否落地，不生成新行动，不推进时间，不写剧情",
+        "queueId 和 agentId 必须来自 payload.items；每个 item 最多一个 judgement",
+        "必须参考 localJudgement；本地已 blocked 或 forbidden_world_change 时不能改成 accepted",
+        "route=accepted 表示行动结果可落地；process 表示还在路上/等待/需要前置条件；downgrade 表示行动要降级为观察、等待或尝试；blocked 表示完全不能成立",
+        "不能制造隐藏 NPC；医生、护士、老师、店员、老板、工作人员只能来自 visibleAgents",
+        "不能让角色知道 allowedKnowledgeIds 之外的信息；不能写全镇知道、家人都知道、大家都知道，除非 payload 中有明确传播证据",
+        "不能宣布死亡、复活、治愈、事故、重大灾害、天气变化、地点制度变化或承诺完成",
+        "timePassage.finished=false 或 overflowMinutes>0 时，不能把购买、治疗、上课、上班、对话、排队等写成完成，只能保留过程、等待或少量消耗影响",
+        "action.newLocation 只能是 allowedPlaces 或空；不能直接确认到达不存在地点",
+        "needDelta/emotionDelta 是小幅裁判修正，普通情况 -4 到 4，明显阻塞/服务成立最多 -8 到 8；不要重复 StateSettlement 的大结算",
+        "memoryWrites 只能写该角色本人当场能记住的事实，不能写他人内心、全局真相或未来结果；没有必要就返回空数组",
+        "reason 必须短，说明为什么能成立、为什么需要继续过程，或为什么被降级/阻止"
       ],
       world: payload
     });

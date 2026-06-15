@@ -113,6 +113,19 @@ function adjustEmotion(agent, changes) {
   agent.emotions = agent.emotionVector;
 }
 
+function decayMultiplier(currentValue, strength = 1.5) {
+  const value = clamp(currentValue, 0, 100);
+  const missing = (100 - value) / 100;
+  return 1 + missing * strength;
+}
+
+function needPressure(value, threshold) {
+  const safeValue = clamp(value, 0, 100);
+  const safeThreshold = Math.max(1, Number(threshold) || 1);
+  if (safeValue >= safeThreshold) return 0;
+  return (safeThreshold - safeValue) / safeThreshold;
+}
+
 function sleepProfile(job = "") {
   if (job.includes("早餐店")) return { start: "21:30", end: "04:30", canWakeFor: ["emergency", "family"] };
   if (job.includes("小学生") || job.includes("幼儿")) return { start: "21:30", end: "06:40", canWakeFor: ["emergency", "family"] };
@@ -130,15 +143,20 @@ function updateSleepStates(world, minutesPassed) {
     ensureAgentShape(agent);
     if (!agent.sleepWindow) agent.sleepWindow = sleepProfile(agent.job || "");
     const shouldSleep = isWithinSleepWindow(minute, agent.sleepWindow);
-    agent.isSleeping = shouldSleep;
-    if (shouldSleep) {
+    const tooHungryToSleep = shouldSleep && Number(agent.needs?.hunger ?? 100) <= 12;
+    agent.isSleeping = shouldSleep && !tooHungryToSleep;
+    if (agent.isSleeping) {
       agent.energy = clamp(agent.energy + minutesPassed * 0.18, 0, 100);
       agent.sleepQuality = clamp(agent.sleepQuality + minutesPassed * 0.08, 0, 100);
-      adjustNeeds(agent, { stress: minutesPassed * 0.035, comfort: minutesPassed * 0.025, hunger: -minutesPassed * 0.018 });
+      adjustNeeds(agent, { stress: minutesPassed * 0.035, comfort: minutesPassed * 0.025, hunger: -minutesPassed * 0.006 });
       adjustEmotion(agent, { calm: minutesPassed * 0.025, tired: -minutesPassed * 0.05 });
       agent.currentTask = "睡眠休息";
     } else {
       agent.energy = clamp(agent.energy - minutesPassed * 0.035, 0, 100);
+      if (tooHungryToSleep && foodAvailableAt(agent, world.clock || 0)) {
+        adjustNeeds(agent, { hunger: 16, comfort: 2, stress: 1 });
+        agent.currentTask = "半夜醒来简单吃点东西";
+      }
     }
   });
 }
@@ -149,15 +167,18 @@ function timeDecayChanges(agent, minutesPassed) {
   const age = Number(agent.age || 0);
   const teenOrChild = /\u5b66\u751f|\u513f\u7ae5|\u5e7c\u513f|student|child|teen/i.test(job) || ["child", "teen"].includes(agent.ageStage) || (age > 0 && age < 18);
   const elder = /\u8001\u4eba|\u9000\u4f11|elder|retired/i.test(job) || agent.ageStage === "elder" || age >= 65;
+  const baseHungerRate = teenOrChild ? 3.0 : elder ? 2.1 : 2.5;
+  const baseHealthRate = elder ? 0.45 : 0.18;
+  const baseSafetyRate = 0.18;
   return {
-    hunger: -hours * (teenOrChild ? 3.0 : elder ? 2.1 : 2.5),
+    hunger: -hours * baseHungerRate * decayMultiplier(agent.needs?.hunger, 1.2),
     hygiene: -hours * (teenOrChild ? 0.9 : 0.7),
-    health: -hours * (elder ? 0.45 : 0.18),
+    health: -hours * baseHealthRate * decayMultiplier(agent.needs?.health, 2.0),
     social: -hours * 0.35,
     responsibility: -hours * (/\u5b66\u751f|\u8001\u5e08|\u533b\u751f|\u62a4\u58eb|\u804c\u5458|\u5de5\u4eba|\u5e97\u5458|\u5e97\u4e3b|worker|teacher|doctor|nurse|staff/i.test(job) ? 0.65 : 0.35),
     stress: -hours * 0.75,
     comfort: -hours * 0.55,
-    safety: -hours * 0.18
+    safety: -hours * baseSafetyRate * decayMultiplier(agent.needs?.safety, 2.5)
   };
 }
 
@@ -166,10 +187,20 @@ function applyTimeDecay(world, minutesPassed) {
     if (isDead(agent) || agent.isSleeping) return;
     ensureAgentShape(agent);
     adjustNeeds(agent, timeDecayChanges(agent, minutesPassed));
-    if (agent.needs.hunger < 22) adjustEmotion(agent, { tired: 1, angry: 0.6, calm: -0.8 });
-    if (agent.needs.stress < 28) adjustEmotion(agent, { anxious: 1.2, calm: -1.1 });
-    if (agent.needs.social < 22) adjustEmotion(agent, { lonely: 1.2, sad: 0.6 });
-    if (agent.needs.health < 30) adjustEmotion(agent, { tired: 1.5, hopeful: -0.8 });
+    const hungerPressure = needPressure(agent.needs.hunger, 60);
+    const stressPressure = needPressure(agent.needs.stress, 55);
+    const socialPressure = needPressure(agent.needs.social, 45);
+    const healthPressure = needPressure(agent.needs.health, 50);
+    const safetyPressure = needPressure(agent.needs.safety, 55);
+    adjustEmotion(agent, {
+      tired: hungerPressure * 3 + healthPressure * 2,
+      angry: hungerPressure * 1.5,
+      calm: -(hungerPressure * 2 + stressPressure * 2 + safetyPressure * 2.5),
+      anxious: stressPressure * 3 + healthPressure * 1.5 + safetyPressure * 4,
+      hopeful: -(stressPressure * 1.5 + healthPressure * 1.5),
+      lonely: socialPressure * 2.5,
+      sad: socialPressure * 1.2
+    });
   });
 }
 
@@ -190,12 +221,38 @@ function applyPassiveNeedRecovery(world, minutesPassed) {
     }
     if (["school", "market", "square", "park", "breakfast", "store", "restaurant", "clinic"].includes(here)) changes.social = hours * 1.6;
     if (here === "clinic" && isMedicalWorker(agent)) changes.responsibility = Math.max(changes.responsibility || 0, hours * 2.0);
+    const wellFed = Number(agent.needs?.hunger ?? 0) > 60;
+    const stableStress = Number(agent.needs?.stress ?? 0) > 45;
+    const safeEnough = Number(agent.needs?.safety ?? 0) > 45;
+    const health = Number(agent.needs?.health ?? 100);
+    if (wellFed && stableStress && safeEnough && health > 0 && health < 95) {
+      changes.health = Math.max(changes.health || 0, hours * (here === "apartment" ? 0.8 : 0.25));
+    }
     if (Object.keys(changes).length) adjustNeeds(agent, changes);
   });
 }
 
-function foodAvailableAt(agent) {
-  return ["apartment", "breakfast", "store", "restaurant"].includes(agent.position || agent.place || "");
+function foodAvailableAt(agent, clockMinute = null) {
+  const here = agent.position || agent.place || "";
+  if (["apartment", "breakfast", "store", "restaurant", "market"].includes(here)) return true;
+  const hour = Number.isFinite(Number(clockMinute)) ? Math.floor((Number(clockMinute) % 1440) / 60) : null;
+  const lunchWindow = hour === null || (hour >= 11 && hour <= 13);
+  const shiftMealWindow = hour === null || (hour >= 11 && hour <= 13) || (hour >= 17 && hour <= 19);
+  if (["school", "kindergarten"].includes(here)) return lunchWindow;
+  if (["office", "factory", "police", "clinic", "warehouse", "library"].includes(here)) return shiftMealWindow;
+  return false;
+}
+
+function isMealWindow(hour) {
+  return (hour >= 7 && hour <= 9)
+    || (hour >= 11 && hour <= 13)
+    || (hour >= 17 && hour <= 19);
+}
+
+function shouldSeekFood(agent, world) {
+  const hunger = Number(agent.needs?.hunger ?? 70);
+  const hour = Math.floor((Number(world.clock || 0) % 1440) / 60);
+  return (isMealWindow(hour) && hunger < 55) || hunger < 30;
 }
 
 function clinicCareAvailableFor(world, agent) {
@@ -205,6 +262,11 @@ function clinicCareAvailableFor(world, agent) {
 
 function placeId(agent) {
   return agent?.position || agent?.place || "";
+}
+
+function placeName(world, id) {
+  const place = (world.places || []).find(item => item?.id === id);
+  return place?.name || id || "未知地点";
 }
 
 function isMedicalWorker(agent) {
@@ -443,6 +505,30 @@ function applyMedicalEscalation(world, minutesPassed) {
         updatedAt: world.clock || 0
       };
       agent.currentTask = nearby.length ? "请求附近人帮助前往诊所" : "身体严重不适，等待被发现";
+      if (nearby.length && !agent.movement) {
+        const escort = nearby.find(item => isMedicalWorker(item)) || nearby[0];
+        agent.movement = {
+          from: here,
+          to: "clinic",
+          departAt: world.clock || 0,
+          arriveAt: (world.clock || 0) + (level === "critical" ? 20 : 35),
+          reason: "medical_escort",
+          escortBy: escort?.id || ""
+        };
+        agent.activeProcess = {
+          ...(agent.activeProcess || {}),
+          goal: "寻求医疗帮助",
+          stage: "escort_to_clinic",
+          currentStep: `${escort?.name || "附近的人"}正在协助前往诊所`,
+          progress: Math.max(Number(agent.activeProcess?.progress || 0), 35),
+          blockedBy: "",
+          updatedAt: world.clock || 0
+        };
+        if (escort && !isDead(escort)) {
+          escort.currentTask = `协助${agent.name}前往诊所`;
+        }
+        pushRecord(world, "送医协助", `${agent.name}情况危急，${escort?.name || "附近的人"}协助前往诊所。`, "medical", [agent.id, ...nearby.slice(0, 4).map(item => item.id)]);
+      }
       const key = `medical-alert-${slot}-${agent.id}`;
       if (!world.basicLifeDone[key]) {
         world.medicalEscalations.unshift({
@@ -468,22 +554,48 @@ function applyMedicalEscalation(world, minutesPassed) {
 function applyBasicLifeMaintenance(world) {
   const now = minutesToClock(world.clock || 0);
   world.basicLifeDone ||= {};
-  const mealWindow = [7, 12, 18].includes(now.h);
+  const mealWindow = isMealWindow(now.h);
+  const emergencyFoodSlot = Math.floor(Number(world.clock || 0) / 180);
+  const opportunityFoodSlot = Math.floor(Number(world.clock || 0) / 120);
   (world.agents || []).forEach(agent => {
     if (isDead(agent) || agent.isSleeping) return;
     ensureAgentShape(agent);
-    const slot = `${now.day}-${now.h}-${agent.id}`;
-    if (mealWindow && foodAvailableAt(agent) && agent.needs.hunger < 75 && !world.basicLifeDone[`meal-${slot}`]) {
-      adjustNeeds(agent, { hunger: 22, comfort: 3, stress: 2 });
-      agent.currentTask = "补充食物";
-      world.basicLifeDone[`meal-${slot}`] = true;
-      pushRecord(world, "基础进食", `${agent.name}按当前地点条件补充了食物。`, "survival", [agent.id]);
+    const mealPeriod = now.h <= 9 ? "breakfast" : now.h <= 13 ? "lunch" : now.h <= 19 ? "dinner" : "offmeal";
+    const slot = `${now.day}-${mealPeriod}-${agent.id}`;
+    const beforeHunger = Number(agent.needs.hunger || 0);
+    const canEatHere = foodAvailableAt(agent, world.clock || 0);
+    const emergencyFoodKey = `emergency-food-${emergencyFoodSlot}-${agent.id}`;
+    const opportunityFoodKey = `opportunity-food-${opportunityFoodSlot}-${agent.id}`;
+    const shouldEatMeal = mealWindow && canEatHere && shouldSeekFood(agent, world) && !world.basicLifeDone[`meal-${slot}`];
+    const shouldEatOpportunity = !mealWindow && canEatHere && beforeHunger < 45 && !world.basicLifeDone[opportunityFoodKey];
+    const shouldEatEmergency = canEatHere && beforeHunger <= 20 && !world.basicLifeDone[emergencyFoodKey];
+    if (shouldEatMeal || shouldEatOpportunity || shouldEatEmergency) {
+      const hungerGain = beforeHunger <= 8 ? 55 : beforeHunger < 25 ? 45 : beforeHunger < 45 ? 35 : 22;
+      adjustNeeds(agent, { hunger: hungerGain, comfort: 3, stress: 2 });
+      if (beforeHunger < 35 || !agent.currentTask || ["维持当前生活安排", "开始一天的日常安排"].includes(agent.currentTask)) {
+        agent.currentTask = "补充食物";
+      }
+      world.basicLifeDone[shouldEatMeal ? `meal-${slot}` : shouldEatOpportunity ? opportunityFoodKey : emergencyFoodKey] = true;
+      if (beforeHunger < 35) {
+        pushRecord(world, "基础进食", `${agent.name}饥饿明显，按当前地点条件补充了食物。`, "survival", [agent.id]);
+      }
     }
     if (clinicCareAvailableFor(world, agent) && (agent.needs.hunger <= 5 || agent.needs.stress <= 5) && !world.basicLifeDone[`clinic-${slot}`]) {
       adjustNeeds(agent, { hunger: agent.needs.hunger <= 5 ? 12 : 0, safety: 6, stress: 5, comfort: 3 });
       agent.currentTask = "基础急救";
       world.basicLifeDone[`clinic-${slot}`] = true;
       pushRecord(world, "基础救治", `${agent.name}在诊所有医护在场，获得最低限度照护。`, "survival", [agent.id]);
+    }
+    if (beforeHunger < 20 && !canEatHere && !agent.movement && placeId(agent) !== "apartment") {
+      agent.movement = {
+        from: placeId(agent),
+        to: "apartment",
+        departAt: world.clock || 0,
+        arriveAt: (world.clock || 0) + 30,
+        reason: "hunger_return_home"
+      };
+      agent.currentTask = "太饿了，先回家吃饭";
+      pushRecord(world, "饥饿求生", `${agent.name}饥饿过低，暂停普通安排并回家找食物。`, "survival", [agent.id]);
     }
   });
   if (Object.keys(world.basicLifeDone).length > 600) {
@@ -500,9 +612,11 @@ function advanceMovement(world) {
     if (!agent.movement) return;
     if ((world.clock || 0) >= Number(agent.movement.arriveAt || 0)) {
       const from = agent.movement.from || agent.position;
-      agent.position = agent.movement.to || agent.position;
+      const target = agent.movement.to || agent.position;
+      agent.position = target;
+      agent.place = target;
       agent.movement = null;
-      pushRecord(world, `${agent.name} 到达`, `${agent.name}从${from}到达${agent.position}。`, "move", [agent.id]);
+      pushRecord(world, `${agent.name} 到达`, `${agent.name}从${placeName(world, from)}到达${placeName(world, agent.position)}。`, "move", [agent.id]);
     }
   });
 }
@@ -518,7 +632,7 @@ function evaluateMortality(world) {
       return;
     }
     agent.terminalState ||= { criticalMinutes: 0, lastReasons: [], since: world.clock || 0 };
-    agent.terminalState.criticalMinutes = Number(agent.terminalState.criticalMinutes || 0) + Number(world.config?.virtualMinutesPerPulse || 60);
+    agent.terminalState.criticalMinutes = Number(agent.terminalState.criticalMinutes || 0) + Number(world.config?.virtualMinutesPerPulse || 30);
     agent.terminalState.lastReasons = critical;
     agent.lifeStatus = "critical";
     if ((n.health ?? 100) <= 0 && agent.terminalState.criticalMinutes >= 1440) {
@@ -535,7 +649,7 @@ function evaluateMortalityV2(world) {
     if (isDead(agent)) return;
     ensureAgentShape(agent);
     const n = agent.needs || {};
-    const critical = ["health", "hunger", "safety", "stress"].filter(key => Number(n[key] ?? 100) <= 0);
+    const critical = ["health", "hunger", "safety"].filter(key => Number(n[key] ?? 100) <= 0);
     agent.terminalState ||= { criticalMinutes: 0, lastReasons: [], since: world.clock || 0 };
     if (Number(n.health ?? 100) > 30 && agent.lifeStatus === "critical") {
       agent.lifeStatus = "alive";
@@ -547,15 +661,13 @@ function evaluateMortalityV2(world) {
       agent.terminalState.healthZeroMinutes = 0;
       agent.terminalState.hungerZeroMinutes = 0;
       agent.terminalState.safetyZeroMinutes = 0;
-      agent.terminalState.stressZeroMinutes = 0;
       return;
     }
-    const tickMinutes = Number(world.config?.virtualMinutesPerPulse || 60);
+    const tickMinutes = Number(world.config?.virtualMinutesPerPulse || 30);
     agent.terminalState.criticalMinutes = Number(agent.terminalState.criticalMinutes || 0) + tickMinutes;
     agent.terminalState.healthZeroMinutes = Number(n.health ?? 100) <= 0 ? Number(agent.terminalState.healthZeroMinutes || 0) + tickMinutes : 0;
     agent.terminalState.hungerZeroMinutes = Number(n.hunger ?? 100) <= 0 ? Number(agent.terminalState.hungerZeroMinutes || 0) + tickMinutes : 0;
     agent.terminalState.safetyZeroMinutes = Number(n.safety ?? 100) <= 0 ? Number(agent.terminalState.safetyZeroMinutes || 0) + tickMinutes : 0;
-    agent.terminalState.stressZeroMinutes = Number(n.stress ?? 100) <= 0 ? Number(agent.terminalState.stressZeroMinutes || 0) + tickMinutes : 0;
     agent.terminalState.lastReasons = critical;
     agent.lifeStatus = "critical";
     const medical = agent.medicalState || {};
@@ -574,11 +686,70 @@ function evaluateMortalityV2(world) {
   });
 }
 
+function evaluateMortalityByCause(world) {
+  (world.agents || []).forEach(agent => {
+    if (isDead(agent)) return;
+    ensureAgentShape(agent);
+    const n = agent.needs || {};
+    const critical = ["health", "hunger", "safety", "stress"].filter(key => Number(n[key] ?? 100) <= 0);
+    agent.terminalState ||= { criticalMinutes: 0, lastReasons: [], since: world.clock || 0 };
+    if (!critical.length) {
+      if (agent.lifeStatus === "critical") agent.lifeStatus = "alive";
+      agent.terminalState.criticalMinutes = 0;
+      agent.terminalState.healthZeroMinutes = 0;
+      agent.terminalState.hungerZeroMinutes = 0;
+      agent.terminalState.safetyZeroMinutes = 0;
+      return;
+    }
+
+    const tickMinutes = Number(world.config?.virtualMinutesPerPulse || 30);
+    agent.terminalState.criticalMinutes = Number(agent.terminalState.criticalMinutes || 0) + tickMinutes;
+    agent.terminalState.healthZeroMinutes = Number(n.health ?? 100) <= 0 ? Number(agent.terminalState.healthZeroMinutes || 0) + tickMinutes : 0;
+    agent.terminalState.hungerZeroMinutes = Number(n.hunger ?? 100) <= 0 ? Number(agent.terminalState.hungerZeroMinutes || 0) + tickMinutes : 0;
+    agent.terminalState.safetyZeroMinutes = Number(n.safety ?? 100) <= 0 ? Number(agent.terminalState.safetyZeroMinutes || 0) + tickMinutes : 0;
+    agent.terminalState.lastReasons = critical;
+    agent.lifeStatus = "critical";
+
+    const medical = agent.medicalState || {};
+    const treatedAt = Number(medical.treatedAt || 0);
+    const hasRescue = placeId(agent) === "clinic"
+      || (treatedAt > 0 && treatedAt >= Number((world.clock || 0) - 1440))
+      || (Array.isArray(medical.knownBy) && medical.knownBy.length > 0)
+      || (agent.activeProcess && /medical|clinic|help|escort/.test(`${agent.activeProcess.goal || ""} ${agent.activeProcess.stage || ""} ${agent.activeProcess.blockedBy || ""}`));
+    agent.terminalState.undiscoveredRiskMinutes = hasRescue ? 0 : Number(agent.terminalState.undiscoveredRiskMinutes || 0) + tickMinutes;
+    const undiscoveredMinutes = Math.max(Number(medical.undiscoveredMinutes || 0), Number(agent.terminalState.undiscoveredRiskMinutes || 0));
+    const healthZeroMinutes = Number(agent.terminalState.healthZeroMinutes || 0);
+    const hungerZeroMinutes = Number(agent.terminalState.hungerZeroMinutes || 0);
+    const safetyZeroMinutes = Number(agent.terminalState.safetyZeroMinutes || 0);
+    let deathCause = "";
+    let deathBody = "";
+
+    if ((n.safety ?? 100) <= 0 && safetyZeroMinutes >= 180 && undiscoveredMinutes >= 30) {
+      deathCause = "safety_zero_unrescued";
+      deathBody = `${agent.name} died after safety stayed at zero without timely rescue.`;
+    } else if ((n.health ?? 100) <= 0 && !hasRescue && healthZeroMinutes >= 1440 && undiscoveredMinutes >= 720) {
+      deathCause = "health_zero_unrescued";
+      deathBody = `${agent.name} died after health stayed at zero without discovery or treatment.`;
+    } else if ((n.hunger ?? 100) <= 0 && hungerZeroMinutes >= 2880 && undiscoveredMinutes >= 720) {
+      deathCause = "hunger_zero_long_term";
+      deathBody = `${agent.name} died after long-term hunger without timely rescue.`;
+    }
+
+    if (deathCause) {
+      agent.lifeStatus = "dead";
+      agent.deathAt = world.clock || 0;
+      agent.deathCause = deathCause;
+      agent.movement = null;
+      pushRecord(world, "death", deathBody, "death", [agent.id]);
+    }
+  });
+}
+
 function nodeStepPayload(payload, options = {}) {
   const next = JSON.parse(JSON.stringify(payload || {}));
   const world = next.world || next;
   world.config ||= {};
-  const minutes = clamp(options.minutes || world.config.virtualMinutesPerPulse || 60, 1, 240);
+  const minutes = clamp(options.minutes || world.config.virtualMinutesPerPulse || 30, 1, 240);
   world.clock = Number(world.clock || 0) + minutes;
   world.weatherBox ||= {};
   world.weatherBox.calendar = calendarForClock(world.clock);
@@ -593,7 +764,7 @@ function nodeStepPayload(payload, options = {}) {
   applyBasicLifeMaintenance(world);
   applyMedicalEscalation(world, minutes);
   advanceMovement(world);
-  evaluateMortalityV2(world);
+  evaluateMortalityByCause(world);
   pushLog(world, "Node Core Tick", `纯 Node 核心推进 ${minutes} 分钟：睡眠、生理、基础维护、移动和死亡检查已结算。`);
   next.world = world;
   next.savedAt = new Date().toISOString();

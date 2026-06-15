@@ -1516,6 +1516,7 @@
       { id: "scheduler", label: "调度", hint: "选择谁行动" },
       { id: "agentAction", label: "Agent", hint: "角色行动默认" },
       { id: "timePassageAgent", label: "时间流逝", hint: "判断本轮耗时/完成" },
+      { id: "worldMasterAgent", label: "世界裁判", hint: "行动能否真实落地" },
       { id: "stateSettlementAgent", label: "状态提交", hint: "行动后状态补丁建议" },
       { id: "memory", label: "记忆", hint: "记忆整理/衰退" },
       { id: "timeDecayAgent", label: "生理调制", hint: "因人而异的时间变化" },
@@ -1558,6 +1559,7 @@
       scheduler: "调度",
       agentAction: "角色行动",
       timePassageAgent: "时间流逝",
+      worldMasterAgent: "世界裁判",
       stateSettlementAgent: "状态提交",
       reporter: "叙事",
       dailyPlanner: "每日计划",
@@ -11745,6 +11747,18 @@
         agent.knowledgeJudgement ? `知识:${agent.knowledgeJudgement.summary || "已判断"}` : "",
         agent.outcomeJudgement ? `后果:${agent.outcomeJudgement.recommendation}｜健${agent.outcomeJudgement.scores?.healthSeverity ?? "-"} 安${agent.outcomeJudgement.scores?.safetySeverity ?? "-"} 职${agent.outcomeJudgement.scores?.dutyRigidity ?? "-"}` : ""
       ].filter(Boolean).join("；");
+      const decision = agent.decisionState || agent.decision || {};
+      const decisionText = decision.route
+        ? `${decision.route}｜P${decision.priority ?? "-"}｜${decision.actionHint || "-"}｜${decision.reason || ""}`
+        : "";
+      const reflection = agent.reflection || {};
+      const reflectionText = reflection.mainTheme
+        ? `${reflection.mainTheme}${reflection.needsAttention?.length ? `｜注意：${reflection.needsAttention.slice(0, 2).join("；")}` : ""}`
+        : "";
+      const worldMaster = agent.worldMasterJudgement || {};
+      const worldMasterText = worldMaster.route
+        ? `${worldMaster.allowed === false ? "阻止" : "通过"}｜${worldMaster.route}｜${worldMaster.reason || ""}${worldMaster.requiredFollowups?.length ? `｜后续：${worldMaster.requiredFollowups.join("、")}` : ""}`
+        : "";
       const impactText = (world.eventImpacts || [])
         .filter(impact => impact.sourceAgentId === agent.id || (impact.affectedAgents || []).some(item => item.agentId === agent.id))
         .slice(0, 3)
@@ -11776,10 +11790,12 @@
         <div class="field"><span>地点运行</span><strong>${runtimeText}</strong></div>
         <div class="field"><span>上下文规则</span><strong>${contextRules.rules.join("；")}</strong></div>
         <div class="field"><span>行动前判断</span><strong>${judgementText || "暂无"}</strong></div>
+        <div class="field"><span>认知决策</span><strong>${decisionText || "暂无"}</strong></div>
         <div class="field"><span>家庭/邻里</span><strong>${home ? `${placeName(home.home)}｜家人：${familyText}｜邻居：${neighborText}` : "未登记"}</strong></div>
         <div class="field"><span>睡眠窗口</span><strong>${agent.sleepWindow.start} - ${agent.sleepWindow.end}｜可被唤醒：${agent.sleepWindow.canWakeFor.join("、")}</strong></div>
         <div class="field"><span>今日计划</span><strong>${plan}</strong></div>
         <div class="field"><span>长期目标</span><strong>${goals || "暂无"}</strong></div>
+        <div class="field"><span>每日反思</span><strong>${reflectionText || "暂无"}</strong></div>
         <div class="field"><span>自我叙事</span><strong>稳定${Math.round(agent.identityStability || 70)}｜${agent.selfNarrative || "暂无"}</strong></div>
         <div class="field"><span>人格锚点</span><strong>${personalityText}</strong></div>
         <div class="field"><span>人格核心</span><strong>${identityText}</strong></div>
@@ -11798,6 +11814,7 @@
         <div class="field"><span>未解决关系</span><strong>${unresolved || "暂无"}</strong></div>
         <div class="field"><span>行为倾向</span><strong>压力 ${behavior.pressure}｜${behavior.preferredActions.join("、") || "常规行动"}</strong></div>
         <div class="field"><span>生理时钟</span><strong>${timeDecayText || "暂无"}</strong></div>
+        <div class="field"><span>世界裁判</span><strong>${worldMasterText || "暂无"}</strong></div>
         <div class="field"><span>状态提交</span><strong>${settlementNotes || "暂无"}</strong></div>
         <div class="field"><span>多维统合</span><strong>${stateNotes || "暂无"}</strong></div>
         <div class="field"><span>情绪调制</span><strong>${moodControl.style}｜忍耐${moodControl.tolerance} 冲动${moodControl.impulse} 求助${moodControl.helpSeeking} 回避${moodControl.avoidance} 坚持${moodControl.persistence} 社交${moodControl.socialOpenness}</strong></div>
@@ -11852,14 +11869,17 @@
       const actionBatchConcurrency = Math.min(actionBatches, effectiveActionBatchConcurrency(batchSize));
       return [
         { name: "入口锁", mode: "串行", type: "serial", split: "上一轮未完成则等待", effect: "防止同一回合重复推进，错误时回滚快照。" },
+        { name: "LifeEngine", mode: "本地快速层", type: "serial", split: "所有存活角色本地扫描", effect: "先执行吃饭、通勤、休息、睡眠、清洁、普通上课/上班等简单生活动作，复杂事项才交给 AI。" },
         { name: "天气/地点事件/地点每日", mode: "天气后并行", type: "parallel", split: `Weather 全局；之后 LocationEvent ${placeBatches} 批 + LocationDaily ${placeBatches} 批并行`, effect: "刷新日期、天气、地点可见小事件、地点承诺种子和地点今日重点。" },
         { name: "地点链", mode: "全局", type: "serial", split: "等待 LocationDaily 完成后推进 LocationChain", effect: "推进学校、诊所、小卖部等连续事件链。" },
         { name: "地点运行/社会模式", mode: "并行", type: "parallel", split: `LocationRuntime ${placeBatches} 批；SocialPattern 全局`, effect: "读取地点链，更新地点是否营业、真实在场岗位、队列、风险和社会压力背景。" },
         { name: "过程管理/职业服务", mode: "并行分批", type: "parallel", split: `ProcessManager 按 ${batchSize} 个过程一批；ProfessionService 按 ${batchSize} 个真实服务请求一批`, effect: "同时推进未完成过程和职业服务请求；职业人员只处理同地点真实在场请求，并回写双方事件/记忆。" },
+        { name: "DecisionAggregator", mode: "本地认知聚合", type: "serial", split: "所有候选角色逐个计算", effect: "综合日计划、打断、记忆相关性、情绪调制和事件队列，判断 local / ai / worldMaster / skip。" },
         { name: "行动前判断", mode: "5类并行分批", type: "batched", split: `5 个判断 Agent × ${agentBatches} 批`, effect: "计算需求意图、场景规则、危机、知识边界和后果限制。" },
         { name: "Scheduler", mode: "分批合并", type: "batched", split: `${agentBatches} 批候选，按优先级合并`, effect: "只选谁该行动和行动类型，不直接改变世界。" },
         { name: "AgentAction", mode: "行动分批", type: "batched", split: `最多 ${actionLimit} 个 Action，约 ${actionBatches} 批；批并发 ${actionBatchConcurrency}，真实请求约 ${actionBatchConcurrency * batchSize}`, effect: "每个被调度角色生成一个小行动或推进一个过程片段。" },
         { name: "TimePassage", mode: "行动分批", type: "batched", split: `按 ${batchSize} 个行动一批`, effect: "判断本轮耗时、余时轻量活动、是否完成；未完成则留下 activeProcess 下回合继续。" },
+        { name: "WorldMasterAgent", mode: "按行动并发", type: "batched", split: `每个行动 1 个裁判请求，并发由 Key 容量控制`, effect: "AI 辅助判断行动能否落地；本地硬审查仍保底，不能制造隐藏 NPC、全镇知识、死亡/复活或未完成结果。" },
         { name: "WorldGuard", mode: "本地硬审查", type: "serial", split: "行动前后各审一次", effect: "检查知识边界、地点、工作人员、全镇广播、死亡/复活、未完成行动和隐藏 NPC；不合法则删除或降级。" },
         { name: "状态提交", mode: "行动分批", type: "batched", split: `StateSettlement 按 ${batchSize} 个行动一批`, effect: "AI 给补丁建议，仍需本地 WorldGuard/Reducer 审查后才改需求、情绪、记忆、关系。" },
         { name: "事件影响/传播/社交流程", mode: "分批并发+依赖串行", type: "batched", split: `EventImpact 按事件分批；InformationPropagation 按影响分批；RelationshipDynamics 按关系对分批；SocialProcess 按事件/信息/关系簇分批`, effect: "每一层内部并发，层与层保持因果顺序：先事件影响，再有限传播，再关系惯性，最后形成误会/冲突/澄清流程。" },
@@ -11867,7 +11887,7 @@
         { name: "时间推进", mode: "串行", type: "serial", split: `${world.config.virtualMinutesPerPulse || 0} 虚拟分钟`, effect: "推进时钟、睡眠、移动、基础生理、地点影响和死亡检查。" },
         { name: "TimeDecay", mode: "角色分批", type: "batched", split: `${agentBatches} 批个体调制`, effect: "在本地生理时钟后做因人而异的轻量修正。" },
         { name: "0点社会落点/地点制度", mode: "并行分批", type: "parallel", split: `SocialEmbedding ${agentBatches} 批 + LocationInstitution ${placeBatches} 批`, effect: "检查住所、邻里、学校/工作/常去地点圈，同时刷新地点制度。" },
-        { name: "0点日结", mode: "并行+分批", type: "parallel", split: "LocationDaily/LocationChain；日计划/自我叙事并行；人格一致性收尾", effect: "跨天生成明日安排、地点每日、地点链、自我叙事、人格锚点并执行每日记忆衰退。" }
+        { name: "0点日结", mode: "并行+分批", type: "parallel", split: "MemoryStream/Reflection 本地先跑；LocationDaily/LocationChain；日计划/自我叙事并行；人格一致性收尾", effect: "跨天生成明日安排、地点每日、地点链、自我叙事、人格锚点，并把重要记忆沉淀成每日反思。" }
       ];
     }
 

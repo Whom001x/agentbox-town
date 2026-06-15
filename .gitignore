@@ -7,5 +7,7 @@ certs/
 *.log
 *.tmp
 node_modules/
+mobile-app/android/
+mobile-app/.gradle-local/
 .DS_Store
 Thumbs.db

@@ -8,7 +8,12 @@
     "start": "node ai-town-v2-server.js",
     "check": "node --check ai-town-v2-server.js",
     "export:sft": "node scripts/export-town-sft.js",
-    "check:sft": "node scripts/check-town-sft.js"
+    "check:sft": "node scripts/check-town-sft.js",
+    "check:life": "node scripts/check-life-model.js",
+    "check:life-engine": "node scripts/check-life-engine.js",
+    "check:cognitive": "node scripts/check-cognitive-loop.js",
+    "check:memory": "node scripts/check-memory-action-weights.js",
+    "check:all": "node scripts/check-all.js"
   },
   "engines": {
     "node": ">=18"
