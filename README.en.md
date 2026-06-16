@@ -2,111 +2,293 @@
 
 [中文](README.md) | **English**
 
-AgentBox Town is an experimental AI virtual town simulator. It places many AI characters inside one persistent town, where each character has a location, schedule, relationships, memories, needs, emotions, action process, and long-term identity state.
+AgentBox Town is a multi-agent virtual town simulator. It places many AI residents inside one persistent town world. Each resident has a location, schedule, relationships, memory, needs, emotions, long-term goals, self model, and action process.
 
-The goal is not simple story generation. The project tries to make a small town run like a continuing social system: AI modules judge local decisions, while local rules enforce world constraints, knowledge boundaries, movement, mortality, persistence, and permission checks.
+The goal is not only to generate stories. The project aims to simulate a small social system where local rules handle world constraints, knowledge boundaries, movement, death, saves, and authority checks, while AI handles local judgement, subjective choices, and complex social events.
 
-## Current Features
+## Current Version
 
-- 100+ character town simulation.
-- Per-character memory, relationships, multi-dimensional emotions, needs, long-term goals, and identity core.
-- Date, weather, location institutions, location chains, runtime location state, and daily plans.
-- Event propagation, relationship dynamics, social processes, obligations, family sync, and profession services.
-- Multi-key routing, batched parallel calls, retry handling, and per-Agent / per-character model settings.
-- Folder-based saves with per-character files, memory files, and AG judgement files.
-- Local AI support through OpenAI-compatible APIs such as Ollama, LM Studio, vLLM, and llama.cpp server.
-- Browser UI, read-only monitor UI, and Expo mobile app.
+**V3.0 Cognitive Decision Engine**
+
+Residents no longer act by directly mapping low needs to actions. The runtime now uses:
+
+```text
+character state
+↓
+CognitiveState
+↓
+candidate actions
+↓
+action vector matching
+↓
+mixed utility score
+↓
+softmax selection
+↓
+AgentAction
+↓
+WorldGuard / StateSettlement
+↓
+EventLog / MemoryGate / MemoryConsolidator
+↓
+slow personality and memory update
+```
+
+## Capabilities
+
+- Supports 100+ residents in one town simulation.
+- Each resident has multidimensional needs, emotions, relationships, long-term goals, identity core, self model, and behavior weights.
+- V3.0 cognitive decision making: `needs` affect attention, patience, risk tolerance, social tendency, and goal persistence instead of directly selecting actions.
+- Supports Structured Memory, Vector Memory, MemoryGate, daily reflection, and slow personality updates.
+- Supports local embedding models such as LM Studio at `http://127.0.0.1:12346/v1` with `text-embedding-bge-m3@q8_0`.
+- Supports location institutions, location event chains, runtime location states, weather, dates, and daily plans.
+- Supports event propagation, relationship inertia, social processes, obligations, family sync, and professional services.
+- Supports multi-key routing, batched concurrency, retry loops, and per-Agent / per-role model configuration.
+- Supports folder-based saves: every save is a folder, with agents, memories, and judgement files separated.
+- Supports the PC browser UI, read-only monitor UI, and Expo mobile app.
+
+## V3.0 Decision Model
+
+### CognitiveState
+
+New module:
+
+```text
+ai-town-cognitive-state.js
+```
+
+Input:
+
+```text
+needs
+emotionVector
+emotionCause
+selfModel
+goalRuntime
+structuredMemory
+relationshipMatrix
+context
+```
+
+Output:
+
+```json
+{
+  "perceptionWeights": {},
+  "driveVector": {},
+  "biasVector": {},
+  "actionModifiers": {}
+}
+```
+
+Example: hunger does not directly trigger eating. It changes cognition:
+
+```json
+{
+  "patience": -0.3,
+  "foodAttention": 0.7,
+  "irritability": 0.2,
+  "socialSeeking": 0.1
+}
+```
+
+### Decision Weights
+
+Each resident has:
+
+```json
+{
+  "decisionWeights": {
+    "memory": 0.7,
+    "persona": 0.8,
+    "emotion": 0.5,
+    "novelty": 0.3,
+    "goal": 0.9,
+    "social": 0.4
+  }
+}
+```
+
+These weights are part of the calculation, not prompt decoration. In the same situation, a detective, elder, child, artist, and shop owner can naturally choose different actions.
+
+### Action Vector Matching
+
+Each candidate action has an `actionVector`:
+
+```json
+{
+  "comfort": 0.8,
+  "duty": 0.2,
+  "social": 0.5,
+  "risk": 0.3,
+  "novelty": 0.1
+}
+```
+
+The engine compares it with the resident's current `driveVector`.
+
+### Mixed Score
+
+V3.0 uses two groups:
+
+```text
+A = memory + persona + emotion + goal + novelty + social
+B = safety * cost * distance * time * locationRule * availability
+
+Score = A * B + Noise
+```
+
+`B` represents reality constraints. Risk, cost, distance, time, location rules, and availability cannot be fully overridden by personality or memory.
+
+### Softmax Selection
+
+The engine does not always choose the highest score. It uses Softmax. Personality affects temperature:
+
+```text
+cautious residents: lower temperature, more stable choices
+impulsive residents: higher temperature, more random choices
+```
+
+## Memory System
+
+Event and memory are separated:
+
+```text
+EventLog
+↓
+MemoryGate
+↓
+MemoryConsolidator
+↓
+Structured Memory / Vector Memory
+```
+
+Rules:
+
+- Routine eating, sleeping, commuting, working, and class attendance only enter EventLog.
+- Repeated patterns can become habits.
+- Abnormal events become experience / episodic memory.
+- High-impact events can form beliefs.
+- Relationship events create relationshipMemory.
+- Vector Memory is only associative recall. It is not a fact source and cannot directly change the world.
 
 ## Run
 
-On Windows, use:
+On Windows:
 
 ```bat
 start-ai-town-v2.cmd
 ```
 
-Then open:
+Open:
 
 ```text
 http://localhost:8788/
 ```
 
-LAN access:
-
-- The server listens on `0.0.0.0` by default.
-- The launcher prints `LAN: http://your-pc-ip:8788`.
-- Open that address from a phone or another computer on the same Wi-Fi.
-- If it does not load, allow Node.js or TCP `8788` through Windows Firewall.
-
-Manual startup:
+Manual start:
 
 ```bash
 npm start
 ```
 
-## First Setup
+LAN access:
 
-Open settings on first launch:
+- The server listens on `0.0.0.0` by default.
+- Use `http://YOUR_LAN_IP:8788/` on another device in the same Wi-Fi.
+- If it cannot connect, allow Node.js or TCP `8788` through Windows Firewall.
 
-- Cloud AI: set API base URL, model, and API keys.
-- Local AI: set an OpenAI-compatible `/v1` base URL; the API key can be empty.
-- Per-key concurrency, batch size, auto interval, and virtual minutes per step are configurable.
+## AI Configuration
 
-Common local AI URLs:
+Cloud AI:
 
-- Ollama: `http://localhost:11434/v1`
-- LM Studio: `http://localhost:1234/v1`
-- vLLM / llama.cpp server: use the corresponding OpenAI-compatible `/v1` endpoint
+```text
+Base URL: https://api.openai.com/v1 or another compatible endpoint
+Model: model name
+API Key: your key
+```
 
-Local settings are written to `ai-town-config.json`, which is ignored by Git.
+Local AI:
+
+```text
+Ollama: http://localhost:11434/v1
+LM Studio: http://localhost:1234/v1
+vLLM / llama.cpp server: compatible /v1 endpoint
+```
+
+Local vector model example:
+
+```text
+Vector Base URL: http://127.0.0.1:12346/v1
+Vector Model: text-embedding-bge-m3@q8_0
+```
+
+Local configuration is written to `ai-town-config.json`, which is ignored by Git.
 
 ## Main UI
 
-- Save manager: create, load, and delete save folders.
-- Town map: inspect places and character positions.
-- Character panel: inspect needs, emotions, relationships, memories, goals, current action, and event queue.
-- Settings panel: configure AI endpoint, models, key pool, concurrency, and per-Agent models.
-- Call log: inspect model calls, keys, latency, success, failure, and retry state.
-- Per-cycle flow: inspect the current Tick call chain and parallel stages.
-- Relationship web: inspect family, acquaintance, coworker, classmate, and social relationships.
+- Save manager: create, load, and delete saves.
+- Town map: show locations and resident positions.
+- Resident panel: inspect needs, emotions, relationships, memories, goals, actions, and event queues.
+- Settings panel: configure AI endpoints, models, key pool, concurrency, and Agent models.
+- Call log: inspect model calls, keys, duration, success, failure, and retries.
+- Per-turn flow: inspect the Agent call chain and concurrency status.
+- Relationship web: inspect family, familiar, coworker, classmate, and social relationships.
+- Mobile app: landscape game-HUD style town monitor and interaction UI.
 
 ## Runtime Flow
 
-The simulation core now runs in Node. The browser displays and controls the simulation; the server advances the world.
+The simulation core runs in Node. The browser mainly displays and controls it.
 
-Each round roughly does this:
+Per step:
 
-1. Load save and runtime state.
-2. Life Engine handles simple local actions such as eating, sleeping, moving, and resting.
-3. Context Agents update location, process, profession service, and social-pattern context.
-4. Pre-judgement Agents run need intent, context rules, crisis triage, knowledge checks, and outcome checks.
-5. Scheduler selects characters for the round.
-6. AgentAction generates character actions.
-7. TimePassage judges duration, remaining time, and cross-round process state.
-8. WorldMaster and WorldGuard validate whether the action can happen in the current world.
-9. StateSettlement applies needs, emotions, memories, relationships, and location effects.
-10. Post Agents update event impact, information propagation, relationship dynamics, and social processes.
-11. Node Core advances time, sleep, physiology, basic care, movement arrival, and mortality checks.
-12. Save files are written back to the save folder.
+1. Read save.
+2. StateMigration fills selfModel, goalRuntime, emotionCause, and memory layers.
+3. LifeEngine handles deterministic routine life actions.
+4. CandidateBuilder selects residents that need thought.
+5. MemoryRecall retrieves structuredMemory and vectorMemory.
+6. PersonalityRuntime builds current personality state.
+7. CognitiveState builds cognitive drives.
+8. UtilityScheduler performs action-vector matching, mixed scoring, and Softmax selection.
+9. AgentAction generates subjective action.
+10. WorldGuard / WorldMaster checks whether the action can happen.
+11. StateSettlement settles location, needs, emotions, relationships, and location effects.
+12. EventLog records factual events.
+13. MemoryGate decides whether an event enters long-term memory.
+14. MemoryConsolidator creates structured and vector memory.
+15. Save to the save folder.
 
-At midnight, the server also runs social embedding, location institutions, daily plans, self narrative, personality consistency, and memory reflection.
+Daily midnight jobs handle social embedding, location institutions, daily plans, self narrative, personality consistency, and reflection.
 
 ## Key Files
 
 - `ai-town-v2-server.js`: Node server, runtime controller, and AI proxy.
-- `ai-town-node-core.js`: local time, physiology, movement, and mortality progression.
-- `ai-town-life-engine.js`: simple life actions and plan execution.
-- `ai-town-interruptions.js`: crisis interruption and low-state preference logic.
-- `ai-town-memory-stream.js`: memory write, retrieval, and daily reflection.
-- `ai-town-world-master.js` / `ai-town-world-guard.js`: action validation.
-- `ai-town-v2.html`: desktop browser UI.
-- `ai-town-monitor.html`: read-only monitor UI.
+- `ai-town-cognitive-state.js`: V3.0 cognitive state, action vectors, and reality constraints.
+- `ai-town-utility-scheduler.js`: V3.0 action scoring and Softmax selection.
+- `ai-town-memory-stream.js`: EventLog, MemoryGate, MemoryConsolidator, reflection, and retrieval.
+- `ai-town-personality-runtime.js`: personality runtime state.
+- `ai-town-life-engine.js`: deterministic routine actions and plan execution.
+- `ai-town-node-core.js`: time, physiology, movement, death, and local world progression.
+- `ai-town-world-master.js` / `ai-town-world-guard.js`: action grounding checks.
+- `ai-town-v2.html`: PC browser UI.
 - `mobile-app/`: Expo mobile app.
 - `scripts/`: local check scripts.
 
-## Local Files
+## Checks
 
-These are intentionally not uploaded:
+```bash
+npm run check:cognitive-decision
+npm run check:cognitive-loop
+npm run check:memory-gate
+npm run check:personality-runtime
+npm run check:personality-loop
+npm run check:utility-scheduler
+npm run check:life
+npm run check:life-engine
+npm run check:all
+```
+
+## Ignored Local Files
 
 - `ai-town-config.json`
 - `.env`
@@ -116,15 +298,6 @@ These are intentionally not uploaded:
 - `mobile-app/android/`
 - `mobile-app/.gradle-local/`
 
-## Checks
-
-```bash
-npm run check:all
-npm run check:life
-npm run check:life-engine
-npm run check:memory
-```
-
 ## Note
 
-This is a local demo and research prototype, not a production system. Local guards constrain AI output, but simulation quality still depends on model capability, prompt quality, and API stability.
+This is a local demo and research prototype, not a production system. AI output is constrained by local guards, but simulation quality still depends on model capability, prompt quality, API stability, and save scale.
