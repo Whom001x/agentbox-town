@@ -10,7 +10,9 @@ AgentBox Town 是一个多 Agent 虚拟小镇模拟器。它把多个 AI 角色�
 
 ## 当前版本
 
-**V3.3.1 Social Feedback & Stability + V3.3 Social Dynamics + V3.2 Cognitive State + V3.1.5 Character Genesis**
+**V3.3.2 Context Boundary & Runtime Compression + V3.3.1 Social Feedback & Stability + V3.3 Social Dynamics + V3.2 Cognitive State + V3.1.5 Character Genesis**
+
+V3.3.2 重点解决大规模小镇运行时的上下文膨胀问题。新增 `ContextBuilder`，把完整世界状态转换成 AgentAction、World Agent、Social Agent、Scheduler 各自需要的轻量视图；默认预算为 `worldAgent=12000`、`socialAgent=10000`、`scheduler=8000`、`agentAction=6000`。完整记忆、向量 embedding、完整 `cognitiveState`、`debugDecision` 和 `relationshipMatrix` 不再进入大模型 prompt。运行时还会生成 `runtime/contextCache.json` 摘要缓存，并让 `judgementBatchSize` 真正控制 Node 后台大请求拆批。
 
 V3.3.1 增加社会反馈稳定层：事件会通过信息传播改变社会场，再由 `SocialFeedback` 调制每个角色的认知状态和行动评分。社会影响不会直接覆盖人格或事实记忆，而是经过 `socialSensitivity` 和 `tanh` 稳定计算后，影响谨慎、好奇、求助、回避和责任倾向。
 
@@ -85,6 +87,7 @@ DailyReflection / IdentityEvolution
 ## 核心能力
 
 - 支持 100+ 角色的小镇模拟。
+- V3.3.2 上下文边界：World/Social/Scheduler/AgentAction 使用专用轻量视图，避免把完整 Agent、完整记忆、向量 embedding 和调试字段送入 prompt。
 - 每个角色拥有多维需求、多维情绪、关系、长期目标、人格核心、自我模型和行为权重。
 - V3.1.5 角色创建：新居民出生时就有 `lifeHistorySeed`、`beliefMemory`、`habitMemory`、`preferenceMemory`、`episodicMemory`、`selfModel` 和 `goalRuntime`。
 - V3.1 人格长期演化：经历会缓慢形成信念、习惯、偏好、自我认知和认知权重漂移。
@@ -94,6 +97,7 @@ DailyReflection / IdentityEvolution
 - 支持地点制度、地点事件链、地点运行状态、天气、日期、每日计划。
 - 支持事件传播、关系惯性、社交流程、承诺债务、家庭同步和职业服务。
 - 支持多 Key 分流、分批并发、失败重试、每个 Agent / 模块 / 角色独立模型配置。
+- 支持 `contextBudget` 和 `judgementBatchSize` 控制运行时 prompt 大小与大请求拆批。
 - 支持文件夹式存档：每个存档一个文件夹，角色、记忆、判断文件分开保存。
 - 支持 PC 浏览器主界面、只读监控界面和 Expo 手机 App。
 

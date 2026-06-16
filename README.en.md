@@ -10,7 +10,9 @@ The goal is not only to generate stories. The project aims to simulate a small s
 
 ## Current Version
 
-**V3.3.1 Social Feedback & Stability + V3.3 Social Dynamics + V3.2 Cognitive State + V3.1.5 Character Genesis**
+**V3.3.2 Context Boundary & Runtime Compression + V3.3.1 Social Feedback & Stability + V3.3 Social Dynamics + V3.2 Cognitive State + V3.1.5 Character Genesis**
+
+V3.3.2 focuses on runtime context growth in large towns. The new `ContextBuilder` converts full world state into lightweight views for AgentAction, World Agents, Social Agents, and Scheduler. Default budgets are `worldAgent=12000`, `socialAgent=10000`, `scheduler=8000`, and `agentAction=6000`. Raw memory, vector embeddings, full `cognitiveState`, `debugDecision`, and `relationshipMatrix` no longer enter model prompts. Runtime also writes a `runtime/contextCache.json` summary cache, and `judgementBatchSize` now controls Node-side batching for large requests.
 
 V3.3.1 adds a social feedback stability layer. Events propagate through the information system, change the social field, and then modulate each resident's cognitive state and action scoring through `SocialFeedback`. Social influence does not overwrite personality or factual memory; it is regulated by `socialSensitivity` and `tanh` before affecting caution, curiosity, help-seeking, avoidance, and responsibility.
 
@@ -85,6 +87,7 @@ slow personality and memory update
 ## Capabilities
 
 - Supports 100+ residents in one town simulation.
+- V3.3.2 context boundary: World/Social/Scheduler/AgentAction use specialized lightweight views instead of sending full agents, raw memory, vector embeddings, or debug fields into prompts.
 - Each resident has multidimensional needs, emotions, relationships, long-term goals, identity core, self model, and behavior weights.
 - V3.1.5 character genesis: new residents are born with `lifeHistorySeed`, `beliefMemory`, `habitMemory`, `preferenceMemory`, `episodicMemory`, `selfModel`, and `goalRuntime`.
 - V3.1 long-term identity evolution: experience slowly forms beliefs, habits, preferences, self understanding, and cognitive profile drift.
@@ -94,6 +97,7 @@ slow personality and memory update
 - Supports location institutions, location event chains, runtime location states, weather, dates, and daily plans.
 - Supports event propagation, relationship inertia, social processes, obligations, family sync, and professional services.
 - Supports multi-key routing, batched concurrency, retry loops, and per-Agent / per-role model configuration.
+- Supports `contextBudget` and `judgementBatchSize` to control prompt size and large-request batching.
 - Supports folder-based saves: every save is a folder, with agents, memories, and judgement files separated.
 - Supports the PC browser UI, read-only monitor UI, and Expo mobile app.
 
