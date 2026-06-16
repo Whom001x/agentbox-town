@@ -1,5 +1,27 @@
 # 更新记录
 
+## 2026-06-16 - V3.1 Identity Evolution Engine
+
+- 新增 `ai-town-identity-evolution.js`，每天 0 点根据近期 EventLog、结构化记忆、情绪原因、目标和关系证据沉淀人格变化。
+- 人格变化现在是慢更新：儿童、青少年、成年人、老人使用不同 learningRate；单次事件不能瞬间重写人格。
+- `beliefMemory`、`habitMemory`、`preferenceMemory` 升级为可追踪来源事件、置信度、触发条件和倾向概率的结构。
+- `selfModel` 新增 `selfImage`、`competenceBeliefs`、`lifeNarrative`，用于表达长期自我认知变化。
+- `cognitiveProfile` 现在会实际影响 `CognitiveState` 的 riskTolerance、curiosity、socialSeeking、patience、goalPersistence 等偏置。
+- 新增 `identityChangeLog`，记录角色为什么发生人格变化、来自哪些事件、旧状态和新状态。
+- 新增检查命令：`npm run check:identity-evolution`。
+
+验证：
+
+- `npm run check`
+- `npm run check:identity-evolution`
+- `npm run check:memory-gate`
+- `npm run check:memory-consolidator`
+- `npm run check:cognitive-decision`
+- `npm run check:personality-runtime`
+- `npm run check:personality-loop`
+- `npm run check:character-genesis`
+- `npm run check:all`
+
 ## 2026-06-16 - V3.0.5 Character Genesis Upgrade
 
 - 升级建城阶段的角色出生流程，不改运行时决策公式。

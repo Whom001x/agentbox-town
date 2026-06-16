@@ -10,9 +10,11 @@ AgentBox Town 是一个多 Agent 虚拟小镇模拟器。它把多个 AI 角色�
 
 ## 当前版本
 
-**V3.0.5 Character Genesis + V3.0 Cognitive Decision Engine**
+**V3.1 Identity Evolution Engine + V3.0.5 Character Genesis + V3.0 Cognitive Decision Engine**
 
 V3.0.5 升级了建城阶段：新角色出生时会生成独特的人格基础、认知倾向、行为倾向、人生经历、初始信念、习惯、偏好、恐惧、目标和关系动机。这些字段会写入存档，并参与后续 V3 Cognitive Decision Engine。
+
+V3.1 升级了运行时人格成长：角色不会在一次事件后突然变成另一个人，而是每天 0 点根据近期经历慢速更新 belief、habit、preference、selfModel 和 cognitiveProfile。同样的长期经历会逐渐改变角色的风险偏好、社交倾向、耐心、自信和行为惯性。
 
 建城流程现在是：
 
@@ -57,6 +59,8 @@ WorldGuard / StateSettlement 落地结算
 ↓
 EventLog / MemoryGate / MemoryConsolidator
 ↓
+DailyReflection / IdentityEvolution
+↓
 人格和记忆慢更新
 ```
 
@@ -64,6 +68,7 @@ EventLog / MemoryGate / MemoryConsolidator
 
 - 支持 100+ 角色的小镇模拟。
 - 每个角色拥有多维需求、多维情绪、关系、长期目标、人格核心、自我模型和行为权重。
+- V3.1 人格长期演化：经历会缓慢形成信念、习惯、偏好、自我认知和认知权重漂移。
 - V3.0 认知决策：`needs` 只影响注意力、耐心、风险偏好、社交倾向和目标坚持度，不直接映射为行动。
 - 支持 `Structured Memory`、`Vector Memory`、`MemoryGate`、每日反思和人格慢更新。
 - 支持本地向量模型：例如 LM Studio 的 `http://127.0.0.1:12346/v1` + `text-embedding-bge-m3@q8_0`。
@@ -197,6 +202,38 @@ Structured Memory / Vector Memory
 - 高影响事件会形成 belief。
 - 关系事件会生成 relationshipMemory。
 - Vector Memory 只用于联想相似经历，不能作为事实来源，不能直接改变世界。
+
+## V3.1 人格演化
+
+新增模块：
+
+```text
+ai-town-identity-evolution.js
+```
+
+每日 0 点运行：
+
+```text
+EventLog / Structured Memory / EmotionCause / GoalRuntime / Relationship
+↓
+IdentityEvolution
+↓
+beliefMemory / habitMemory / preferenceMemory
+↓
+selfModel / cognitiveProfile / behaviorTendency
+↓
+下一轮 CognitiveState 和 Utility Scheduler
+```
+
+规则：
+
+- 普通吃饭、睡觉、通勤、上班、上课不会直接改人格。
+- 连续失败会轻微增加谨慎和风险回避。
+- 连续成功会轻微增加自信、耐心和目标坚持。
+- 长期被帮助会提高求助倾向、信任和关系偏好。
+- 长期孤独会改变社交倾向。
+- 变化由 learningRate 控制：儿童变化最快，老人变化最慢。
+- 每次变化会写入 `identityChangeLog`，便于查看“为什么这个人变了”。
 
 ## 运行方式
 

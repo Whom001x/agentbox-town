@@ -146,6 +146,75 @@ function relationshipSignals(agent = {}) {
   };
 }
 
+function hasOwn(obj = {}, key) {
+  return Object.prototype.hasOwnProperty.call(obj || {}, key);
+}
+
+function profileValue(profile = {}, key, fallback = 0.5) {
+  if (!hasOwn(profile, key)) return null;
+  return scale01(profile[key], fallback);
+}
+
+function applyCognitiveProfile(agent = {}, driveVector = {}, biasVector = {}, perceptionWeights = {}) {
+  const profile = agent.cognitiveProfile && typeof agent.cognitiveProfile === "object" ? agent.cognitiveProfile : {};
+  const used = {};
+  const riskTolerance = profileValue(profile, "riskTolerance");
+  if (riskTolerance != null) {
+    biasVector.riskTolerance = Number(clamp(num(biasVector.riskTolerance, 0.5) * 0.72 + riskTolerance * 0.28, 0.02, 0.98, 0.5).toFixed(3));
+    used.riskTolerance = riskTolerance;
+  }
+  const curiosity = profileValue(profile, "curiosity");
+  if (curiosity != null) {
+    add(driveVector, "curiosity", curiosity * 0.32);
+    add(driveVector, "observe", curiosity * 0.18);
+    add(perceptionWeights, "novelty", curiosity * 0.22);
+    biasVector.noveltySeeking = Number(clamp(num(biasVector.noveltySeeking, 0.35) + (curiosity - 0.5) * 0.32, 0.02, 0.98, 0.35).toFixed(3));
+    used.curiosity = curiosity;
+  }
+  const routinePreference = profileValue(profile, "routinePreference");
+  if (routinePreference != null) {
+    add(driveVector, "order", routinePreference * 0.22);
+    add(driveVector, "home", Math.max(0, routinePreference - 0.45) * 0.16);
+    biasVector.goalPersistence = Number(clamp(num(biasVector.goalPersistence, 0.45) + (routinePreference - 0.5) * 0.22, 0.02, 0.98, 0.45).toFixed(3));
+    biasVector.noveltySeeking = Number(clamp(num(biasVector.noveltySeeking, 0.35) - Math.max(0, routinePreference - 0.5) * 0.18, 0.02, 0.98, 0.35).toFixed(3));
+    used.routinePreference = routinePreference;
+  }
+  const socialDrive = profileValue(profile, "socialDrive");
+  if (socialDrive != null) {
+    add(driveVector, "social", socialDrive * 0.28);
+    add(driveVector, "support", socialDrive * 0.16);
+    biasVector.socialSeeking = Number(clamp(num(biasVector.socialSeeking, 0) + (socialDrive - 0.5) * 0.45, -1, 1, 0).toFixed(3));
+    used.socialDrive = socialDrive;
+  }
+  const ambition = profileValue(profile, "ambition");
+  if (ambition != null) {
+    add(driveVector, "duty", ambition * 0.22);
+    add(driveVector, "goal", ambition * 0.24);
+    biasVector.goalPersistence = Number(clamp(num(biasVector.goalPersistence, 0.45) + (ambition - 0.5) * 0.28, 0.02, 0.98, 0.45).toFixed(3));
+    used.ambition = ambition;
+  }
+  const empathy = profileValue(profile, "empathy");
+  if (empathy != null) {
+    add(driveVector, "support", empathy * 0.24);
+    add(driveVector, "social", empathy * 0.12);
+    used.empathy = empathy;
+  }
+  const conflictAvoidance = profileValue(profile, "conflictAvoidance");
+  if (conflictAvoidance != null) {
+    add(driveVector, "safety", Math.max(0, conflictAvoidance - 0.4) * 0.18);
+    add(biasVector, "avoidance", conflictAvoidance * 0.18);
+    biasVector.riskTolerance = Number(clamp(num(biasVector.riskTolerance, 0.5) - Math.max(0, conflictAvoidance - 0.5) * 0.16, 0.02, 0.98, 0.5).toFixed(3));
+    used.conflictAvoidance = conflictAvoidance;
+  }
+  const patience = profileValue(profile, "patience");
+  if (patience != null) {
+    biasVector.patience = Number(clamp(num(biasVector.patience, 0) + (patience - 0.5) * 0.6, -1, 1, 0).toFixed(3));
+    biasVector.irritability = Number(clamp(num(biasVector.irritability, 0) - Math.max(0, patience - 0.5) * 0.18, 0, 1, 0).toFixed(3));
+    used.patience = patience;
+  }
+  return used;
+}
+
 function memoryToCognition(agent = {}, world = {}) {
   const structured = structuredMemoryForAgent(agent, 10);
   const driveVector = {};
@@ -294,6 +363,8 @@ function cognitiveState(world = {}, agent = {}, context = {}) {
     biasVector.socialSeeking = clamp(biasVector.socialSeeking - 0.12, -1, 1, biasVector.socialSeeking);
   }
 
+  const profileSignals = applyCognitiveProfile(agent, driveVector, biasVector, perceptionWeights);
+
   const ctx = contextText(world, agent, context);
   if (includesAny(ctx, ["stranger", "unknown person", "陌生人", "可疑"])) {
     add(perceptionWeights, "threat", 0.36);
@@ -346,6 +417,7 @@ function cognitiveState(world = {}, agent = {}, context = {}) {
     actionModifiers,
     memoryEvidence: memorySignals.evidence,
     relationshipSignals: rel,
+    cognitiveProfile: profileSignals,
     source: "cognitive-state-v3"
   };
   agent.cognitiveState = result;

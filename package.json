@@ -22,6 +22,7 @@
     "check:utility-scheduler": "node scripts/check-utility-scheduler.js",
     "check:personality-loop": "node scripts/check-personality-loop.js",
     "check:character-genesis": "node scripts/check-character-genesis.js",
+    "check:identity-evolution": "node scripts/check-identity-evolution.js",
     "check:all": "node scripts/check-all.js"
   },
   "engines": {

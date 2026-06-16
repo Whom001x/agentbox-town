@@ -543,6 +543,7 @@ function scoreAction(world, agent, action, extras = {}) {
       perceptionWeights: cognitive.perceptionWeights,
       driveVector: cognitive.driveVector,
       biasVector: cognitive.biasVector,
+      cognitiveProfile: cognitive.cognitiveProfile,
       source: cognitive.source
     },
     realityConstraint: constraint,

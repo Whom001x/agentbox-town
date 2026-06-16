@@ -100,6 +100,20 @@ function ensureSelfModel(agent = {}) {
     "最近对自己的判断还比较稳定",
     180
   );
+  agent.selfModel.selfImage = compactString(
+    agent.selfModel.selfImage || agent.selfModel.currentSelfView || agent.selfModel.identity,
+    agent.selfModel.currentSelfView || agent.selfModel.identity,
+    180
+  );
+  agent.selfModel.competenceBeliefs = uniqueStrings([
+    agent.selfModel.competenceBeliefs,
+    profile.competenceBeliefs
+  ], 8);
+  agent.selfModel.lifeNarrative = compactString(
+    agent.selfModel.lifeNarrative || agent.selfNarrative || agent.selfModel.currentSelfView || agent.selfModel.identity,
+    agent.selfModel.currentSelfView || agent.selfModel.identity,
+    260
+  );
   agent.selfModel.selfConsistencyWeight = clampNumber(agent.selfModel.selfConsistencyWeight, 0, 1, 0.65);
   return agent.selfModel;
 }
@@ -192,12 +206,22 @@ function syncLongTermMemoryViews(agent = {}) {
     id: item.id || "",
     belief: compactString(item.meaning || item.text, "", 180),
     strength: normalizeRatio(item.strength, 0.5),
+    confidence: normalizeRatio(item.confidence, Math.min(0.9, 0.35 + normalizeRatio(item.importance, 0.4) * 0.45)),
+    sourceEvents: Array.isArray(item.sourceEvents) ? item.sourceEvents.slice(0, 8) : (Array.isArray(item.evidenceIds) ? item.evidenceIds.slice(0, 8) : []),
+    createdAt: item.createdAt || item.at || 0,
+    lastConfirmed: item.lastConfirmed || item.lastSeenAt || item.at || 0,
     importance: normalizeRatio(item.importance, 0.4),
     at: item.at || 0
   })).filter(item => item.belief).slice(0, 30);
   agent.habitMemory = (structured.habit || []).map(item => ({
     id: item.id || "",
     habit: compactString(item.meaning || item.text, "", 180),
+    trigger: compactString(item.trigger || item.tags?.[1] || "相关情境", "相关情境", 80),
+    action: compactString(item.action || item.meaning || item.text, "", 120),
+    probability: normalizeRatio(item.probability, normalizeRatio(item.strength, 0.45)),
+    sourceEvents: Array.isArray(item.sourceEvents) ? item.sourceEvents.slice(0, 8) : (Array.isArray(item.evidenceIds) ? item.evidenceIds.slice(0, 8) : []),
+    createdAt: item.createdAt || item.at || 0,
+    lastConfirmed: item.lastConfirmed || item.lastSeenAt || item.at || 0,
     strength: normalizeRatio(item.strength, 0.45),
     importance: normalizeRatio(item.importance, 0.3),
     at: item.at || 0
@@ -207,9 +231,13 @@ function syncLongTermMemoryViews(agent = {}) {
     const negative = Number(item.valence || 0) < -5 || /不喜欢|讨厌|回避|避免|dislike|avoid/i.test(text);
     return {
       id: item.id || "",
+      preference: compactString(item.preference || text, text, 160),
       like: negative ? [] : [text].filter(Boolean),
       dislike: negative ? [text].filter(Boolean) : [],
       strength: normalizeRatio(item.strength, 0.45),
+      sourceEvents: Array.isArray(item.sourceEvents) ? item.sourceEvents.slice(0, 8) : (Array.isArray(item.evidenceIds) ? item.evidenceIds.slice(0, 8) : []),
+      createdAt: item.createdAt || item.at || 0,
+      lastConfirmed: item.lastConfirmed || item.lastSeenAt || item.at || 0,
       at: item.at || 0
     };
   }).filter(item => item.like.length || item.dislike.length).slice(0, 30);
@@ -316,6 +344,14 @@ function syncStructuredMemory(agent, item = {}) {
     meaning: item.meaning || item.text || "",
     importance: item.importance || 3,
     strength: item.strength || 50,
+    confidence: normalizeRatio(item.confidence, 0.5),
+    sourceEvents: Array.isArray(item.sourceEvents) ? item.sourceEvents.slice(0, 8) : (Array.isArray(item.evidenceIds) ? item.evidenceIds.slice(0, 8) : []),
+    createdAt: item.createdAt || item.at || 0,
+    lastConfirmed: item.lastConfirmed || item.lastSeenAt || item.at || 0,
+    trigger: compactString(item.trigger || "", "", 100),
+    action: compactString(item.action || "", "", 120),
+    probability: item.probability == null ? undefined : normalizeRatio(item.probability, 0.5),
+    preference: compactString(item.preference || "", "", 160),
     valence: item.valence || 0,
     target: item.target || "",
     evidenceIds: Array.isArray(item.evidenceIds) ? item.evidenceIds.slice(0, 8) : [],
@@ -384,6 +420,14 @@ function structuredMemoryForAgent(agent = {}, perType = 8) {
         meaning: item.meaning || item.text || "",
         importance: item.importance || 3,
         strength: item.strength || 50,
+        confidence: normalizeRatio(item.confidence, 0.5),
+        sourceEvents: Array.isArray(item.sourceEvents) ? item.sourceEvents.slice(0, 8) : (Array.isArray(item.evidenceIds) ? item.evidenceIds.slice(0, 8) : []),
+        createdAt: item.createdAt || item.at || 0,
+        lastConfirmed: item.lastConfirmed || item.lastSeenAt || item.at || 0,
+        trigger: item.trigger || "",
+        action: item.action || "",
+        probability: item.probability,
+        preference: item.preference || "",
         valence: item.valence || 0,
         target: item.target || "",
         evidenceIds: Array.isArray(item.evidenceIds) ? item.evidenceIds.slice(0, 8) : [],
@@ -493,8 +537,11 @@ function appendSemanticMemory(agent, memory = {}) {
   if (existing) {
     existing.count = Number(existing.count || 1) + 1;
     existing.lastSeenAt = Math.max(Number(existing.lastSeenAt || 0), at);
+    existing.lastConfirmed = Math.max(Number(existing.lastConfirmed || 0), at);
     existing.importance = Math.max(Number(existing.importance || 1), clampNumber(memory.importance, 1, 5, 3));
     existing.strength = clampNumber(Number(existing.strength || 45) + clampNumber(memory.strengthDelta, 1, 12, 3), 0, 100, 50);
+    existing.confidence = Math.max(normalizeRatio(existing.confidence, 0.5), normalizeRatio(memory.confidence, 0.5));
+    existing.sourceEvents = uniqueStrings([existing.sourceEvents, memory.sourceEvents, memory.evidenceIds], 8);
     syncStructuredMemory(agent, existing);
     appendVectorMemory(agent, {
       ...existing,
@@ -512,6 +559,14 @@ function appendSemanticMemory(agent, memory = {}) {
     meaning: String(memory.meaning || text).slice(0, 260),
     importance: clampNumber(memory.importance, 1, 5, 3),
     strength: clampNumber(memory.strength, 0, 100, 50),
+    confidence: normalizeRatio(memory.confidence, 0.5),
+    sourceEvents: Array.isArray(memory.sourceEvents) ? memory.sourceEvents.slice(0, 8) : (Array.isArray(memory.evidenceIds) ? memory.evidenceIds.slice(0, 8) : []),
+    createdAt: memory.createdAt || at,
+    lastConfirmed: memory.lastConfirmed || at,
+    trigger: compactString(memory.trigger || "", "", 100),
+    action: compactString(memory.action || "", "", 120),
+    probability: memory.probability == null ? undefined : normalizeRatio(memory.probability, 0.5),
+    preference: compactString(memory.preference || "", "", 160),
     valence: clampNumber(memory.valence, -100, 100, 0),
     target: memory.target || "",
     source: memory.source || "memory-consolidator",

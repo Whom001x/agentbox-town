@@ -21,6 +21,7 @@ const {
   recordEmotionCause,
   buildMemorySummary
 } = require("./ai-town-memory-stream");
+const { runIdentityEvolution } = require("./ai-town-identity-evolution");
 const { aggregateDecision } = require("./ai-town-decision-aggregator");
 const { judgeAction, mergeWorldMasterJudgement, applyWorldMasterPatch } = require("./ai-town-world-master");
 const { utilityDecision } = require("./ai-town-utility-scheduler");
@@ -1791,12 +1792,12 @@ function migrateWorldPersonalityRuntime(payloadOrWorld = {}, options = {}) {
   });
   const previousChangedAgents = Number(world.personalityRuntimeMigration?.changedAgents || 0);
   world.personalityRuntimeMigration ||= {};
-  world.personalityRuntimeMigration.version = "v2.5.1";
+  world.personalityRuntimeMigration.version = "v3.1";
   world.personalityRuntimeMigration.lastRunClock = Number(world.clock || 0);
   world.personalityRuntimeMigration.agentCount = world.agents.length;
   world.personalityRuntimeMigration.changedAgents = count || previousChangedAgents;
   world.personalityRuntimeMigration.updatedAt = options.now || new Date().toISOString();
-  world.personalityRuntimeMigration.rule = "Ensures runtime personality loop fields exist when creating, loading, or saving a town.";
+  world.personalityRuntimeMigration.rule = "Ensures runtime personality loop and V3.1 identity evolution fields exist when creating, loading, or saving a town.";
   return { changed, count };
 }
 
@@ -3431,7 +3432,8 @@ function nodeRuntimeIsMidnightCross(beforeClock, afterClock) {
 }
 
 async function nodeRuntimeRunDailyAgents(world) {
-  runDailyReflection(world);
+  const reflectionUpdated = runDailyReflection(world);
+  const identityEvolution = runIdentityEvolution(world);
   const agents = (world.agents || []).filter(agent => agent?.id && agent.lifeStatus !== "dead").slice(0, 80).map(nodeRuntimeAgentBrief);
   const payload = nodeRuntimeWorldContext(world, agents);
   const [socialEmbedding, locationInstitution, locationDaily, locationChain, planner, narrative, personality] = await Promise.all([
@@ -3452,6 +3454,11 @@ async function nodeRuntimeRunDailyAgents(world) {
   world.dailyAgentState.planner = planner;
   world.dailyAgentState.selfNarrative = narrative;
   world.dailyAgentState.personality = personality;
+  world.dailyAgentState.identityEvolution = {
+    appliedCount: identityEvolution.appliedCount || 0,
+    updatedAgents: Array.isArray(identityEvolution.updatedAgents) ? identityEvolution.updatedAgents.slice(0, 80) : [],
+    reflectionUpdated: Array.isArray(reflectionUpdated) ? reflectionUpdated.length : 0
+  };
   const byId = new Map((world.agents || []).map(agent => [agent.id, agent]));
   (planner.agentPlans || []).forEach(item => {
     const agent = byId.get(item.agentId);
@@ -3478,7 +3485,7 @@ async function nodeRuntimeRunDailyAgents(world) {
   world.logs ||= [];
   world.logs.unshift({
     title: "Node Daily Agents",
-    body: "SocialEmbedding / LocationInstitution / LocationDaily / LocationChain / DailyPlanner / SelfNarrative / PersonalityConsistency / LocalReflection completed",
+    body: `LocalReflection ${Array.isArray(reflectionUpdated) ? reflectionUpdated.length : 0}; IdentityEvolution ${identityEvolution.appliedCount || 0}; SocialEmbedding / LocationInstitution / LocationDaily / LocationChain / DailyPlanner / SelfNarrative / PersonalityConsistency completed`,
     type: "node_runtime",
     time: nodeRuntimeClockText(world),
     clock: world.clock || 0,

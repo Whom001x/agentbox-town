@@ -10,9 +10,11 @@ The goal is not only to generate stories. The project aims to simulate a small s
 
 ## Current Version
 
-**V3.0.5 Character Genesis + V3.0 Cognitive Decision Engine**
+**V3.1 Identity Evolution Engine + V3.0.5 Character Genesis + V3.0 Cognitive Decision Engine**
 
 V3.0.5 upgrades the setup stage. New residents now start with distinct personality foundations, cognitive profiles, behavior tendencies, life history, initial beliefs, habits, preferences, fears, goals, and relationship intent. These fields are saved and later feed into the V3 Cognitive Decision Engine.
+
+V3.1 upgrades runtime identity growth. A resident does not become a different person after one event. Every midnight, recent experiences slowly update belief, habit, preference, selfModel, and cognitiveProfile. Repeated experiences can gradually shift risk tolerance, social drive, patience, confidence, and behavioral inertia.
 
 Town creation now runs as:
 
@@ -57,6 +59,8 @@ WorldGuard / StateSettlement
 ↓
 EventLog / MemoryGate / MemoryConsolidator
 ↓
+DailyReflection / IdentityEvolution
+↓
 slow personality and memory update
 ```
 
@@ -64,6 +68,7 @@ slow personality and memory update
 
 - Supports 100+ residents in one town simulation.
 - Each resident has multidimensional needs, emotions, relationships, long-term goals, identity core, self model, and behavior weights.
+- V3.1 long-term identity evolution: experience slowly forms beliefs, habits, preferences, self understanding, and cognitive profile drift.
 - V3.0 cognitive decision making: `needs` affect attention, patience, risk tolerance, social tendency, and goal persistence instead of directly selecting actions.
 - Supports Structured Memory, Vector Memory, MemoryGate, daily reflection, and slow personality updates.
 - Supports local embedding models such as LM Studio at `http://127.0.0.1:12346/v1` with `text-embedding-bge-m3@q8_0`.
@@ -197,6 +202,38 @@ Rules:
 - High-impact events can form beliefs.
 - Relationship events create relationshipMemory.
 - Vector Memory is only associative recall. It is not a fact source and cannot directly change the world.
+
+## V3.1 Identity Evolution
+
+New module:
+
+```text
+ai-town-identity-evolution.js
+```
+
+It runs every midnight:
+
+```text
+EventLog / Structured Memory / EmotionCause / GoalRuntime / Relationship
+↓
+IdentityEvolution
+↓
+beliefMemory / habitMemory / preferenceMemory
+↓
+selfModel / cognitiveProfile / behaviorTendency
+↓
+next CognitiveState and Utility Scheduler
+```
+
+Rules:
+
+- Ordinary eating, sleeping, commuting, working, and studying do not directly change identity.
+- Repeated failure slightly increases caution and risk avoidance.
+- Repeated success slightly increases confidence, patience, and goal persistence.
+- Long-term help raises support-seeking, trust, and relationship preference.
+- Long-term loneliness changes social tendency.
+- Learning rate depends on life stage: children change fastest, elders slowest.
+- Every applied change is written to `identityChangeLog`, so you can inspect why a resident changed.
 
 ## Run
 
