@@ -10,9 +10,9 @@ AgentBox Town 是一个多 Agent 虚拟小镇模拟器。它把多个 AI 角色�
 
 ## 当前版本
 
-**V3.1 Identity Evolution Engine + V3.0.5 Character Genesis + V3.0 Cognitive Decision Engine**
+**V3.1.5 Character Genesis + V3.1 Identity Evolution Engine + V3.0 Cognitive Decision Engine**
 
-V3.0.5 升级了建城阶段：新角色出生时会生成独特的人格基础、认知倾向、行为倾向、人生经历、初始信念、习惯、偏好、恐惧、目标和关系动机。这些字段会写入存档，并参与后续 V3 Cognitive Decision Engine。
+V3.1.5 升级了建城阶段：新角色出生时会生成独特的人格基础、`lifeHistorySeed`、认知倾向、行为倾向、出生信念、习惯、偏好、重要经历、自我模型、目标运行态和关系动机。这些字段会写入存档，并从第一天开始参与后续 V3 Cognitive Decision Engine 和 V3.1 Identity Evolution。
 
 V3.1 升级了运行时人格成长：角色不会在一次事件后突然变成另一个人，而是每天 0 点根据近期经历慢速更新 belief、habit、preference、selfModel 和 cognitiveProfile。同样的长期经历会逐渐改变角色的风险偏好、社交倾向、耐心、自信和行为惯性。
 
@@ -35,6 +35,22 @@ Vector 初始化
 ↓
 存档
 ```
+
+V3.1.5 新角色最低结构：
+
+```text
+lifeHistorySeed
+beliefMemory
+habitMemory
+preferenceMemory
+episodicMemory
+selfModel
+cognitiveProfile
+goalRuntime
+agentSchemaVersion: "3.1.5"
+```
+
+这些是出生人格来源，不是剧情生成。普通吃饭、睡觉、通勤、上班、上课不会作为人格记忆写入。
 
 V3.0 运行时决策仍然保持：
 
@@ -68,6 +84,7 @@ DailyReflection / IdentityEvolution
 
 - 支持 100+ 角色的小镇模拟。
 - 每个角色拥有多维需求、多维情绪、关系、长期目标、人格核心、自我模型和行为权重。
+- V3.1.5 角色创建：新居民出生时就有 `lifeHistorySeed`、`beliefMemory`、`habitMemory`、`preferenceMemory`、`episodicMemory`、`selfModel` 和 `goalRuntime`。
 - V3.1 人格长期演化：经历会缓慢形成信念、习惯、偏好、自我认知和认知权重漂移。
 - V3.0 认知决策：`needs` 只影响注意力、耐心、风险偏好、社交倾向和目标坚持度，不直接映射为行动。
 - 支持 `Structured Memory`、`Vector Memory`、`MemoryGate`、每日反思和人格慢更新。

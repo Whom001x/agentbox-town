@@ -10,9 +10,9 @@ The goal is not only to generate stories. The project aims to simulate a small s
 
 ## Current Version
 
-**V3.1 Identity Evolution Engine + V3.0.5 Character Genesis + V3.0 Cognitive Decision Engine**
+**V3.1.5 Character Genesis + V3.1 Identity Evolution Engine + V3.0 Cognitive Decision Engine**
 
-V3.0.5 upgrades the setup stage. New residents now start with distinct personality foundations, cognitive profiles, behavior tendencies, life history, initial beliefs, habits, preferences, fears, goals, and relationship intent. These fields are saved and later feed into the V3 Cognitive Decision Engine.
+V3.1.5 upgrades the setup stage. New residents now start with distinct identity foundations, `lifeHistorySeed`, cognitive profiles, behavior tendencies, birth beliefs, habits, preferences, meaningful episodic memory, self model, goal runtime, and relationship intent. These fields are saved and feed into the V3 Cognitive Decision Engine and V3.1 Identity Evolution from day one.
 
 V3.1 upgrades runtime identity growth. A resident does not become a different person after one event. Every midnight, recent experiences slowly update belief, habit, preference, selfModel, and cognitiveProfile. Repeated experiences can gradually shift risk tolerance, social drive, patience, confidence, and behavioral inertia.
 
@@ -35,6 +35,22 @@ Vector initialization
 ↓
 save files
 ```
+
+Minimum V3.1.5 resident genesis structure:
+
+```text
+lifeHistorySeed
+beliefMemory
+habitMemory
+preferenceMemory
+episodicMemory
+selfModel
+cognitiveProfile
+goalRuntime
+agentSchemaVersion: "3.1.5"
+```
+
+These fields are personality sources, not plot generation. Ordinary eating, sleeping, commuting, working, and studying are not written as identity memory.
 
 The V3.0 runtime decision flow remains:
 
@@ -68,6 +84,7 @@ slow personality and memory update
 
 - Supports 100+ residents in one town simulation.
 - Each resident has multidimensional needs, emotions, relationships, long-term goals, identity core, self model, and behavior weights.
+- V3.1.5 character genesis: new residents are born with `lifeHistorySeed`, `beliefMemory`, `habitMemory`, `preferenceMemory`, `episodicMemory`, `selfModel`, and `goalRuntime`.
 - V3.1 long-term identity evolution: experience slowly forms beliefs, habits, preferences, self understanding, and cognitive profile drift.
 - V3.0 cognitive decision making: `needs` affect attention, patience, risk tolerance, social tendency, and goal persistence instead of directly selecting actions.
 - Supports Structured Memory, Vector Memory, MemoryGate, daily reflection, and slow personality updates.

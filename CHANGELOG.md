@@ -1,5 +1,20 @@
 # 更新记录
 
+## 2026-06-16 - V3.1.5 Character Genesis Upgrade
+
+- 升级角色创建系统，让新角色出生时就具备 V3.1 人格生命模型。
+- `CharacterSeedAgent` / `setupAgentBatchAgent` 现在支持 `lifeHistorySeed`、`cognitiveProfile`、`selfModel`、`beliefMemory`、`habitMemory`、`preferenceMemory`、`episodicMemory` 和 `goalRuntime`。
+- `setupMakeAgent` 写入 `agentSchemaVersion: "3.1.5"`，并保留出生人格字段到存档。
+- 出生记忆与后天记忆使用同一套结构化格式，避免把吃饭、睡觉、上班、上课、通勤直接写成人格记忆。
+- 职业和年龄会确定性影响认知画像：医生提高照护/健康意识，教师提高耐心，店主提高社交倾向，保安提高风险/安全意识，老人提高规律偏好。
+- `setupRelationSketchAgent` 可参考角色年龄、职业、价值观和 lifeHistorySeed 生成更合理的家庭、同事、同学、邻里和熟客关系，但仍不能写剧情或记忆。
+- `npm run check:character-genesis` 加严：检查新角色 cognitiveProfile/selfModel/beliefMemory/habitMemory/episodicMemory 100% 存在，并禁止英文模板记忆残留。
+
+验证：
+
+- `npm run check`
+- `npm run check:character-genesis`
+
 ## 2026-06-16 - V3.1 Identity Evolution Engine
 
 - 新增 `ai-town-identity-evolution.js`，每天 0 点根据近期 EventLog、结构化记忆、情绪原因、目标和关系证据沉淀人格变化。

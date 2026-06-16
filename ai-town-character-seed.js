@@ -133,7 +133,7 @@ const roleBase = {
     habits: ["先确认症状和严重程度"],
     likes: ["流程清楚、信息准确的环境"],
     dislikes: ["没有依据的判断"],
-    tendency: { empathy: 0.72, patience: 0.66, riskTolerance: 0.38, routinePreference: 0.58, socialDrive: 0.56 }
+    tendency: { empathy: 0.72, patience: 0.66, riskTolerance: 0.38, routinePreference: 0.58, socialDrive: 0.56, healthAwareness: 0.78, riskAwareness: 0.66 }
   },
   service: {
     values: ["熟客", "口碑", "秩序"],
@@ -149,7 +149,7 @@ const roleBase = {
     habits: ["先观察风险源和可撤离路线"],
     likes: ["视野清楚的地点"],
     dislikes: ["含糊的危险信号"],
-    tendency: { riskTolerance: 0.56, patience: 0.6, routinePreference: 0.58, conflictAvoidance: 0.42, ambition: 0.48 }
+    tendency: { riskTolerance: 0.56, patience: 0.6, routinePreference: 0.58, conflictAvoidance: 0.42, ambition: 0.48, riskAwareness: 0.78, safetyAwareness: 0.82 }
   },
   creative: {
     values: ["观察", "表达", "自由"],
@@ -199,9 +199,10 @@ function mergedProfile(stage, role, seed) {
       : stage === "elder" ? { riskTolerance: 0.28, curiosity: 0.4, routinePreference: 0.72, socialDrive: 0.44, ambition: 0.34, empathy: 0.58, conflictAvoidance: 0.7, patience: 0.66 }
         : { riskTolerance: 0.48, curiosity: 0.5, routinePreference: 0.56, socialDrive: 0.5, ambition: 0.54, empathy: 0.54, conflictAvoidance: 0.54, patience: 0.56 };
   const roleBias = roleBase[role]?.tendency || {};
-  const keys = ["riskTolerance", "curiosity", "routinePreference", "socialDrive", "ambition", "empathy", "conflictAvoidance", "patience"];
+  const keys = ["riskTolerance", "curiosity", "routinePreference", "socialDrive", "ambition", "empathy", "conflictAvoidance", "patience", "healthAwareness", "riskAwareness", "safetyAwareness"];
   return Object.fromEntries(keys.map(key => {
-    const base = roleBias[key] === undefined ? stageBias[key] : (stageBias[key] * 0.45 + roleBias[key] * 0.55);
+    const stageValue = stageBias[key] === undefined ? 0.5 : stageBias[key];
+    const base = roleBias[key] === undefined ? stageValue : (stageValue * 0.45 + roleBias[key] * 0.55);
     return [key, jitter(base, seed, key, 0.22)];
   }));
 }
@@ -221,6 +222,7 @@ function decisionWeightsFromProfile(profile = {}, seed = "") {
     novelty: clamp01(novelty, 0.3),
     social: clamp01(social, 0.45),
     memoryWeight: clamp01(memory, 0.55),
+    identityWeight: clamp01(persona, 0.55),
     personalityWeight: clamp01(persona, 0.55),
     emotionWeight: clamp01(emotion, 0.45),
     goalWeight: clamp01(goal, 0.55),
@@ -244,16 +246,28 @@ function behaviorTendencyFromProfile(profile = {}) {
 
 function makeStructuredItem(agentId, type, index, text, options = {}) {
   const id = compact(options.id || `seed_${agentId}_${type}_${index + 1}`, "", 80);
+  const at = num(options.at, 0);
   return {
     id,
     type,
     sourceType: type,
-    at: 0,
-    lastSeenAt: 0,
+    at,
+    lastSeenAt: num(options.lastSeenAt, at),
     text: compact(text, "", 180),
     meaning: compact(options.meaning || text, "", 220),
     importance: clamp(options.importance, 1, 5, 3),
     strength: clamp(options.strength, 0, 100, 58),
+    confidence: clamp01(options.confidence, 0.58),
+    source: options.source || "character-genesis",
+    sourceEvents: Array.isArray(options.sourceEvents) ? options.sourceEvents.slice(0, 8) : [],
+    createdAt: num(options.createdAt, at),
+    lastConfirmed: num(options.lastConfirmed, at),
+    trigger: compact(options.trigger || "", "", 80),
+    action: compact(options.action || "", "", 120),
+    probability: options.probability == null ? undefined : clamp01(options.probability, 0.5),
+    preference: compact(options.preference || "", "", 120),
+    lesson: compact(options.lesson || "", "", 180),
+    emotionalImpact: options.emotionalImpact == null ? undefined : clamp01(options.emotionalImpact, 0.25),
     valence: clamp(options.valence, -100, 100, 0),
     target: options.target || "",
     tags: unique(options.tags || ["genesis"], 8),
@@ -289,6 +303,172 @@ function stageDescription(stage) {
   return "在事业、关系和责任之间维持平衡";
 }
 
+function roleSourceText(role, job) {
+  return {
+    student: "学习和同伴环境",
+    teacher: "教育和照看学生的经验",
+    medical: "照护和健康判断经验",
+    service: "和熟客、营业秩序打交道的经验",
+    security: "维护安全和规则边界的经验",
+    creative: "观察生活细节和表达的经验",
+    farmer: "跟随季节、天气和体力节奏的经验",
+    elder: "长期生活经验和身体节奏变化",
+    worker: "按时完成工作和家庭责任的经验",
+    resident: `${job || "日常生活"}里的稳定责任`
+  }[role] || `${job || "日常生活"}里的稳定责任`;
+}
+
+function lifeHistorySeedFor(stage, role, job, values = [], beliefs = [], habits = [], likes = [], goal = "") {
+  const roleSource = roleSourceText(role, job);
+  const value = values[0] || "稳定";
+  const belief = beliefs[0] || "先判断再行动";
+  const habit = habits[0] || "先稳定节奏";
+  const like = likes[0] || "熟悉环境";
+  const goalText = goal || "维持稳定生活";
+  return {
+    childhood: [{
+      event: `从小在熟悉关系里学习到“${value}”很重要。`,
+      impact: `更容易把${value}作为判断事情轻重的依据。`,
+      ageRange: "0-12"
+    }],
+    youth: [{
+      event: `成长过程中反复接触${roleSource}，逐渐形成“${belief}”的判断。`,
+      impact: "遇到新情况时不会只按需求反应，而会先用已有判断过滤。",
+      ageRange: stage === "child" ? "尚未完全进入青年阶段" : "13-22"
+    }],
+    adulthood: [{
+      event: stage === "child" || stage === "teen"
+        ? `尚未长期承担成年职业责任，但已经从身边人那里观察到${job || "日常责任"}的稳定要求。`
+        : `长期围绕${job || "小镇居民"}身份处理日常责任，因此形成“${habit}”的倾向。`,
+      impact: stage === "child" || stage === "teen"
+        ? "对责任的理解仍依赖家庭、学校和熟人环境。"
+        : "职责、关系和个人状态会一起影响行动选择。",
+      ageRange: stage === "elder" ? "23-64" : stage === "adult" ? "23-现在" : "未来阶段"
+    }],
+    recent: [{
+      event: `最近仍围绕“${goalText}”维持生活节奏，并偏好${like}。`,
+      impact: "当前目标、地点选择和社交方式会受这个稳定来源影响。",
+      ageRange: "近期"
+    }]
+  };
+}
+
+function flattenLifeHistorySeed(seed = {}) {
+  return ["childhood", "youth", "adulthood", "recent"].flatMap(section => (
+    Array.isArray(seed[section])
+      ? seed[section].map((item, index) => ({ ...item, section, index }))
+      : []
+  ));
+}
+
+function memoryViewsFromSeed(agentId, lifeHistorySeed, beliefs = [], habits = [], likes = [], dislikes = [], profile = {}, role = "resident") {
+  const lifeEvents = flattenLifeHistorySeed(lifeHistorySeed);
+  const sourceFor = (type, index) => [`life_seed_${agentId}_${type}_${index + 1}`];
+  const episodicMemory = lifeEvents.slice(0, 4).map((item, index) => ({
+    id: `seed_${agentId}_episodic_${index + 1}`,
+    type: "episodic",
+    event: compact(item.event, "", 180),
+    lesson: compact(item.impact || "这段经历会影响之后的判断。", "", 180),
+    meaning: compact(item.impact || item.event, "", 220),
+    emotionalImpact: Number(clamp01(0.18 + index * 0.04, 0.25)),
+    importance: Number(clamp01(0.55 + index * 0.03, 0.6)),
+    source: "lifeHistorySeed",
+    sourceEvents: sourceFor("episodic", index),
+    ageRange: item.ageRange || "",
+    section: item.section || ""
+  }));
+  const beliefMemory = unique(beliefs, 3).map((belief, index) => ({
+    id: `seed_${agentId}_belief_${index + 1}`,
+    type: "belief",
+    belief: compact(belief, "", 160),
+    strength: Number(clamp01(0.58 + profile.routinePreference * 0.18 + index * 0.02, 0.68)),
+    confidence: Number(clamp01(0.52 + profile.patience * 0.18, 0.62)),
+    source: role === "medical" ? "职业经历" : role === "teacher" ? "教育经历" : role === "security" ? "职责经验" : "人生经历",
+    sourceEvents: sourceFor("belief", index),
+    createdAt: 0,
+    lastConfirmed: 0
+  }));
+  const habitMemory = unique(habits, 3).map((habit, index) => ({
+    id: `seed_${agentId}_habit_${index + 1}`,
+    type: "habit",
+    trigger: index === 0 ? "压力或信息不完整时" : index === 1 ? "需要做选择时" : "日常节奏被打断时",
+    action: compact(habit, "", 140),
+    habit: compact(habit, "", 160),
+    probability: Number(clamp01(0.46 + profile.routinePreference * 0.26 + profile.patience * 0.1 - index * 0.03, 0.58)),
+    strength: Number(clamp01(0.5 + profile.routinePreference * 0.25, 0.62)),
+    source: "长期行为模式",
+    sourceEvents: sourceFor("habit", index)
+  }));
+  const preferenceMemory = [
+    ...unique(likes, 2).map((preference, index) => ({
+      id: `seed_${agentId}_preference_like_${index + 1}`,
+      type: "preference",
+      preference: compact(preference, "", 140),
+      strength: Number(clamp01(0.5 + profile.socialDrive * 0.12 + profile.routinePreference * 0.12, 0.6)),
+      valence: 20,
+      source: "生活偏好",
+      sourceEvents: sourceFor("preference_like", index)
+    })),
+    ...unique(dislikes, 1).map((preference, index) => ({
+      id: `seed_${agentId}_preference_dislike_${index + 1}`,
+      type: "preference",
+      preference: `不喜欢${compact(preference, "", 120)}`,
+      strength: Number(clamp01(0.42 + profile.conflictAvoidance * 0.18, 0.52)),
+      valence: -15,
+      source: "回避偏好",
+      sourceEvents: sourceFor("preference_dislike", index)
+    }))
+  ];
+  return { episodicMemory, beliefMemory, habitMemory, preferenceMemory };
+}
+
+function structuredMemoryFromViews(agentId, views = {}, goal = "", profile = {}) {
+  return {
+    episodic: (views.episodicMemory || []).map((item, index) => makeStructuredItem(agentId, "episodic", index, item.event, {
+      meaning: item.lesson || item.meaning || item.event,
+      importance: 3.1 + clamp(item.importance, 0, 1, 0.55),
+      strength: 55 + Math.round(clamp(item.importance, 0, 1, 0.55) * 18),
+      emotionalImpact: item.emotionalImpact,
+      lesson: item.lesson,
+      source: item.source || "lifeHistorySeed",
+      sourceEvents: item.sourceEvents || [],
+      tags: ["genesis", "lifeHistorySeed", item.section].filter(Boolean),
+      valence: 4
+    })),
+    belief: (views.beliefMemory || []).map((item, index) => makeStructuredItem(agentId, "belief", index, item.belief, {
+      importance: 3.2,
+      strength: Math.round(clamp(item.strength, 0, 1, 0.6) * 100),
+      confidence: item.confidence,
+      source: item.source || "character-genesis",
+      sourceEvents: item.sourceEvents || [],
+      tags: ["genesis", "belief"],
+      valence: 3
+    })),
+    habit: (views.habitMemory || []).map((item, index) => makeStructuredItem(agentId, "habit", index, item.habit || item.action, {
+      importance: 3,
+      strength: Math.round(clamp(item.strength, 0, 1, 0.58) * 100),
+      trigger: item.trigger,
+      action: item.action,
+      probability: item.probability,
+      source: item.source || "character-genesis",
+      sourceEvents: item.sourceEvents || [],
+      tags: ["genesis", "habit"],
+      valence: 2
+    })),
+    preference: (views.preferenceMemory || []).map((item, index) => makeStructuredItem(agentId, "preference", index, item.preference, {
+      importance: 2.6,
+      strength: Math.round(clamp(item.strength, 0, 1, 0.55) * 100),
+      preference: item.preference,
+      source: item.source || "character-genesis",
+      sourceEvents: item.sourceEvents || [],
+      tags: ["genesis", "preference"],
+      valence: item.valence == null ? 12 : item.valence
+    })),
+    social: [],
+    goal: [makeStructuredItem(agentId, "goal", 0, goal, { importance: 3.1, strength: 56 + Math.round(profile.ambition * 18), valence: 5, tags: ["genesis", "goal"] })]
+  };
+}
+
 function characterSeedForSlot(slot = {}, context = {}) {
   const ageYears = num(slot.ageYears || slot.existing?.ageYears || slot.existing?.age || String(slot.ageRange || "").match(/\d+/)?.[0], 36);
   const stage = ageStageFromYears(ageYears);
@@ -308,31 +488,21 @@ function characterSeedForSlot(slot = {}, context = {}) {
   const likes = unique([roleData.likes, stageData.likes], 5);
   const dislikes = unique([roleData.dislikes, stageData.dislikes], 5);
   const goal = compact(slot.existing?.goal || stageData.goal || "维持稳定生活", "维持稳定生活", 80);
+  const lifeHistorySeed = lifeHistorySeedFor(stage, role, job, values, beliefs, habits, likes, goal);
   const lifeHistory = {
     stage,
     stageTheme: stageDescription(stage),
     summary: `{name}在${job}身份中形成了重视${values[0] || "稳定"}的生活底色。`,
-    episodes: [
-      `{name}过去反复经历过需要自己判断轻重缓急的小事，因此更相信“${beliefs[0] || "先判断再行动"}”。`,
-      `{name}在${job}相关的日常里逐渐形成了“${habits[0] || "先稳定节奏"}”的习惯。`
-    ]
+    episodes: flattenLifeHistorySeed(lifeHistorySeed).slice(0, 4).map(item => `{name}${item.event.replace(/^从小|^成长过程中|^长期|^最近仍/, "")}`)
   };
-  const structuredMemory = {
-    episodic: lifeHistory.episodes.map((text, index) => makeStructuredItem(agentId, "episodic", index, text, { importance: 3.4, strength: 58 + index * 5, valence: 4 })),
-    belief: beliefs.map((text, index) => makeStructuredItem(agentId, "belief", index, text, { importance: 3.2, strength: 58 + Math.round(profile.routinePreference * 18), valence: 3 })),
-    habit: habits.map((text, index) => makeStructuredItem(agentId, "habit", index, text, { importance: 3, strength: 55 + Math.round(profile.routinePreference * 25), valence: 2 })),
-    preference: [
-      ...likes.map((text, index) => makeStructuredItem(agentId, "preference", index, `喜欢${text}`, { importance: 2.6, strength: 54, valence: 12 })),
-      ...dislikes.map((text, index) => makeStructuredItem(agentId, "preference", likes.length + index, `不喜欢${text}`, { importance: 2.6, strength: 52, valence: -12 }))
-    ],
-    social: [],
-    goal: [makeStructuredItem(agentId, "goal", 0, goal, { importance: 3.1, strength: 56 + Math.round(profile.ambition * 18), valence: 5 })]
-  };
+  const memoryViews = memoryViewsFromSeed(agentId, lifeHistorySeed, beliefs, habits, likes, dislikes, profile, role);
+  const structuredMemory = structuredMemoryFromViews(agentId, memoryViews, goal, profile);
   const vectorMemory = [...structuredMemory.episodic, ...structuredMemory.belief.slice(0, 1), ...structuredMemory.preference.slice(0, 1)]
     .map((item, index) => makeVectorItem(agentId, item, index));
   return {
     id: agentId,
     source: "CharacterSeedAgent",
+    agentSchemaVersion: "3.1.5",
     ageYears,
     ageStage: stage,
     roleKind: role,
@@ -356,10 +526,15 @@ function characterSeedForSlot(slot = {}, context = {}) {
     cognitiveProfile: profile,
     decisionWeights,
     behaviorTendency,
+    lifeHistorySeed,
     lifeHistory,
     initialBeliefs: beliefs,
     initialHabits: habits,
     preferences: { like: likes, dislike: dislikes },
+    episodicMemory: memoryViews.episodicMemory,
+    beliefMemory: memoryViews.beliefMemory,
+    habitMemory: memoryViews.habitMemory,
+    preferenceMemory: memoryViews.preferenceMemory,
     structuredMemory,
     vectorMemory,
     personalityProfile: {
@@ -382,8 +557,27 @@ function characterSeedForSlot(slot = {}, context = {}) {
       values,
       fears,
       selfBeliefs: beliefs,
+      selfImage: `我是一个重视${values[0] || "稳定"}的${job || "小镇居民"}`,
+      strengths: unique([
+        profile.patience >= 0.62 ? "耐心" : "",
+        profile.empathy >= 0.62 ? "愿意照顾别人" : "",
+        profile.routinePreference >= 0.62 ? "生活节奏稳定" : "",
+        profile.curiosity >= 0.62 ? "观察力强" : ""
+      ], 4),
+      concerns: unique([
+        profile.riskTolerance <= 0.4 ? "担心风险失控" : "",
+        profile.conflictAvoidance >= 0.62 ? "担心冲突扩大" : "",
+        fears[0]
+      ], 4),
+      lifeNarrative: `{name}的性格主要来自${roleSourceText(role, job)}：${flattenLifeHistorySeed(lifeHistorySeed).slice(0, 2).map(item => item.impact).join("；")}`,
+      competenceBeliefs: [],
       currentSelfView: "刚进入小镇生活，正在按照已有习惯理解自己的处境",
       selfConsistencyWeight: clamp01(0.5 + profile.routinePreference * 0.25 + profile.patience * 0.12, 0.65)
+    },
+    goalRuntime: {
+      goals: [{ id: `goal_${agentId}_1`, name: goal, title: goal, priority: clamp01(0.45 + profile.ambition * 0.35, 0.58), progress: 0.18, frustration: 0, lastProgressTime: 0, blockedBy: [] }],
+      updatedAt: 0,
+      source: "character-genesis-v3.1.5"
     },
     logs: [`CharacterSeedAgent prepared ${agentId}`]
   };
@@ -412,6 +606,17 @@ function resolveStructuredMemory(memory = {}, agent = {}) {
       meaning: resolveNameText(item.meaning || item.text, agent),
       importance: clamp(item.importance, 1, 5, 3),
       strength: clamp(item.strength, 0, 100, 55),
+      confidence: clamp01(item.confidence, 0.58),
+      source: item.source || "character-genesis",
+      sourceEvents: Array.isArray(item.sourceEvents) ? item.sourceEvents.slice(0, 8) : [],
+      createdAt: num(item.createdAt, 0),
+      lastConfirmed: num(item.lastConfirmed, item.lastSeenAt || item.at || 0),
+      trigger: resolveNameText(item.trigger || "", agent),
+      action: resolveNameText(item.action || "", agent),
+      probability: item.probability == null ? undefined : clamp01(item.probability, 0.5),
+      preference: resolveNameText(item.preference || "", agent),
+      lesson: resolveNameText(item.lesson || "", agent),
+      emotionalImpact: item.emotionalImpact == null ? undefined : clamp01(item.emotionalImpact, 0.25),
       valence: clamp(item.valence, -100, 100, 0),
       tags: unique([item.tags || [], "genesis"], 8),
       evidenceIds: Array.isArray(item.evidenceIds) ? item.evidenceIds.slice(0, 8) : []
@@ -436,6 +641,78 @@ function mergeMemoryLayers(existing = {}, extra = {}) {
   return result;
 }
 
+function mergeViewItems(existing = [], extra = [], limit = 30) {
+  const seen = new Set();
+  return [...(Array.isArray(existing) ? existing : []), ...(Array.isArray(extra) ? extra : [])]
+    .filter(item => {
+      const key = item?.id || item?.belief || item?.habit || item?.preference || item?.event || item?.meaning || item?.text;
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .slice(0, limit);
+}
+
+function resolveLifeHistorySeed(seed = {}, agent = {}) {
+  const output = { childhood: [], youth: [], adulthood: [], recent: [] };
+  Object.keys(output).forEach(section => {
+    output[section] = (Array.isArray(seed?.[section]) ? seed[section] : [])
+      .map(item => ({
+        event: resolveNameText(item?.event || "", agent),
+        impact: resolveNameText(item?.impact || "", agent),
+        ageRange: compact(item?.ageRange || "", "", 40)
+      }))
+      .filter(item => item.event || item.impact)
+      .slice(0, 4);
+  });
+  return output;
+}
+
+function viewMemoryFromStructured(agent = {}) {
+  const structured = agent.structuredMemory || {};
+  const episodicMemory = (structured.episodic || []).map(item => ({
+    id: item.id || "",
+    type: "episodic",
+    event: item.text || item.event || "",
+    lesson: item.lesson || item.meaning || "",
+    meaning: item.meaning || item.lesson || item.text || "",
+    emotionalImpact: item.emotionalImpact == null ? 0.25 : item.emotionalImpact,
+    importance: clamp01(Number(item.importance || 3) / 5, 0.6),
+    source: item.source || "character-genesis",
+    sourceEvents: Array.isArray(item.sourceEvents) ? item.sourceEvents.slice(0, 8) : []
+  }));
+  const beliefMemory = (structured.belief || []).map(item => ({
+    id: item.id || "",
+    type: "belief",
+    belief: item.meaning || item.text || "",
+    strength: clamp01(Number(item.strength || 60) / 100, 0.6),
+    confidence: clamp01(item.confidence, 0.58),
+    source: item.source || "character-genesis",
+    sourceEvents: Array.isArray(item.sourceEvents) ? item.sourceEvents.slice(0, 8) : []
+  }));
+  const habitMemory = (structured.habit || []).map(item => ({
+    id: item.id || "",
+    type: "habit",
+    trigger: item.trigger || "相关情境",
+    action: item.action || item.meaning || item.text || "",
+    habit: item.meaning || item.text || item.action || "",
+    probability: clamp01(item.probability, clamp01(Number(item.strength || 58) / 100, 0.58)),
+    strength: clamp01(Number(item.strength || 58) / 100, 0.58),
+    source: item.source || "character-genesis",
+    sourceEvents: Array.isArray(item.sourceEvents) ? item.sourceEvents.slice(0, 8) : []
+  }));
+  const preferenceMemory = (structured.preference || []).map(item => ({
+    id: item.id || "",
+    type: "preference",
+    preference: item.preference || item.meaning || item.text || "",
+    strength: clamp01(Number(item.strength || 55) / 100, 0.55),
+    valence: clamp(item.valence, -100, 100, 0),
+    source: item.source || "character-genesis",
+    sourceEvents: Array.isArray(item.sourceEvents) ? item.sourceEvents.slice(0, 8) : []
+  }));
+  return { episodicMemory, beliefMemory, habitMemory, preferenceMemory };
+}
+
 function mergeCharacterSeed(agent = {}, seed = {}) {
   if (!agent || typeof agent !== "object") return agent;
   const source = seed && typeof seed === "object" ? seed : {};
@@ -455,6 +732,10 @@ function mergeCharacterSeed(agent = {}, seed = {}) {
     ...(source.behaviorTendency || {}),
     ...(agent.behaviorTendency && typeof agent.behaviorTendency === "object" ? agent.behaviorTendency : {})
   };
+  agent.lifeHistorySeed = resolveLifeHistorySeed(
+    agent.lifeHistorySeed && Object.keys(agent.lifeHistorySeed).length ? agent.lifeHistorySeed : source.lifeHistorySeed,
+    agent
+  );
   agent.lifeHistory = {
     ...(source.lifeHistory || {}),
     ...(agent.lifeHistory && typeof agent.lifeHistory === "object" ? agent.lifeHistory : {})
@@ -499,9 +780,44 @@ function mergeCharacterSeed(agent = {}, seed = {}) {
     fears: unique([source.selfModel?.fears, agent.selfModel?.fears, agent.identityCore.fears], 8).map(nameAware),
     selfBeliefs: unique([source.selfModel?.selfBeliefs, agent.selfModel?.selfBeliefs, agent.identityCore.selfBeliefs], 10).map(nameAware),
     currentSelfView: nameAware(agent.selfModel?.currentSelfView || source.selfModel?.currentSelfView || ""),
+    selfImage: nameAware(agent.selfModel?.selfImage || source.selfModel?.selfImage || agent.identityCore.identity),
+    strengths: unique([source.selfModel?.strengths, agent.selfModel?.strengths], 8).map(nameAware),
+    concerns: unique([source.selfModel?.concerns, agent.selfModel?.concerns, agent.identityCore.fears], 8).map(nameAware),
+    lifeNarrative: nameAware(agent.selfModel?.lifeNarrative || source.selfModel?.lifeNarrative || agent.lifeHistory?.summary || ""),
+    competenceBeliefs: unique([source.selfModel?.competenceBeliefs, agent.selfModel?.competenceBeliefs], 8).map(nameAware),
     selfConsistencyWeight: clamp01(agent.selfModel?.selfConsistencyWeight ?? source.selfModel?.selfConsistencyWeight, 0.65)
   };
   agent.structuredMemory = mergeMemoryLayers(agent.structuredMemory || {}, structured);
+  const structuredViews = viewMemoryFromStructured(agent);
+  agent.episodicMemory = mergeViewItems(agent.episodicMemory, source.episodicMemory || structuredViews.episodicMemory, 30).map(item => ({
+    ...item,
+    event: nameAware(item.event || item.text || item.meaning || ""),
+    lesson: nameAware(item.lesson || item.meaning || ""),
+    meaning: nameAware(item.meaning || item.lesson || item.event || "")
+  })).filter(item => item.event || item.meaning);
+  agent.beliefMemory = mergeViewItems(agent.beliefMemory, source.beliefMemory || structuredViews.beliefMemory, 30).map(item => ({
+    ...item,
+    belief: nameAware(item.belief || item.text || item.meaning || ""),
+    strength: clamp01(item.strength, 0.6),
+    source: item.source || "character-genesis",
+    sourceEvents: Array.isArray(item.sourceEvents) ? item.sourceEvents.slice(0, 8) : []
+  })).filter(item => item.belief);
+  agent.habitMemory = mergeViewItems(agent.habitMemory, source.habitMemory || structuredViews.habitMemory, 30).map(item => ({
+    ...item,
+    trigger: nameAware(item.trigger || "相关情境"),
+    action: nameAware(item.action || item.habit || item.text || item.meaning || ""),
+    habit: nameAware(item.habit || item.action || item.text || item.meaning || ""),
+    probability: clamp01(item.probability, 0.58),
+    source: item.source || "character-genesis",
+    sourceEvents: Array.isArray(item.sourceEvents) ? item.sourceEvents.slice(0, 8) : []
+  })).filter(item => item.habit || item.action);
+  agent.preferenceMemory = mergeViewItems(agent.preferenceMemory, source.preferenceMemory || structuredViews.preferenceMemory, 30).map(item => ({
+    ...item,
+    preference: nameAware(item.preference || item.text || item.meaning || ""),
+    strength: clamp01(item.strength, 0.55),
+    source: item.source || "character-genesis",
+    sourceEvents: Array.isArray(item.sourceEvents) ? item.sourceEvents.slice(0, 8) : []
+  })).filter(item => item.preference);
   agent.semanticMemory ||= {};
   Object.entries(agent.structuredMemory).forEach(([type, items]) => {
     if (!Array.isArray(agent.semanticMemory[type])) agent.semanticMemory[type] = [];
@@ -528,8 +844,23 @@ function mergeCharacterSeed(agent = {}, seed = {}) {
   if (!agent.longTermGoals && agent.goal) {
     agent.longTermGoals = [{ title: agent.goal, progress: 0.2, priority: 0.55, horizon: "month" }];
   }
+  agent.goalRuntime = source.goalRuntime || agent.goalRuntime || {
+    goals: (agent.longTermGoals || []).slice(0, 3).map((goal, index) => ({
+      id: goal.id || `goal_${agent.id}_${index + 1}`,
+      name: goal.name || goal.title || agent.goal || "维持稳定生活",
+      title: goal.title || goal.name || agent.goal || "维持稳定生活",
+      priority: clamp01(goal.priority, 0.55),
+      progress: clamp01(goal.progress, 0.2),
+      frustration: clamp01(goal.frustration, 0),
+      lastProgressTime: goal.lastProgressTime || 0,
+      blockedBy: Array.isArray(goal.blockedBy) ? goal.blockedBy.slice(0, 6) : []
+    })),
+    updatedAt: 0,
+    source: "character-genesis-v3.1.5"
+  };
+  agent.agentSchemaVersion = "3.1.5";
   agent.characterGenesis = {
-    version: "v3.0.5",
+    version: "v3.1.5",
     source: source.source || "CharacterSeedAgent",
     roleKind: source.roleKind || roleKind(agent.job),
     ageStage: source.ageStage || agent.ageStage || ageStageFromYears(agent.ageYears),

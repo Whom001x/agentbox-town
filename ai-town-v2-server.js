@@ -4164,16 +4164,16 @@ function systemPrompt(task) {
     return `${common}\n你是 SetupBlueprintAgent。你的权限只有把用户的一句话建镇要求拆成人口结构蓝图：小镇类型、家庭户型、年龄金字塔、学校/诊所/商业/公共机构规模、工作模式、地点草表、人物批次和关系规模目标。你不能直接生成具体角色，不能生成行动、事件、记忆或剧情。人物 id 不在本阶段生成；地点 id 优先沿用 payload.existingPlaces；只有 existingPlaces 不足时才可新建稳定地点 id。roleBatches.batchId 可新建，但必须来自人口结构推导，不要随便给固定职业比例。输出只服务后续批处理。`;
   }
   if (task === "characterSeedAgent") {
-    return `${common}\nYou are CharacterSeedAgent for setup only. Generate initial personality seeds for existing character slots. Do not create actions, events, relationships, deaths, hidden NPCs, or world facts. Output compact JSON only. Each seed must give stable identityCore, numeric cognitiveProfile, decisionWeights compatible with the V3 cognitive engine, lifeHistory, beliefs, habits, preferences, fears, and behaviorTendency. These are birth/setup priors, not events that happened today.`;
+    return `${common}\nYou are CharacterSeedAgent for setup only. Generate V3.1.5 birth personality seeds for existing character slots. Do not create actions, events that happened today, relationships, deaths, hidden NPCs, town-wide facts, or dramatic backstory. Output compact JSON only. Each seed must give stable identityCore, lifeHistorySeed, numeric cognitiveProfile, decisionWeights, selfModel, beliefMemory, habitMemory, preferenceMemory, episodicMemory, goalRuntime and behaviorTendency. These are personality sources, not plot.`;
   }
   if (task === "setupAgentBatchAgent") {
-    return `${common}\n你是 SetupAgentBatchAgent。你的权限只有为 payload.slots 中指定的一小批槽位补全初始人物基础资料。你必须使用 slots.id，不得新增槽位外角色，不得生成关系、家庭、事件、行动、当天经历或全镇背景。姓名必须自然、唯一、普通中文姓名，不能使用占位名或重复名。`;
+    return `${common}\n你是 SetupAgentBatchAgent。你的权限只有为 payload.slots 中指定的一小批槽位补全初始人物基础资料，并保留/补齐 slots.characterSeed 中的 V3.1.5 出生人格字段。你必须使用 slots.id，不得新增槽位外角色，不得生成关系、家庭、事件、行动、当天经历或全镇背景。姓名必须自然、唯一、普通中文姓名，不能使用占位名或重复名。lifeHistorySeed、beliefMemory、habitMemory、preferenceMemory、episodicMemory 只是人格来源，不是今天发生的剧情。`;
   }
   if (task === "characterConsistencyAgent") {
     return `${common}\nYou are CharacterConsistencyAgent for setup only. Check already generated characters for age/job/personality/goal/memory contradictions. You may suggest tiny fixes for existing agent ids only. Do not add characters, locations, actions, events, relationships, or facts. Output compact JSON only.`;
   }
   if (task === "setupRelationSketchAgent") {
-    return `${common}\n你是 SetupRelationSketchAgent。你的权限只有在人物表已经生成后，为已有 agent 和 place 生成粗粒度关系表：households、groups、relations。你不能新增人物，不能改人物基础资料，不能生成行动、记忆、承诺、地点状态或剧情。households.id 和 groups.id 可新建稳定表格主键；所有 from/to/members/authority/place/homePlace 必须引用 payload 中真实存在的 id。`;
+    return `${common}\n你是 SetupRelationSketchAgent。你的权限只有在人物表已经生成后，为已有 agent 和 place 生成粗粒度关系表：households、groups、relations。你可以参考 ageStage、job、values、goal、lifeHistorySeed 来判断家庭/同学/同事/邻里/熟客结构，但不能修改人物、不能新增人物，不能生成行动、记忆、承诺、地点状态或剧情。households.id 和 groups.id 可新建稳定表格主键；所有 from/to/members/authority/place/homePlace 必须引用 payload 中真实存在的 id。`;
   }
   if (task === "setupAuditAgent") {
     return `${common}\n你是 SetupAuditAgent。你的权限只有审查建镇阶段的表格缺口，并返回最小补丁：问题列表、少量人物字段修正、缺失住户/群组/关系补行。你不能新增角色，不能大规模重排社会结构，不能写剧情或行动。households.id 和 groups.id 可新建稳定表格主键；其他修正必须使用已有 agent id 和 place id。`;
@@ -4338,15 +4338,20 @@ function userPrompt(task, payload) {
   }
   if (task === "characterSeedAgent") {
     return JSON.stringify({
-      instruction: "Return JSON: {\"characterSeeds\":[{\"id\":\"\",\"identityCore\":{\"identity\":\"\",\"values\":[\"\"],\"fears\":[\"\"],\"habits\":[\"\"],\"selfBeliefs\":[\"\"],\"avoidance\":[\"\"],\"biases\":{\"dutyFirst\":50,\"riskAvoidance\":50,\"askForHelp\":50,\"familyAttachment\":50,\"conflictAvoidance\":50,\"statusConcern\":50}},\"cognitiveProfile\":{\"riskTolerance\":0.5,\"curiosity\":0.5,\"routinePreference\":0.5,\"socialDrive\":0.5,\"ambition\":0.5,\"empathy\":0.5,\"conflictAvoidance\":0.5,\"patience\":0.5},\"decisionWeights\":{\"memory\":0.55,\"persona\":0.55,\"emotion\":0.45,\"goal\":0.55,\"novelty\":0.3,\"social\":0.45},\"behaviorTendency\":{\"keepRoutine\":0.5,\"seekHelp\":0.5,\"explore\":0.5,\"avoidConflict\":0.5,\"persistOnGoal\":0.5,\"careForOthers\":0.5,\"takeRisk\":0.5,\"selfReflect\":0.5},\"lifeHistory\":{\"stage\":\"adult\",\"stageTheme\":\"\",\"summary\":\"\",\"episodes\":[\"\"]},\"initialBeliefs\":[\"\"],\"initialHabits\":[\"\"],\"preferences\":{\"like\":[\"\"],\"dislike\":[\"\"]},\"goal\":\"\"}],\"logs\":[{\"title\":\"\",\"body\":\"\"}]}",
+      instruction: "Return JSON: {\"characterSeeds\":[{\"id\":\"\",\"agentSchemaVersion\":\"3.1.5\",\"identityCore\":{\"identity\":\"\",\"values\":[\"\"],\"fears\":[\"\"],\"habits\":[\"\"],\"selfBeliefs\":[\"\"],\"avoidance\":[\"\"],\"biases\":{\"dutyFirst\":50,\"riskAvoidance\":50,\"askForHelp\":50,\"familyAttachment\":50,\"conflictAvoidance\":50,\"statusConcern\":50}},\"lifeHistorySeed\":{\"childhood\":[{\"event\":\"\",\"impact\":\"\",\"ageRange\":\"0-12\"}],\"youth\":[{\"event\":\"\",\"impact\":\"\",\"ageRange\":\"13-22\"}],\"adulthood\":[{\"event\":\"\",\"impact\":\"\",\"ageRange\":\"23-now\"}],\"recent\":[{\"event\":\"\",\"impact\":\"\",\"ageRange\":\"recent\"}]},\"cognitiveProfile\":{\"riskTolerance\":0.5,\"curiosity\":0.5,\"routinePreference\":0.5,\"socialDrive\":0.5,\"ambition\":0.5,\"empathy\":0.5,\"conflictAvoidance\":0.5,\"patience\":0.5},\"decisionWeights\":{\"memoryWeight\":0.55,\"identityWeight\":0.55,\"emotionWeight\":0.45,\"goalWeight\":0.55,\"noveltyWeight\":0.3,\"socialWeight\":0.45,\"memory\":0.55,\"persona\":0.55,\"emotion\":0.45,\"goal\":0.55,\"novelty\":0.3,\"social\":0.45},\"behaviorTendency\":{\"keepRoutine\":0.5,\"seekHelp\":0.5,\"explore\":0.5,\"avoidConflict\":0.5,\"persistOnGoal\":0.5,\"careForOthers\":0.5,\"takeRisk\":0.5,\"selfReflect\":0.5},\"selfModel\":{\"selfImage\":\"\",\"strengths\":[\"\"],\"concerns\":[\"\"],\"lifeNarrative\":\"\",\"identity\":\"\",\"values\":[\"\"],\"fears\":[\"\"],\"selfBeliefs\":[\"\"]},\"beliefMemory\":[{\"belief\":\"\",\"strength\":0.7,\"source\":\"职业经历\"}],\"habitMemory\":[{\"trigger\":\"stress\",\"action\":\"return_home_and_rest\",\"habit\":\"压力时先恢复秩序\",\"probability\":0.6}],\"preferenceMemory\":[{\"preference\":\"安静地点\",\"strength\":0.7}],\"episodicMemory\":[{\"event\":\"\",\"lesson\":\"\",\"emotionalImpact\":0.2}],\"goalRuntime\":{\"goals\":[{\"id\":\"\",\"name\":\"\",\"priority\":0.6,\"progress\":0.1,\"frustration\":0,\"blockedBy\":[]}]},\"lifeHistory\":{\"stage\":\"adult\",\"stageTheme\":\"\",\"summary\":\"\",\"episodes\":[\"\"]},\"initialBeliefs\":[\"\"],\"initialHabits\":[\"\"],\"preferences\":{\"like\":[\"\"],\"dislike\":[\"\"]},\"goal\":\"\"}],\"logs\":[{\"title\":\"\",\"body\":\"\"}]}",
       constraints: [
         "Only generate setup priors for payload.slots. characterSeeds length should equal payload.slots.length.",
         "Use the existing slot id exactly. Do not invent new character ids.",
         "Do not write events that happened today, actions, relationships, deaths, hidden NPCs, or town-wide facts.",
+        "lifeHistorySeed is personality source only. It must be small, ordinary, and split into childhood/youth/adulthood/recent.",
+        "Do not create dramatic backstory, disasters, crimes, world-changing events, hidden plot, or secret NPCs.",
         "cognitiveProfile values must be numeric 0-1.",
-        "decisionWeights must use keys memory, persona, emotion, goal, novelty, social with numeric 0-1 values.",
+        "decisionWeights must include memoryWeight, identityWeight, emotionWeight, goalWeight, socialWeight, noveltyWeight. Keep memory/persona/emotion/goal/novelty/social aliases compatible.",
+        "beliefMemory must have 1-3 beliefs. habitMemory >=1. preferenceMemory >=1. episodicMemory >=1.",
+        "Habit is not dailyPlan. Do not write eating, sleeping, commuting, working, studying as personality memory unless it is a stable tendency.",
         "lifeHistory must describe past tendency and meaning, not routine logs such as eating, sleeping, commuting, working, or studying.",
         "Every seed must include beliefs, habits, preferences, fears, goals, and behavior tendencies that can influence later cognitive decision scoring.",
+        "No English template text such as Followed plan, Because of, Daily reflection, This person tends.",
         "Keep text short. No Markdown."
       ],
       payload
@@ -4354,7 +4359,7 @@ function userPrompt(task, payload) {
   }
   if (task === "setupAgentBatchAgent") {
     return JSON.stringify({
-      instruction: "返回 JSON：{\"agents\":[{\"id\":\"\",\"name\":\"\",\"job\":\"\",\"ageYears\":36,\"place\":\"\",\"emotion\":\"\",\"goal\":\"\",\"memory\":[\"\"],\"relations\":{}}],\"logs\":[{\"title\":\"\",\"body\":\"\"}]}。",
+      instruction: "返回 JSON：{\"agents\":[{\"id\":\"\",\"name\":\"\",\"job\":\"\",\"ageYears\":36,\"place\":\"\",\"emotion\":\"\",\"goal\":\"\",\"memory\":[\"\"],\"relations\":{},\"agentSchemaVersion\":\"3.1.5\",\"lifeHistorySeed\":{\"childhood\":[{\"event\":\"\",\"impact\":\"\",\"ageRange\":\"0-12\"}],\"youth\":[{\"event\":\"\",\"impact\":\"\",\"ageRange\":\"13-22\"}],\"adulthood\":[{\"event\":\"\",\"impact\":\"\",\"ageRange\":\"23-now\"}],\"recent\":[{\"event\":\"\",\"impact\":\"\",\"ageRange\":\"recent\"}]},\"cognitiveProfile\":{\"riskTolerance\":0.5,\"curiosity\":0.5,\"routinePreference\":0.5,\"socialDrive\":0.5,\"ambition\":0.5,\"empathy\":0.5,\"conflictAvoidance\":0.5,\"patience\":0.5},\"selfModel\":{\"selfImage\":\"\",\"strengths\":[\"\"],\"concerns\":[\"\"],\"lifeNarrative\":\"\"},\"beliefMemory\":[{\"belief\":\"\",\"strength\":0.7,\"source\":\"职业经历\"}],\"habitMemory\":[{\"trigger\":\"stress\",\"action\":\"return_home_and_rest\",\"habit\":\"压力时先恢复秩序\",\"probability\":0.6}],\"preferenceMemory\":[{\"preference\":\"安静地点\",\"strength\":0.7}],\"episodicMemory\":[{\"event\":\"\",\"lesson\":\"\",\"emotionalImpact\":0.2}]}],\"logs\":[{\"title\":\"\",\"body\":\"\"}]}。",
       constraints: [
         "本阶段只补全 payload.slots 这一批人物基础资料，不生成关系结构",
         "agents 数量必须等于 payload.slots.length；顺序尽量和 slots 一致",
@@ -4363,9 +4368,15 @@ function userPrompt(task, payload) {
         "name 必须是自然中文姓名，通常 2-4 个汉字；不能重复 payload.usedNames，不能写角色1、居民1、NPC1、agent_1、person_1 或数字占位名",
         "job、ageYears、place 要符合 slot.roleHint、slot.ageRange、slot.placeHints 和地点表",
         "place 必须来自 payload.places.id；不要写不存在地点",
+        "如果 slot.characterSeed 已有 lifeHistorySeed、cognitiveProfile、selfModel、beliefMemory、habitMemory、preferenceMemory、episodicMemory，应保留或轻微改成更贴合姓名/职业的中文内容",
+        "cognitiveProfile 必须 0-1，依据年龄、职业、identityCore、lifeHistorySeed 和目标生成，不能纯随机",
+        "beliefMemory 至少 1 条，habitMemory 至少 1 条，preferenceMemory 至少 1 条，episodicMemory 至少 1 条",
+        "lifeHistorySeed 只是人格来源，不是当天事件；不得写大剧情、犯罪、灾难、死亡、隐藏人物或改变世界的大事",
+        "habit 不是 dailyPlan；不要把吃饭、睡觉、通勤、上班、上课直接写成人格记忆",
         "emotion、goal、memory 只是初始静态设定；memory 每人 1-3 条普通生活记忆，不写今天已经发生的行动",
         "relations 必须为空对象或只保留用户已有的明确关系；系统会在后续关系 Agent 统一生成",
         "不要输出 households、groups、events、actions、obligations、weather、locationState",
+        "禁止英文模板：Followed plan、Because of、Daily reflection、This person tends",
         "字段短，不要 Markdown，不要换行"
       ],
       payload
@@ -4373,10 +4384,12 @@ function userPrompt(task, payload) {
   }
   if (task === "characterConsistencyAgent") {
     return JSON.stringify({
-      instruction: "Return JSON: {\"issues\":[{\"type\":\"\",\"agentId\":\"\",\"severity\":\"low|medium|high\",\"note\":\"\"}],\"fixAgents\":[{\"id\":\"\",\"job\":\"\",\"ageYears\":36,\"goal\":\"\",\"identityCore\":{},\"cognitiveProfile\":{},\"decisionWeights\":{},\"behaviorTendency\":{},\"initialBeliefs\":[\"\"],\"initialHabits\":[\"\"],\"preferences\":{\"like\":[\"\"],\"dislike\":[\"\"]}}],\"logs\":[{\"title\":\"\",\"body\":\"\"}]}",
+      instruction: "Return JSON: {\"issues\":[{\"type\":\"\",\"agentId\":\"\",\"severity\":\"low|medium|high\",\"note\":\"\"}],\"fixAgents\":[{\"id\":\"\",\"job\":\"\",\"ageYears\":36,\"goal\":\"\",\"identityCore\":{},\"cognitiveProfile\":{},\"decisionWeights\":{},\"behaviorTendency\":{},\"lifeHistorySeed\":{\"childhood\":[],\"youth\":[],\"adulthood\":[],\"recent\":[]},\"selfModel\":{},\"beliefMemory\":[{\"belief\":\"\",\"strength\":0.7,\"source\":\"职业经历\"}],\"habitMemory\":[{\"trigger\":\"\",\"action\":\"\",\"habit\":\"\",\"probability\":0.6}],\"preferenceMemory\":[{\"preference\":\"\",\"strength\":0.7}],\"episodicMemory\":[{\"event\":\"\",\"lesson\":\"\",\"emotionalImpact\":0.2}],\"initialBeliefs\":[\"\"],\"initialHabits\":[\"\"],\"preferences\":{\"like\":[\"\"],\"dislike\":[\"\"]}}],\"logs\":[{\"title\":\"\",\"body\":\"\"}]}",
       constraints: [
         "Only check existing payload.agents. Do not add agents or change ids.",
-        "Fix only clear contradictions in age, job, personality, goal, and initial memory.",
+        "Fix only clear contradictions in age, job, personality, goal, V3.1.5 genesis memory, and initial memory.",
+        "Every fixed agent must keep or repair cognitiveProfile, selfModel, beliefMemory, habitMemory, preferenceMemory, episodicMemory.",
+        "Do not allow English template text such as Followed plan, Because of, Daily reflection, This person tends.",
         "Do not create actions, events, relationships, deaths, or hidden NPCs.",
         "If there is no clear issue, return empty fixAgents.",
         "Keep text short. No Markdown."
@@ -4393,6 +4406,7 @@ function userPrompt(task, payload) {
         "homePlace 和 group.place 只能引用 payload.places.id",
         "households 要让多数人有住所/家庭/合租/独居落点；儿童和学生通常应有同住或可联系成年人",
         "groups 要覆盖同学、同事、邻居、熟客、公共服务等局部圈子，不要让 100 人全员互相认识",
+        "可以参考 agent.lifeHistorySeed、values、goal 判断谁更可能承担照护、同事协作、邻里边界或熟客关系，但不能把这些内容写成新记忆或剧情",
         "relations 是初始关系，不是今天发生的互动；分数 0-100，保持克制",
         "可以生成粗略数量，详细个人落点会由后续 SocialEmbeddingAgent 分批并行细化",
         "不要生成行动、事件、记忆、承诺、天气、地点状态、全镇广播或隐藏 NPC",
@@ -5628,14 +5642,21 @@ function setupNormalizeSeeds(input = [], count = 12, places = []) {
       "cognitiveProfile",
       "decisionWeights",
       "behaviorTendency",
+      "lifeHistorySeed",
       "lifeHistory",
       "initialBeliefs",
       "initialHabits",
       "preferences",
+      "episodicMemory",
+      "beliefMemory",
+      "habitMemory",
+      "preferenceMemory",
+      "goalRuntime",
       "structuredMemory",
       "semanticMemory",
       "vectorMemory",
       "relationshipIntent",
+      "agentSchemaVersion",
       "characterGenesis"
     ].forEach(key => {
       if (seed[key] !== undefined) extraSetupFields[key] = seed[key];
@@ -5683,6 +5704,7 @@ function setupMakeAgent(seed, index) {
     : [lifeAnchor, `长期目标：${seed.goal || "维持稳定生活"}`];
   const agent = {
     ...seed,
+    agentSchemaVersion: "3.1.5",
     position: seed.place,
     lifeStatus: "alive",
     currentTask: "开始一天的日常安排",
@@ -5701,9 +5723,14 @@ function setupMakeAgent(seed, index) {
     decisionWeights: seed.decisionWeights || {},
     behaviorTendency: seed.behaviorTendency || {},
     lifeHistory: seed.lifeHistory || null,
+    lifeHistorySeed: seed.lifeHistorySeed || { childhood: [], youth: [], adulthood: [], recent: [] },
     initialBeliefs: Array.isArray(seed.initialBeliefs) ? seed.initialBeliefs.slice(0, 8) : [],
     initialHabits: Array.isArray(seed.initialHabits) ? seed.initialHabits.slice(0, 8) : [],
     preferences,
+    episodicMemory: Array.isArray(seed.episodicMemory) ? seed.episodicMemory.slice(0, 30) : [],
+    beliefMemory: Array.isArray(seed.beliefMemory) ? seed.beliefMemory.slice(0, 30) : [],
+    habitMemory: Array.isArray(seed.habitMemory) ? seed.habitMemory.slice(0, 30) : [],
+    preferenceMemory: Array.isArray(seed.preferenceMemory) ? seed.preferenceMemory.slice(0, 30) : [],
     personalityProfile: seed.personalityProfile || null,
     selfModel: seed.selfModel || null,
     ageDays: Math.round(ageYears * 365),
@@ -5723,6 +5750,12 @@ function setupMakeAgent(seed, index) {
   ensureSelfModel(agent);
   normalizeGoalRuntime(agent, { clock: 0 });
   syncLongTermMemoryViews(agent);
+  if (!agent.episodicMemory.length && Array.isArray(seed.episodicMemory)) agent.episodicMemory = seed.episodicMemory.slice(0, 30);
+  if (!agent.beliefMemory.length && Array.isArray(seed.beliefMemory)) agent.beliefMemory = seed.beliefMemory.slice(0, 30);
+  if (!agent.habitMemory.length && Array.isArray(seed.habitMemory)) agent.habitMemory = seed.habitMemory.slice(0, 30);
+  if (!agent.preferenceMemory.length && Array.isArray(seed.preferenceMemory)) agent.preferenceMemory = seed.preferenceMemory.slice(0, 30);
+  agent.agentSchemaVersion = "3.1.5";
+  agent.characterGenesis = { ...(agent.characterGenesis || {}), version: "v3.1.5" };
   agent.memorySummary = buildMemorySummary(agent, { clock: 0, records: [] });
   return agent;
 }
@@ -5981,10 +6014,18 @@ function setupCompactCharacterSeed(seed = {}) {
     cognitiveProfile: seed.cognitiveProfile || {},
     decisionWeights: seed.decisionWeights || {},
     behaviorTendency: seed.behaviorTendency || {},
+    lifeHistorySeed: seed.lifeHistorySeed || null,
     lifeHistory: seed.lifeHistory || null,
     initialBeliefs: Array.isArray(seed.initialBeliefs) ? seed.initialBeliefs.slice(0, 5) : [],
     initialHabits: Array.isArray(seed.initialHabits) ? seed.initialHabits.slice(0, 5) : [],
     preferences: seed.preferences || { like: [], dislike: [] },
+    episodicMemory: Array.isArray(seed.episodicMemory) ? seed.episodicMemory.slice(0, 4) : [],
+    beliefMemory: Array.isArray(seed.beliefMemory) ? seed.beliefMemory.slice(0, 4) : [],
+    habitMemory: Array.isArray(seed.habitMemory) ? seed.habitMemory.slice(0, 4) : [],
+    preferenceMemory: Array.isArray(seed.preferenceMemory) ? seed.preferenceMemory.slice(0, 4) : [],
+    selfModel: seed.selfModel || null,
+    goalRuntime: seed.goalRuntime || null,
+    agentSchemaVersion: seed.agentSchemaVersion || "3.1.5",
     goal: seed.goal || ""
   };
 }
@@ -5996,6 +6037,7 @@ function setupNormalizeCharacterSeedRow(seed = {}) {
   const normalized = {
     ...seed,
     id,
+    lifeHistorySeed: seed.lifeHistorySeed || null,
     initialBeliefs: Array.isArray(seed.initialBeliefs) && seed.initialBeliefs.length ? seed.initialBeliefs : (Array.isArray(seed.beliefs) ? seed.beliefs : []),
     initialHabits: Array.isArray(seed.initialHabits) && seed.initialHabits.length ? seed.initialHabits : (Array.isArray(seed.habits) ? seed.habits : []),
     preferences: seed.preferences && typeof seed.preferences === "object" ? seed.preferences : { like: [], dislike: [] }
@@ -6014,14 +6056,22 @@ function setupMergeCharacterSeedRows(localSeeds = [], aiSeeds = []) {
       cognitiveProfile: { ...(base.cognitiveProfile || {}), ...(seed.cognitiveProfile || {}) },
       decisionWeights: { ...(base.decisionWeights || {}), ...(seed.decisionWeights || {}) },
       behaviorTendency: { ...(base.behaviorTendency || {}), ...(seed.behaviorTendency || {}) },
+      selfModel: { ...(base.selfModel || {}), ...(seed.selfModel || {}) },
+      goalRuntime: seed.goalRuntime || base.goalRuntime,
+      lifeHistorySeed: seed.lifeHistorySeed || base.lifeHistorySeed,
       preferences: {
         like: [...new Set([...(base.preferences?.like || []), ...(seed.preferences?.like || [])])].slice(0, 8),
         dislike: [...new Set([...(base.preferences?.dislike || []), ...(seed.preferences?.dislike || [])])].slice(0, 8)
       },
       initialBeliefs: [...new Set([...(base.initialBeliefs || []), ...(seed.initialBeliefs || [])])].slice(0, 8),
       initialHabits: [...new Set([...(base.initialHabits || []), ...(seed.initialHabits || [])])].slice(0, 8),
+      episodicMemory: Array.isArray(seed.episodicMemory) && seed.episodicMemory.length ? seed.episodicMemory : base.episodicMemory,
+      beliefMemory: Array.isArray(seed.beliefMemory) && seed.beliefMemory.length ? seed.beliefMemory : base.beliefMemory,
+      habitMemory: Array.isArray(seed.habitMemory) && seed.habitMemory.length ? seed.habitMemory : base.habitMemory,
+      preferenceMemory: Array.isArray(seed.preferenceMemory) && seed.preferenceMemory.length ? seed.preferenceMemory : base.preferenceMemory,
       structuredMemory: base.structuredMemory || seed.structuredMemory,
       vectorMemory: base.vectorMemory || seed.vectorMemory,
+      agentSchemaVersion: seed.agentSchemaVersion || base.agentSchemaVersion || "3.1.5",
       source: seed.source || "CharacterSeedAgent"
     });
   });
@@ -6050,13 +6100,20 @@ function setupApplyCharacterConsistencyFixes(seeds = [], fixAgents = [], places 
       "cognitiveProfile",
       "decisionWeights",
       "behaviorTendency",
+      "lifeHistorySeed",
       "lifeHistory",
       "initialBeliefs",
       "initialHabits",
       "preferences",
+      "episodicMemory",
+      "beliefMemory",
+      "habitMemory",
+      "preferenceMemory",
+      "goalRuntime",
       "structuredMemory",
       "semanticMemory",
-      "vectorMemory"
+      "vectorMemory",
+      "agentSchemaVersion"
     ].forEach(key => {
       if (fix[key] !== undefined) next[key] = fix[key];
     });
@@ -6189,7 +6246,24 @@ async function runNodeSetupCreate(body = {}) {
     let relationAttempt = 1;
     while (true) {
       updateRuntimeProgress("setup-relations", { phaseIndex: 5, currentTask: `AI relationship sketch attempt ${relationAttempt}` });
-      relationships = await aiRouter.run("setupRelationSketchAgent", { premise: prompt, blueprint, places, agents: seeds.map(seed => ({ id: seed.id, name: seed.name, job: seed.job, ageYears: seed.ageYears, place: seed.place })), targetAgentCount, attempt: relationAttempt });
+      relationships = await aiRouter.run("setupRelationSketchAgent", {
+        premise: prompt,
+        blueprint,
+        places,
+        agents: seeds.map(seed => ({
+          id: seed.id,
+          name: seed.name,
+          job: seed.job,
+          ageYears: seed.ageYears,
+          ageStage: seed.ageStage,
+          place: seed.place,
+          goal: seed.goal,
+          values: Array.isArray(seed.identityCore?.values) ? seed.identityCore.values.slice(0, 3) : [],
+          lifeHistorySeed: seed.lifeHistorySeed || null
+        })),
+        targetAgentCount,
+        attempt: relationAttempt
+      });
       if ((Array.isArray(relationships?.households) && relationships.households.length)
         && (Array.isArray(relationships?.groups) && relationships.groups.length)) break;
       pushCallLog({
@@ -6231,9 +6305,15 @@ async function runNodeSetupCreate(body = {}) {
           cognitiveProfile: seed.cognitiveProfile || null,
           decisionWeights: seed.decisionWeights || null,
           behaviorTendency: seed.behaviorTendency || null,
+          lifeHistorySeed: seed.lifeHistorySeed || null,
+          selfModel: seed.selfModel || null,
           initialBeliefs: seed.initialBeliefs || [],
           initialHabits: seed.initialHabits || [],
-          preferences: seed.preferences || null
+          preferences: seed.preferences || null,
+          episodicMemory: seed.episodicMemory || [],
+          beliefMemory: seed.beliefMemory || [],
+          habitMemory: seed.habitMemory || [],
+          preferenceMemory: seed.preferenceMemory || []
         }))
       }, { once: true });
       seeds = setupNormalizeSeeds(setupApplyCharacterConsistencyFixes(seeds, aiCharacterConsistency?.fixAgents || [], places), targetAgentCount, places);
