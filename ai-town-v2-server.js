@@ -24,6 +24,13 @@ const {
 const { aggregateDecision } = require("./ai-town-decision-aggregator");
 const { judgeAction, mergeWorldMasterJudgement, applyWorldMasterPatch } = require("./ai-town-world-master");
 const { utilityDecision } = require("./ai-town-utility-scheduler");
+const { ensureDecisionWeights } = require("./ai-town-cognitive-state");
+const {
+  buildCharacterSeeds,
+  mergeCharacterSeeds,
+  applyRelationshipIntents,
+  runCharacterConsistencyAgent
+} = require("./ai-town-character-seed");
 
 const PORT = Number(process.env.AI_TOWN_V2_PORT || 8788);
 const HOST = String(process.env.AI_TOWN_V2_HOST || "0.0.0.0");
@@ -541,7 +548,9 @@ function parseModelMap(value) {
 function modelForTask(task, payload) {
   if (task === "worldSetupAgent") return aiConfig.moduleModels.worldSetupAgent || aiConfig.moduleModels.heaven || aiConfig.model;
   if (task === "setupBlueprintAgent") return aiConfig.moduleModels.setupBlueprintAgent || aiConfig.moduleModels.worldSetupAgent || aiConfig.moduleModels.heaven || aiConfig.model;
+  if (task === "characterSeedAgent") return aiConfig.moduleModels.characterSeedAgent || aiConfig.moduleModels.setupAgentBatchAgent || aiConfig.moduleModels.worldSetupAgent || aiConfig.model;
   if (task === "setupAgentBatchAgent") return aiConfig.moduleModels.setupAgentBatchAgent || aiConfig.moduleModels.worldSetupAgent || aiConfig.model;
+  if (task === "characterConsistencyAgent") return aiConfig.moduleModels.characterConsistencyAgent || aiConfig.moduleModels.setupAuditAgent || aiConfig.moduleModels.review || aiConfig.moduleModels.worldSetupAgent || aiConfig.model;
   if (task === "setupRelationSketchAgent") return aiConfig.moduleModels.setupRelationSketchAgent || aiConfig.moduleModels.socialStructureAgent || aiConfig.moduleModels.relation || aiConfig.model;
   if (task === "setupAuditAgent") return aiConfig.moduleModels.setupAuditAgent || aiConfig.moduleModels.review || aiConfig.moduleModels.worldSetupAgent || aiConfig.model;
   if (task === "socialStructureAgent") return aiConfig.moduleModels.socialStructureAgent || aiConfig.moduleModels.relation || aiConfig.moduleModels.heaven || aiConfig.model;
@@ -857,6 +866,15 @@ function agentInfoSnapshot(agent = {}) {
     selfModel: agent.selfModel || null,
     goalRuntime: agent.goalRuntime || null,
     emotionCause: Array.isArray(agent.emotionCause) ? agent.emotionCause.slice(0, 40) : [],
+    cognitiveProfile: agent.cognitiveProfile || null,
+    decisionWeights: agent.decisionWeights || null,
+    behaviorTendency: agent.behaviorTendency || null,
+    lifeHistory: agent.lifeHistory || null,
+    initialBeliefs: Array.isArray(agent.initialBeliefs) ? agent.initialBeliefs.slice(0, 8) : [],
+    initialHabits: Array.isArray(agent.initialHabits) ? agent.initialHabits.slice(0, 8) : [],
+    preferences: agent.preferences || null,
+    characterGenesis: agent.characterGenesis || null,
+    relationshipIntent: Array.isArray(agent.relationshipIntent) ? agent.relationshipIntent.slice(0, 12) : [],
     longTermMemory: {
       episodicMemory: Array.isArray(agent.episodicMemory) ? agent.episodicMemory.slice(0, 30) : [],
       beliefMemory: Array.isArray(agent.beliefMemory) ? agent.beliefMemory.slice(0, 30) : [],
@@ -3985,7 +4003,9 @@ function parseLooseJson(text) {
 function fallbackJson(task) {
   if (task === "worldSetupAgent") return { premise: "", places: [], agents: [], logs: [] };
   if (task === "setupBlueprintAgent") return { premise: "", targetAgentCount: 0, targetLocationCount: 0, populationShape: "ordinary_mixed_town", householdPlan: {}, agePyramid: {}, institutions: {}, workPatterns: {}, places: [], roleMix: [], roleBatches: [], relationshipPlan: {}, logs: [] };
+  if (task === "characterSeedAgent") return { characterSeeds: [], logs: [] };
   if (task === "setupAgentBatchAgent") return { agents: [], logs: [] };
+  if (task === "characterConsistencyAgent") return { issues: [], fixAgents: [], logs: [] };
   if (task === "setupRelationSketchAgent") return { households: [], groups: [], relations: [], logs: [] };
   if (task === "setupAuditAgent") return { issues: [], fixAgents: [], households: [], groups: [], relations: [], logs: [] };
   if (task === "socialStructureAgent") return { households: [], groups: [], relations: [], logs: [] };
@@ -4044,6 +4064,8 @@ function strictJson(text, task = "") {
         "locationChainAgent",
         "locationRuntimeAgent",
         "socialStructureAgent",
+        "characterSeedAgent",
+        "characterConsistencyAgent",
         "setupAgentBatchAgent",
         "setupRelationSketchAgent"
       ]);
@@ -4134,8 +4156,14 @@ function systemPrompt(task) {
   if (task === "setupBlueprintAgent") {
     return `${common}\n你是 SetupBlueprintAgent。你的权限只有把用户的一句话建镇要求拆成人口结构蓝图：小镇类型、家庭户型、年龄金字塔、学校/诊所/商业/公共机构规模、工作模式、地点草表、人物批次和关系规模目标。你不能直接生成具体角色，不能生成行动、事件、记忆或剧情。人物 id 不在本阶段生成；地点 id 优先沿用 payload.existingPlaces；只有 existingPlaces 不足时才可新建稳定地点 id。roleBatches.batchId 可新建，但必须来自人口结构推导，不要随便给固定职业比例。输出只服务后续批处理。`;
   }
+  if (task === "characterSeedAgent") {
+    return `${common}\nYou are CharacterSeedAgent for setup only. Generate initial personality seeds for existing character slots. Do not create actions, events, relationships, deaths, hidden NPCs, or world facts. Output compact JSON only. Each seed must give stable identityCore, numeric cognitiveProfile, decisionWeights compatible with the V3 cognitive engine, lifeHistory, beliefs, habits, preferences, fears, and behaviorTendency. These are birth/setup priors, not events that happened today.`;
+  }
   if (task === "setupAgentBatchAgent") {
     return `${common}\n你是 SetupAgentBatchAgent。你的权限只有为 payload.slots 中指定的一小批槽位补全初始人物基础资料。你必须使用 slots.id，不得新增槽位外角色，不得生成关系、家庭、事件、行动、当天经历或全镇背景。姓名必须自然、唯一、普通中文姓名，不能使用占位名或重复名。`;
+  }
+  if (task === "characterConsistencyAgent") {
+    return `${common}\nYou are CharacterConsistencyAgent for setup only. Check already generated characters for age/job/personality/goal/memory contradictions. You may suggest tiny fixes for existing agent ids only. Do not add characters, locations, actions, events, relationships, or facts. Output compact JSON only.`;
   }
   if (task === "setupRelationSketchAgent") {
     return `${common}\n你是 SetupRelationSketchAgent。你的权限只有在人物表已经生成后，为已有 agent 和 place 生成粗粒度关系表：households、groups、relations。你不能新增人物，不能改人物基础资料，不能生成行动、记忆、承诺、地点状态或剧情。households.id 和 groups.id 可新建稳定表格主键；所有 from/to/members/authority/place/homePlace 必须引用 payload 中真实存在的 id。`;
@@ -4301,6 +4329,22 @@ function userPrompt(task, payload) {
       payload
     });
   }
+  if (task === "characterSeedAgent") {
+    return JSON.stringify({
+      instruction: "Return JSON: {\"characterSeeds\":[{\"id\":\"\",\"identityCore\":{\"identity\":\"\",\"values\":[\"\"],\"fears\":[\"\"],\"habits\":[\"\"],\"selfBeliefs\":[\"\"],\"avoidance\":[\"\"],\"biases\":{\"dutyFirst\":50,\"riskAvoidance\":50,\"askForHelp\":50,\"familyAttachment\":50,\"conflictAvoidance\":50,\"statusConcern\":50}},\"cognitiveProfile\":{\"riskTolerance\":0.5,\"curiosity\":0.5,\"routinePreference\":0.5,\"socialDrive\":0.5,\"ambition\":0.5,\"empathy\":0.5,\"conflictAvoidance\":0.5,\"patience\":0.5},\"decisionWeights\":{\"memory\":0.55,\"persona\":0.55,\"emotion\":0.45,\"goal\":0.55,\"novelty\":0.3,\"social\":0.45},\"behaviorTendency\":{\"keepRoutine\":0.5,\"seekHelp\":0.5,\"explore\":0.5,\"avoidConflict\":0.5,\"persistOnGoal\":0.5,\"careForOthers\":0.5,\"takeRisk\":0.5,\"selfReflect\":0.5},\"lifeHistory\":{\"stage\":\"adult\",\"stageTheme\":\"\",\"summary\":\"\",\"episodes\":[\"\"]},\"initialBeliefs\":[\"\"],\"initialHabits\":[\"\"],\"preferences\":{\"like\":[\"\"],\"dislike\":[\"\"]},\"goal\":\"\"}],\"logs\":[{\"title\":\"\",\"body\":\"\"}]}",
+      constraints: [
+        "Only generate setup priors for payload.slots. characterSeeds length should equal payload.slots.length.",
+        "Use the existing slot id exactly. Do not invent new character ids.",
+        "Do not write events that happened today, actions, relationships, deaths, hidden NPCs, or town-wide facts.",
+        "cognitiveProfile values must be numeric 0-1.",
+        "decisionWeights must use keys memory, persona, emotion, goal, novelty, social with numeric 0-1 values.",
+        "lifeHistory must describe past tendency and meaning, not routine logs such as eating, sleeping, commuting, working, or studying.",
+        "Every seed must include beliefs, habits, preferences, fears, goals, and behavior tendencies that can influence later cognitive decision scoring.",
+        "Keep text short. No Markdown."
+      ],
+      payload
+    });
+  }
   if (task === "setupAgentBatchAgent") {
     return JSON.stringify({
       instruction: "返回 JSON：{\"agents\":[{\"id\":\"\",\"name\":\"\",\"job\":\"\",\"ageYears\":36,\"place\":\"\",\"emotion\":\"\",\"goal\":\"\",\"memory\":[\"\"],\"relations\":{}}],\"logs\":[{\"title\":\"\",\"body\":\"\"}]}。",
@@ -4316,6 +4360,19 @@ function userPrompt(task, payload) {
         "relations 必须为空对象或只保留用户已有的明确关系；系统会在后续关系 Agent 统一生成",
         "不要输出 households、groups、events、actions、obligations、weather、locationState",
         "字段短，不要 Markdown，不要换行"
+      ],
+      payload
+    });
+  }
+  if (task === "characterConsistencyAgent") {
+    return JSON.stringify({
+      instruction: "Return JSON: {\"issues\":[{\"type\":\"\",\"agentId\":\"\",\"severity\":\"low|medium|high\",\"note\":\"\"}],\"fixAgents\":[{\"id\":\"\",\"job\":\"\",\"ageYears\":36,\"goal\":\"\",\"identityCore\":{},\"cognitiveProfile\":{},\"decisionWeights\":{},\"behaviorTendency\":{},\"initialBeliefs\":[\"\"],\"initialHabits\":[\"\"],\"preferences\":{\"like\":[\"\"],\"dislike\":[\"\"]}}],\"logs\":[{\"title\":\"\",\"body\":\"\"}]}",
+      constraints: [
+        "Only check existing payload.agents. Do not add agents or change ids.",
+        "Fix only clear contradictions in age, job, personality, goal, and initial memory.",
+        "Do not create actions, events, relationships, deaths, or hidden NPCs.",
+        "If there is no clear issue, return empty fixAgents.",
+        "Keep text short. No Markdown."
       ],
       payload
     });
@@ -5556,7 +5613,28 @@ function setupNormalizeSeeds(input = [], count = 12, places = []) {
       name = setupChineseName(index + usedNames.size + 1);
     }
     usedNames.add(name);
+    const extraSetupFields = {};
+    [
+      "identityCore",
+      "personalityProfile",
+      "selfModel",
+      "cognitiveProfile",
+      "decisionWeights",
+      "behaviorTendency",
+      "lifeHistory",
+      "initialBeliefs",
+      "initialHabits",
+      "preferences",
+      "structuredMemory",
+      "semanticMemory",
+      "vectorMemory",
+      "relationshipIntent",
+      "characterGenesis"
+    ].forEach(key => {
+      if (seed[key] !== undefined) extraSetupFields[key] = seed[key];
+    });
     rows.push({
+      ...extraSetupFields,
       id: setupSafeId(seed.id, `agent_${index + 1}`),
       name,
       job,
@@ -5576,6 +5654,15 @@ function setupMakeAgent(seed, index) {
   const emotion = () => clampNumber(35 + Math.round(Math.random() * 35), 0, 100, 50);
   const ageYears = Number(seed.ageYears || 30);
   const job = String(seed.job || "");
+  const structuredSeed = seed.structuredMemory && typeof seed.structuredMemory === "object"
+    ? seed.structuredMemory
+    : { habit: [], belief: [], preference: [], episodic: [], social: [], goal: [] };
+  const semanticSeed = seed.semanticMemory && typeof seed.semanticMemory === "object"
+    ? seed.semanticMemory
+    : { habit: [], experience: [], episodic: [], belief: [], relationship: [], social: [], preference: [], goal: [] };
+  const preferences = seed.preferences && typeof seed.preferences === "object"
+    ? seed.preferences
+    : { like: [], dislike: [] };
   const lifeAnchor = `${seed.name || "这个人"}在${job || "小镇居民"}身份里有稳定责任，常在${seed.place || "镇上"}活动。`;
   const identity = seed.identityCore || {};
   const defaultHabit = /学生/.test(job) ? "上课日会优先考虑学校安排"
@@ -5587,7 +5674,7 @@ function setupMakeAgent(seed, index) {
   const initialMemory = Array.isArray(seed.memory) && seed.memory.length
     ? seed.memory
     : [lifeAnchor, `长期目标：${seed.goal || "维持稳定生活"}`];
-  return {
+  const agent = {
     ...seed,
     position: seed.place,
     lifeStatus: "alive",
@@ -5596,20 +5683,41 @@ function setupMakeAgent(seed, index) {
     emotionVector: { happy: emotion(), anxious: emotion(), angry: emotion(), sad: emotion(), tired: emotion(), lonely: emotion(), hopeful: emotion(), calm: emotion(), curious: emotion() },
     memory: { short: initialMemory.slice(0, 4), long: initialMemory.slice(0, 4), emotional: [], secret: [], rumor: [] },
     memorySummary: initialMemory.join("；").slice(0, 240),
+    semanticMemory: semanticSeed,
+    structuredMemory: structuredSeed,
+    vectorMemory: Array.isArray(seed.vectorMemory) ? seed.vectorMemory.slice(0, 180) : [],
     knownFacts: [],
     eventQueue: [],
     longTermGoals: [{ title: seed.goal || "维持稳定生活", progress: 25, priority: 6, horizon: "month" }],
     relationshipMatrix: seed.relations || {},
+    cognitiveProfile: seed.cognitiveProfile || {},
+    decisionWeights: seed.decisionWeights || {},
+    behaviorTendency: seed.behaviorTendency || {},
+    lifeHistory: seed.lifeHistory || null,
+    initialBeliefs: Array.isArray(seed.initialBeliefs) ? seed.initialBeliefs.slice(0, 8) : [],
+    initialHabits: Array.isArray(seed.initialHabits) ? seed.initialHabits.slice(0, 8) : [],
+    preferences,
+    personalityProfile: seed.personalityProfile || null,
+    selfModel: seed.selfModel || null,
     ageDays: Math.round(ageYears * 365),
     ageStage: ageYears < 12 ? "child" : ageYears < 18 ? "teen" : ageYears >= 65 ? "elder" : "adult",
     identityCore: {
+      identity: identity.identity || "",
       values: Array.isArray(identity.values) && identity.values.length ? identity.values : [seed.goal || "稳定生活"],
       habits: Array.isArray(identity.habits) && identity.habits.length ? identity.habits : [defaultHabit],
       avoidance: Array.isArray(identity.avoidance) ? identity.avoidance : [],
-      fears: Array.isArray(identity.fears) ? identity.fears : []
+      fears: Array.isArray(identity.fears) ? identity.fears : [],
+      selfBeliefs: Array.isArray(identity.selfBeliefs) ? identity.selfBeliefs : [],
+      biases: identity.biases && typeof identity.biases === "object" ? identity.biases : {}
     },
     order: index
   };
+  ensureDecisionWeights(agent);
+  ensureSelfModel(agent);
+  normalizeGoalRuntime(agent, { clock: 0 });
+  syncLongTermMemoryViews(agent);
+  agent.memorySummary = buildMemorySummary(agent, { clock: 0, records: [] });
+  return agent;
 }
 
 function setupFallbackRelationships(agents, places) {
@@ -5814,6 +5922,7 @@ function setupApplyRelationshipMatrix(agents, social) {
       addWeakRelation(agent, contact, type, type === "同地点熟人" ? 43 : 36);
     }
   });
+  applyRelationshipIntents(agents);
   return agents;
 }
 
@@ -5821,6 +5930,7 @@ function setupMakeWorld({ slot, prompt, startClock, config, places, seeds, relat
   const agents = seeds.map(setupMakeAgent);
   const social = relationships || setupFallbackRelationships(agents, places);
   setupApplyRelationshipMatrix(agents, social);
+  applyRelationshipIntents(agents);
   return {
     version: 2,
     savedAt: new Date().toISOString(),
@@ -5855,6 +5965,150 @@ function setupMakeWorld({ slot, prompt, startClock, config, places, seeds, relat
   };
 }
 
+function setupCompactCharacterSeed(seed = {}) {
+  return {
+    id: seed.id,
+    ageStage: seed.ageStage,
+    roleKind: seed.roleKind,
+    identityCore: seed.identityCore || {},
+    cognitiveProfile: seed.cognitiveProfile || {},
+    decisionWeights: seed.decisionWeights || {},
+    behaviorTendency: seed.behaviorTendency || {},
+    lifeHistory: seed.lifeHistory || null,
+    initialBeliefs: Array.isArray(seed.initialBeliefs) ? seed.initialBeliefs.slice(0, 5) : [],
+    initialHabits: Array.isArray(seed.initialHabits) ? seed.initialHabits.slice(0, 5) : [],
+    preferences: seed.preferences || { like: [], dislike: [] },
+    goal: seed.goal || ""
+  };
+}
+
+function setupNormalizeCharacterSeedRow(seed = {}) {
+  if (!seed || typeof seed !== "object") return null;
+  const id = String(seed.id || seed.agentId || "").trim();
+  if (!id) return null;
+  const normalized = {
+    ...seed,
+    id,
+    initialBeliefs: Array.isArray(seed.initialBeliefs) && seed.initialBeliefs.length ? seed.initialBeliefs : (Array.isArray(seed.beliefs) ? seed.beliefs : []),
+    initialHabits: Array.isArray(seed.initialHabits) && seed.initialHabits.length ? seed.initialHabits : (Array.isArray(seed.habits) ? seed.habits : []),
+    preferences: seed.preferences && typeof seed.preferences === "object" ? seed.preferences : { like: [], dislike: [] }
+  };
+  return normalized;
+}
+
+function setupMergeCharacterSeedRows(localSeeds = [], aiSeeds = []) {
+  const byId = new Map((Array.isArray(localSeeds) ? localSeeds : []).map(seed => [seed.id, seed]));
+  (Array.isArray(aiSeeds) ? aiSeeds : []).map(setupNormalizeCharacterSeedRow).filter(Boolean).forEach(seed => {
+    const base = byId.get(seed.id) || {};
+    byId.set(seed.id, {
+      ...base,
+      ...seed,
+      identityCore: { ...(base.identityCore || {}), ...(seed.identityCore || {}) },
+      cognitiveProfile: { ...(base.cognitiveProfile || {}), ...(seed.cognitiveProfile || {}) },
+      decisionWeights: { ...(base.decisionWeights || {}), ...(seed.decisionWeights || {}) },
+      behaviorTendency: { ...(base.behaviorTendency || {}), ...(seed.behaviorTendency || {}) },
+      preferences: {
+        like: [...new Set([...(base.preferences?.like || []), ...(seed.preferences?.like || [])])].slice(0, 8),
+        dislike: [...new Set([...(base.preferences?.dislike || []), ...(seed.preferences?.dislike || [])])].slice(0, 8)
+      },
+      initialBeliefs: [...new Set([...(base.initialBeliefs || []), ...(seed.initialBeliefs || [])])].slice(0, 8),
+      initialHabits: [...new Set([...(base.initialHabits || []), ...(seed.initialHabits || [])])].slice(0, 8),
+      structuredMemory: base.structuredMemory || seed.structuredMemory,
+      vectorMemory: base.vectorMemory || seed.vectorMemory,
+      source: seed.source || "CharacterSeedAgent"
+    });
+  });
+  return (Array.isArray(localSeeds) ? localSeeds : []).map(seed => byId.get(seed.id) || seed);
+}
+
+function setupApplyCharacterConsistencyFixes(seeds = [], fixAgents = [], places = []) {
+  const placeIds = new Set((Array.isArray(places) ? places : []).map(place => place.id).filter(Boolean));
+  const fixes = new Map((Array.isArray(fixAgents) ? fixAgents : [])
+    .filter(item => item && item.id)
+    .map(item => [String(item.id), item]));
+  if (!fixes.size) return seeds;
+  return (Array.isArray(seeds) ? seeds : []).map(seed => {
+    const fix = fixes.get(String(seed.id));
+    if (!fix) return seed;
+    const next = { ...seed };
+    ["name", "job", "emotion", "goal"].forEach(key => {
+      if (typeof fix[key] === "string" && fix[key].trim()) next[key] = fix[key].trim();
+    });
+    if (fix.ageYears !== undefined || fix.age !== undefined) next.ageYears = clampNumber(fix.ageYears || fix.age, 1, 100, next.ageYears || 36);
+    if (typeof fix.place === "string" && (!placeIds.size || placeIds.has(fix.place))) next.place = fix.place;
+    [
+      "identityCore",
+      "personalityProfile",
+      "selfModel",
+      "cognitiveProfile",
+      "decisionWeights",
+      "behaviorTendency",
+      "lifeHistory",
+      "initialBeliefs",
+      "initialHabits",
+      "preferences",
+      "structuredMemory",
+      "semanticMemory",
+      "vectorMemory"
+    ].forEach(key => {
+      if (fix[key] !== undefined) next[key] = fix[key];
+    });
+    return next;
+  });
+}
+
+async function setupRunCharacterSeedAgent(slots = [], context = {}) {
+  const localSeeds = buildCharacterSeeds(slots, context);
+  if (!context.aiSetupEnabled || !aiRouter || !localSeeds.length) {
+    return { seeds: localSeeds, logs: [{ title: "CharacterSeedAgent", body: `local seeds ${localSeeds.length}` }] };
+  }
+  const batchSize = 10;
+  const batches = [];
+  for (let i = 0; i < slots.length; i += batchSize) {
+    batches.push({
+      slots: slots.slice(i, i + batchSize),
+      localSeeds: localSeeds.slice(i, i + batchSize)
+    });
+  }
+  const logs = [];
+  const results = await aiRouter.runBatch(batches, Math.min(20, batches.length), async (batch, index) => {
+    updateRuntimeProgress("setup-character-seeds", { phaseIndex: 3, currentTask: `AI character seed batch ${index + 1}/${batches.length}` });
+    try {
+      const result = await aiRouter.run("characterSeedAgent", {
+        premise: context.premise || "",
+        blueprint: context.blueprint || null,
+        places: context.places || [],
+        townSetting: context.premise || "",
+        culture: context.culture || "ordinary small town",
+        slots: batch.slots.map((slot, slotIndex) => ({
+          ...slot,
+          characterSeed: setupCompactCharacterSeed(batch.localSeeds[slotIndex] || {})
+        }))
+      }, { once: true });
+      logs.push(...(Array.isArray(result?.logs) ? result.logs : []));
+      return Array.isArray(result?.characterSeeds) ? result.characterSeeds : [];
+    } catch (error) {
+      pushCallLog({
+        task: "characterSeedAgent",
+        model: aiConfig.model,
+        keyIndex: 0,
+        agentId: "",
+        agentName: "",
+        status: "local_fallback",
+        durationMs: 0,
+        error: `CharacterSeedAgent fallback: ${String(error.message || error).slice(0, 180)}`
+      });
+      logs.push({ title: "CharacterSeedAgent fallback", body: String(error.message || error).slice(0, 180) });
+      return [];
+    }
+  });
+  const aiSeeds = results.flat();
+  return {
+    seeds: setupMergeCharacterSeedRows(localSeeds, aiSeeds),
+    logs: logs.concat({ title: "CharacterSeedAgent", body: `local ${localSeeds.length}, ai ${aiSeeds.length}` })
+  };
+}
+
 async function runNodeSetupCreate(body = {}) {
   const slot = safeSaveName(body.slot || body.name || `town-${Date.now()}`);
   const targetAgentCount = clampNumber(body.targetAgentCount || body.agentCount, 1, 500, 30);
@@ -5862,7 +6116,7 @@ async function runNodeSetupCreate(body = {}) {
   const startClock = clampNumber(body.startClock, 0, 24 * 60 - 1, 8 * 60);
   const prompt = String(body.prompt || body.premise || "");
   const sourceSeeds = Array.isArray(body.agents || body.seeds) ? (body.agents || body.seeds) : [];
-  beginRuntimeProgress(slot, 7);
+  beginRuntimeProgress(slot, 9);
   updateRuntimeProgress("setup-places", { phaseIndex: 1, currentTask: "normalize places" });
   let places = setupNormalizePlaces(body.places || [], targetLocationCount);
   let seeds = setupNormalizeSeeds(sourceSeeds, targetAgentCount, places);
@@ -5870,6 +6124,9 @@ async function runNodeSetupCreate(body = {}) {
   seeds = setupNormalizeSeeds(setupSeedsFromSlots(defaultSlots, sourceSeeds, places), targetAgentCount, places);
   let blueprint = null;
   let relationships = null;
+  let characterSeedRows = [];
+  let characterSeedResult = null;
+  let characterConsistency = null;
   const aiSetupEnabled = body.useAi !== false && publicConfig().aiEnabled;
   if (aiSetupEnabled) {
     updateRuntimeProgress("setup-blueprint", { phaseIndex: 2, currentTask: "AI blueprint" });
@@ -5880,16 +6137,23 @@ async function runNodeSetupCreate(body = {}) {
       failRuntimeProgress(error);
       throw error;
     }
-    updateRuntimeProgress("setup-agents", { phaseIndex: 3, currentTask: "AI agent batches" });
+    updateRuntimeProgress("setup-character-seeds", { phaseIndex: 3, currentTask: "character genesis seeds" });
     const batchSize = 10;
     const batches = [];
     const slots = setupBuildSlotsFromBlueprint(blueprint, seeds, sourceSeeds, targetAgentCount, places);
-    for (let i = 0; i < targetAgentCount; i += batchSize) batches.push(slots.slice(i, i + batchSize));
+    characterSeedResult = await setupRunCharacterSeedAgent(slots, { premise: prompt, blueprint, places, targetAgentCount, aiSetupEnabled });
+    characterSeedRows = characterSeedResult.seeds || [];
+    const seededSlots = slots.map(slot => ({
+      ...slot,
+      characterSeed: setupCompactCharacterSeed(characterSeedRows.find(seed => seed.id === slot.id) || {})
+    }));
+    updateRuntimeProgress("setup-agents", { phaseIndex: 4, currentTask: "AI agent batches" });
+    for (let i = 0; i < targetAgentCount; i += batchSize) batches.push(seededSlots.slice(i, i + batchSize));
     try {
       const results = await aiRouter.runBatch(batches, Math.min(20, batches.length), async (slots, index) => {
         let attempt = 1;
         while (true) {
-          updateRuntimeProgress("setup-agents", { phaseIndex: 3, currentTask: `AI agent batch ${index + 1}/${batches.length} attempt ${attempt}` });
+          updateRuntimeProgress("setup-agents", { phaseIndex: 4, currentTask: `AI agent batch ${index + 1}/${batches.length} attempt ${attempt}` });
           const result = await aiRouter.run("setupAgentBatchAgent", { premise: prompt, blueprint, places, slots, usedNames: sourceSeeds.map(seed => seed?.name).filter(Boolean), aiBatch: { index: index + 1, total: batches.length, attempt } });
           const agents = Array.isArray(result?.agents) ? result.agents : [];
           if (agents.length >= slots.length) return result;
@@ -5909,15 +6173,15 @@ async function runNodeSetupCreate(body = {}) {
       });
       const returned = results.flatMap(result => Array.isArray(result?.agents) ? result.agents : []);
       if (returned.length < targetAgentCount) throw new Error(`AI setup returned ${returned.length}/${targetAgentCount} agents`);
-      seeds = setupNormalizeSeeds(returned, targetAgentCount, places);
+      seeds = setupNormalizeSeeds(mergeCharacterSeeds(returned, characterSeedRows).agents, targetAgentCount, places);
     } catch (error) {
       failRuntimeProgress(error);
       throw error;
     }
-    updateRuntimeProgress("setup-relations", { phaseIndex: 4, currentTask: "AI relationship sketch" });
+    updateRuntimeProgress("setup-relations", { phaseIndex: 5, currentTask: "AI relationship sketch" });
     let relationAttempt = 1;
     while (true) {
-      updateRuntimeProgress("setup-relations", { phaseIndex: 4, currentTask: `AI relationship sketch attempt ${relationAttempt}` });
+      updateRuntimeProgress("setup-relations", { phaseIndex: 5, currentTask: `AI relationship sketch attempt ${relationAttempt}` });
       relationships = await aiRouter.run("setupRelationSketchAgent", { premise: prompt, blueprint, places, agents: seeds.map(seed => ({ id: seed.id, name: seed.name, job: seed.job, ageYears: seed.ageYears, place: seed.place })), targetAgentCount, attempt: relationAttempt });
       if ((Array.isArray(relationships?.households) && relationships.households.length)
         && (Array.isArray(relationships?.groups) && relationships.groups.length)) break;
@@ -5935,7 +6199,54 @@ async function runNodeSetupCreate(body = {}) {
       await delay(aiConfig.retryDelayMs || 1000);
     }
   }
-  updateRuntimeProgress("setup-world", { phaseIndex: 5, currentTask: "assemble world" });
+  if (!characterSeedRows.length) {
+    const slots = setupBuildSlotsFromBlueprint(blueprint, seeds, sourceSeeds, targetAgentCount, places);
+    characterSeedResult = await setupRunCharacterSeedAgent(slots, { premise: prompt, blueprint, places, targetAgentCount, aiSetupEnabled: false });
+    characterSeedRows = characterSeedResult.seeds || [];
+    seeds = setupNormalizeSeeds(mergeCharacterSeeds(seeds, characterSeedRows).agents, targetAgentCount, places);
+  }
+  updateRuntimeProgress("setup-character-consistency", { phaseIndex: 6, currentTask: "character consistency check" });
+  let aiCharacterConsistency = null;
+  if (aiSetupEnabled && aiRouter) {
+    try {
+      aiCharacterConsistency = await aiRouter.run("characterConsistencyAgent", {
+        premise: prompt,
+        blueprint,
+        places,
+        agents: seeds.map(seed => ({
+          id: seed.id,
+          name: seed.name,
+          job: seed.job,
+          ageYears: seed.ageYears,
+          place: seed.place,
+          goal: seed.goal,
+          identityCore: seed.identityCore || null,
+          cognitiveProfile: seed.cognitiveProfile || null,
+          decisionWeights: seed.decisionWeights || null,
+          behaviorTendency: seed.behaviorTendency || null,
+          initialBeliefs: seed.initialBeliefs || [],
+          initialHabits: seed.initialHabits || [],
+          preferences: seed.preferences || null
+        }))
+      }, { once: true });
+      seeds = setupNormalizeSeeds(setupApplyCharacterConsistencyFixes(seeds, aiCharacterConsistency?.fixAgents || [], places), targetAgentCount, places);
+    } catch (error) {
+      pushCallLog({
+        task: "characterConsistencyAgent",
+        model: aiConfig.model,
+        keyIndex: 0,
+        agentId: "",
+        agentName: "",
+        status: "local_fallback",
+        durationMs: 0,
+        error: `CharacterConsistencyAgent fallback: ${String(error.message || error).slice(0, 180)}`
+      });
+    }
+  }
+  characterConsistency = runCharacterConsistencyAgent(seeds, { premise: prompt, blueprint, places, targetAgentCount });
+  characterConsistency.ai = aiCharacterConsistency;
+  seeds = setupNormalizeSeeds(characterConsistency.agents || seeds, targetAgentCount, places);
+  updateRuntimeProgress("setup-world", { phaseIndex: 7, currentTask: "assemble world" });
   const fallbackRelations = setupFallbackRelationships(seeds, places);
   const safeRelationships = aiSetupEnabled ? {
     households: Array.isArray(relationships?.households) ? relationships.households : [],
@@ -5946,12 +6257,12 @@ async function runNodeSetupCreate(body = {}) {
     groups: fallbackRelations.groups,
     relations: fallbackRelations.relations
   };
-  const payload = setupMakeWorld({ slot, prompt, startClock, config: publicConfig(), places, seeds, relationships: safeRelationships, setupTables: { blueprint, agents: seeds, places, relationships: safeRelationships, createdAt: new Date().toISOString() } });
-  updateRuntimeProgress("setup-vector-memory", { phaseIndex: 6, currentTask: "local vector memory" });
+  const payload = setupMakeWorld({ slot, prompt, startClock, config: publicConfig(), places, seeds, relationships: safeRelationships, setupTables: { blueprint, characterSeeds: characterSeedRows, characterSeedLogs: characterSeedResult?.logs || [], characterConsistency, agents: seeds, places, relationships: safeRelationships, createdAt: new Date().toISOString() } });
+  updateRuntimeProgress("setup-vector-memory", { phaseIndex: 8, currentTask: "local vector memory" });
   await nodeRuntimeHydrateExternalVectors(payload.world, { limit: Number(payload.world?.config?.vectorHydrateLimit || 1000), batchSize: Number(payload.world?.config?.vectorBatchSize || 16) });
-  updateRuntimeProgress("setup-save", { phaseIndex: 6, currentTask: "write save files" });
+  updateRuntimeProgress("setup-save", { phaseIndex: 8, currentTask: "write save files" });
   writeFolderSave(slot, payload);
-  updateRuntimeProgress("setup-complete", { phaseIndex: 7, currentTask: "setup completed" });
+  updateRuntimeProgress("setup-complete", { phaseIndex: 9, currentTask: "setup completed" });
   completeRuntimeProgress(`setup ${slot}`);
   return { ok: true, slot, meta: payload.meta, saves: listSaves(), directory: SAVE_DIR };
 }
