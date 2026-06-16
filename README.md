@@ -12,13 +12,29 @@ AgentBox Town 是一个多 Agent 虚拟小镇模拟器。它把多个 AI 角色�
 
 **V3.3.2 Context Boundary & Runtime Compression + V3.3.1 Social Feedback & Stability + V3.3 Social Dynamics + V3.2 Cognitive State + V3.1.5 Character Genesis**
 
-V3.3.2 重点解决大规模小镇运行时的上下文膨胀问题。新增 `ContextBuilder`，把完整世界状态转换成 AgentAction、World Agent、Social Agent、Scheduler 各自需要的轻量视图；默认预算为 `worldAgent=12000`、`socialAgent=10000`、`scheduler=8000`、`agentAction=6000`。完整记忆、向量 embedding、完整 `cognitiveState`、`debugDecision` 和 `relationshipMatrix` 不再进入大模型 prompt。运行时还会生成 `runtime/contextCache.json` 摘要缓存，并让 `judgementBatchSize` 真正控制 Node 后台大请求拆批。
+### V3.3.2 Context Boundary & Runtime Compression
 
-V3.3.1 增加社会反馈稳定层：事件会通过信息传播改变社会场，再由 `SocialFeedback` 调制每个角色的认知状态和行动评分。社会影响不会直接覆盖人格或事实记忆，而是经过 `socialSensitivity` 和 `tanh` 稳定计算后，影响谨慎、好奇、求助、回避和责任倾向。
+重点解决大规模小镇运行时的上下文膨胀问题。新增 `ContextBuilder`，把完整世界状态转换成 AgentAction、World Agent、Social Agent、Scheduler 各自需要的轻量视图；默认预算为 `worldAgent=12000`、`socialAgent=10000`、`scheduler=8000`、`agentAction=6000`。完整记忆、向量 embedding、完整 `cognitiveState`、`debugDecision` 和 `relationshipMatrix` 不再进入大模型 prompt。运行时还会生成 `runtime/contextCache.json` 摘要缓存，并让 `judgementBatchSize` 真正控制 Node 后台大请求拆批。
 
-V3.1.5 升级了建城阶段：新角色出生时会生成独特的人格基础、`lifeHistorySeed`、认知倾向、行为倾向、出生信念、习惯、偏好、重要经历、自我模型、目标运行态和关系动机。这些字段会写入存档，并从第一天开始参与后续 V3 Cognitive Decision Engine 和 V3.1 Identity Evolution。
+### V3.3.1 Social Feedback & Stability
 
-V3.1 升级了运行时人格成长：角色不会在一次事件后突然变成另一个人，而是每天 0 点根据近期经历慢速更新 belief、habit、preference、selfModel 和 cognitiveProfile。同样的长期经历会逐渐改变角色的风险偏好、社交倾向、耐心、自信和行为惯性。
+增加社会反馈稳定层：事件会通过信息传播改变社会场，再由 `SocialFeedback` 调制每个角色的认知状态和行动评分。社会影响不会直接覆盖人格或事实记忆，而是经过 `socialSensitivity` 和 `tanh` 稳定计算后，影响谨慎、好奇、求助、回避和责任倾向。
+
+### V3.3 Social Dynamics
+
+新增社会场和概率信息传播：事件不是必然全员知道，而是通过关系强度、空间距离、信任、情绪强度、信息类型和社会压力扩散。医疗、死亡、灾难等高优先级事件会更强传播，但仍保留延迟、失真和信息不完整。
+
+### V3.2.1 Action Eligibility + V3.2 Cognitive State
+
+V3.2.1 在 Scheduler 前增加行动资格过滤，年龄、身份、地点、关系、职业和紧急程度不符合的行动会直接移除，不进入评分。V3.2 把需求、情绪、记忆、目标、人格和社会反馈融合成 `CognitiveState`，先形成愿望和认知偏置，再由 Utility Scheduler 选择行动。
+
+### V3.1.5 Character Genesis
+
+升级建城阶段：新角色出生时会生成独特的人格基础、`lifeHistorySeed`、认知倾向、行为倾向、出生信念、习惯、偏好、重要经历、自我模型、目标运行态和关系动机。这些字段会写入存档，并从第一天开始参与后续 V3 Cognitive Decision Engine 和 V3.1 Identity Evolution。
+
+### V3.1 Identity Evolution
+
+升级运行时人格成长：角色不会在一次事件后突然变成另一个人，而是每天 0 点根据近期经历慢速更新 belief、habit、preference、selfModel 和 cognitiveProfile。同样的长期经历会逐渐改变角色的风险偏好、社交倾向、耐心、自信和行为惯性。
 
 建城流程现在是：
 
@@ -56,7 +72,9 @@ agentSchemaVersion: "3.1.5"
 
 这些是出生人格来源，不是剧情生成。普通吃饭、睡觉、通勤、上班、上课不会作为人格记忆写入。
 
-V3.0 运行时决策仍然保持：
+### V3.0 Cognitive Decision Engine
+
+运行时决策仍然保持：
 
 角色行动不再是“需求低了就执行某个动作”。现在流程是：
 
@@ -88,6 +106,10 @@ DailyReflection / IdentityEvolution
 
 - 支持 100+ 角色的小镇模拟。
 - V3.3.2 上下文边界：World/Social/Scheduler/AgentAction 使用专用轻量视图，避免把完整 Agent、完整记忆、向量 embedding 和调试字段送入 prompt。
+- V3.3.1 社会反馈稳定：社会场通过 `SocialFeedback` 调制角色认知和行动评分，同时用 `socialSensitivity` 保持人格连续性。
+- V3.3 社会动态：信息按关系、空间、信任和情绪强度概率传播，形成恐惧、好奇、流言、信任和社会张力。
+- V3.2.1 行动资格过滤：年龄、身份、职业、地点、关系和紧急程度会先过滤无效行动。
+- V3.2 认知状态场：`CognitiveState` 把需求、情绪、记忆、目标和人格变成当前心理驱动力。
 - 每个角色拥有多维需求、多维情绪、关系、长期目标、人格核心、自我模型和行为权重。
 - V3.1.5 角色创建：新居民出生时就有 `lifeHistorySeed`、`beliefMemory`、`habitMemory`、`preferenceMemory`、`episodicMemory`、`selfModel` 和 `goalRuntime`。
 - V3.1 人格长期演化：经历会缓慢形成信念、习惯、偏好、自我认知和认知权重漂移。

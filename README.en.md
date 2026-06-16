@@ -12,13 +12,29 @@ The goal is not only to generate stories. The project aims to simulate a small s
 
 **V3.3.2 Context Boundary & Runtime Compression + V3.3.1 Social Feedback & Stability + V3.3 Social Dynamics + V3.2 Cognitive State + V3.1.5 Character Genesis**
 
-V3.3.2 focuses on runtime context growth in large towns. The new `ContextBuilder` converts full world state into lightweight views for AgentAction, World Agents, Social Agents, and Scheduler. Default budgets are `worldAgent=12000`, `socialAgent=10000`, `scheduler=8000`, and `agentAction=6000`. Raw memory, vector embeddings, full `cognitiveState`, `debugDecision`, and `relationshipMatrix` no longer enter model prompts. Runtime also writes a `runtime/contextCache.json` summary cache, and `judgementBatchSize` now controls Node-side batching for large requests.
+### V3.3.2 Context Boundary & Runtime Compression
 
-V3.3.1 adds a social feedback stability layer. Events propagate through the information system, change the social field, and then modulate each resident's cognitive state and action scoring through `SocialFeedback`. Social influence does not overwrite personality or factual memory; it is regulated by `socialSensitivity` and `tanh` before affecting caution, curiosity, help-seeking, avoidance, and responsibility.
+This release focuses on runtime context growth in large towns. The new `ContextBuilder` converts full world state into lightweight views for AgentAction, World Agents, Social Agents, and Scheduler. Default budgets are `worldAgent=12000`, `socialAgent=10000`, `scheduler=8000`, and `agentAction=6000`. Raw memory, vector embeddings, full `cognitiveState`, `debugDecision`, and `relationshipMatrix` no longer enter model prompts. Runtime also writes a `runtime/contextCache.json` summary cache, and `judgementBatchSize` now controls Node-side batching for large requests.
 
-V3.1.5 upgrades the setup stage. New residents now start with distinct identity foundations, `lifeHistorySeed`, cognitive profiles, behavior tendencies, birth beliefs, habits, preferences, meaningful episodic memory, self model, goal runtime, and relationship intent. These fields are saved and feed into the V3 Cognitive Decision Engine and V3.1 Identity Evolution from day one.
+### V3.3.1 Social Feedback & Stability
 
-V3.1 upgrades runtime identity growth. A resident does not become a different person after one event. Every midnight, recent experiences slowly update belief, habit, preference, selfModel, and cognitiveProfile. Repeated experiences can gradually shift risk tolerance, social drive, patience, confidence, and behavioral inertia.
+Adds a social feedback stability layer. Events propagate through the information system, change the social field, and then modulate each resident's cognitive state and action scoring through `SocialFeedback`. Social influence does not overwrite personality or factual memory; it is regulated by `socialSensitivity` and `tanh` before affecting caution, curiosity, help-seeking, avoidance, and responsibility.
+
+### V3.3 Social Dynamics
+
+Adds social fields and probabilistic information propagation. Events are not automatically known by everyone; they spread through relationship strength, spatial proximity, trust, emotional intensity, information type, and social pressure. Medical, death, and disaster events spread more strongly while still preserving delay, distortion, and incomplete information.
+
+### V3.2.1 Action Eligibility + V3.2 Cognitive State
+
+V3.2.1 adds an eligibility layer before Scheduler so actions that do not fit age, identity, location, relationship, profession, or emergency conditions are removed before scoring. V3.2 merges needs, emotions, memories, goals, personality, and social feedback into `CognitiveState`, generating desires and cognitive bias before Utility Scheduler selects an action.
+
+### V3.1.5 Character Genesis
+
+Upgrades the setup stage. New residents now start with distinct identity foundations, `lifeHistorySeed`, cognitive profiles, behavior tendencies, birth beliefs, habits, preferences, meaningful episodic memory, self model, goal runtime, and relationship intent. These fields are saved and feed into the V3 Cognitive Decision Engine and V3.1 Identity Evolution from day one.
+
+### V3.1 Identity Evolution
+
+Upgrades runtime identity growth. A resident does not become a different person after one event. Every midnight, recent experiences slowly update belief, habit, preference, selfModel, and cognitiveProfile. Repeated experiences can gradually shift risk tolerance, social drive, patience, confidence, and behavioral inertia.
 
 Town creation now runs as:
 
@@ -56,7 +72,9 @@ agentSchemaVersion: "3.1.5"
 
 These fields are personality sources, not plot generation. Ordinary eating, sleeping, commuting, working, and studying are not written as identity memory.
 
-The V3.0 runtime decision flow remains:
+### V3.0 Cognitive Decision Engine
+
+The runtime decision flow remains:
 
 Residents no longer act by directly mapping low needs to actions. The runtime now uses:
 
@@ -88,6 +106,10 @@ slow personality and memory update
 
 - Supports 100+ residents in one town simulation.
 - V3.3.2 context boundary: World/Social/Scheduler/AgentAction use specialized lightweight views instead of sending full agents, raw memory, vector embeddings, or debug fields into prompts.
+- V3.3.1 social feedback stability: the social field modulates cognition and action scoring through `SocialFeedback` while `socialSensitivity` preserves personality continuity.
+- V3.3 social dynamics: information spreads probabilistically through relationships, space, trust, and emotional intensity, forming fear, curiosity, rumors, trust, and social tension.
+- V3.2.1 action eligibility: age, identity, profession, location, relationship, and emergency state filter invalid actions before scoring.
+- V3.2 cognitive state field: `CognitiveState` turns needs, emotions, memory, goals, and personality into current psychological drive.
 - Each resident has multidimensional needs, emotions, relationships, long-term goals, identity core, self model, and behavior weights.
 - V3.1.5 character genesis: new residents are born with `lifeHistorySeed`, `beliefMemory`, `habitMemory`, `preferenceMemory`, `episodicMemory`, `selfModel`, and `goalRuntime`.
 - V3.1 long-term identity evolution: experience slowly forms beliefs, habits, preferences, self understanding, and cognitive profile drift.
