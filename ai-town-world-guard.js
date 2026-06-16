@@ -1,6 +1,45 @@
+function sanitizeSubjectiveText(value, limit = 140) {
+  let text = String(value || "").replace(/\s+/g, " ").trim().slice(0, limit);
+  if (!text) return "";
+  if (/全镇|所有人都知道|大家都知道|人人都知道|都听说|全家都知道|所有同学都知道|所有同事都知道/.test(text)) {
+    return "我不确定别人是否知道这件事，只能按自己掌握的信息判断。";
+  }
+  text = text
+    .replace(/事实是|确定是|肯定是|必然是/g, "我感觉")
+    .replace(/系统|调度|队列|Scheduler|AgentAction|AI\b/gi, "当前安排");
+  if (/(讨厌我|恨我|看不起我|故意针对我|都在议论我)/.test(text) && !/(我觉得|我担心|可能|也许|好像|不确定|像是)/.test(text)) {
+    text = "我担心对方可能对我有不满，但还没有确认。";
+  }
+  return text.slice(0, limit);
+}
+
+function sanitizeInternalState(value) {
+  const raw = value && typeof value === "object" ? value : {};
+  return {
+    desire: sanitizeSubjectiveText(raw.desire, 110),
+    thought: sanitizeSubjectiveText(raw.thought, 110),
+    worry: sanitizeSubjectiveText(raw.worry, 110),
+    expectation: sanitizeSubjectiveText(raw.expectation, 110),
+    hesitation: sanitizeSubjectiveText(raw.hesitation, 110),
+    preference: sanitizeSubjectiveText(raw.preference, 110),
+    interpretation: sanitizeSubjectiveText(raw.interpretation, 110)
+  };
+}
+
+function sanitizeIntent(value) {
+  const raw = value && typeof value === "object" ? value : {};
+  return {
+    want: sanitizeSubjectiveText(raw.want, 120),
+    reason: sanitizeSubjectiveText(raw.reason, 160),
+    emotion: sanitizeSubjectiveText(raw.emotion, 60)
+  };
+}
+
 function guardAction({ world, agent, aiResult, visibleAgents = [] }) {
   const action = aiResult?.action || {};
   const guarded = { ...aiResult, action: { ...action } };
+  guarded.action.internalState = sanitizeInternalState(action.internalState);
+  guarded.action.intent = sanitizeIntent(action.intent);
   const text = `${action.type || ""} ${action.summary || ""} ${action.currentTask || ""}`;
   const places = Array.isArray(world?.places) ? world.places : [];
   const cnStaff = /医生|护士|老师|店员|老板|职员|工作人员|医护|收银|服务员/;

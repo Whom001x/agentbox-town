@@ -11,9 +11,19 @@ const jsonUtils = require("./ai-town-json-utils");
 const { ensureDailyPlans, currentPlanItem, normalizeDailyPlan } = require("./ai-town-planner");
 const { detectInterruption } = require("./ai-town-interruptions");
 const { runLifeEngine } = require("./ai-town-life-engine");
-const { appendMemory, retrieveRelevantMemories, runDailyReflection } = require("./ai-town-memory-stream");
+const {
+  appendMemory,
+  retrieveRelevantMemories,
+  runDailyReflection,
+  ensureSelfModel,
+  normalizeGoalRuntime,
+  syncLongTermMemoryViews,
+  recordEmotionCause,
+  buildMemorySummary
+} = require("./ai-town-memory-stream");
 const { aggregateDecision } = require("./ai-town-decision-aggregator");
 const { judgeAction, mergeWorldMasterJudgement, applyWorldMasterPatch } = require("./ai-town-world-master");
+const { utilityDecision } = require("./ai-town-utility-scheduler");
 
 const PORT = Number(process.env.AI_TOWN_V2_PORT || 8788);
 const HOST = String(process.env.AI_TOWN_V2_HOST || "0.0.0.0");
@@ -44,7 +54,11 @@ const aiConfig = {
   judgementBatchSize: 5,
   schedulerIntervalMs: 2500,
   virtualMinutesPerPulse: 30,
-  maxActionsPerCycle: 3
+  maxActionsPerCycle: 3,
+  vectorMemoryEnabled: true,
+  vectorBaseUrl: "http://localhost:1234/v1",
+  vectorModel: "",
+  vectorMaxRecall: 6
 };
 
 const metrics = {
@@ -369,6 +383,10 @@ function loadConfig() {
     aiConfig.schedulerIntervalMs = clampNumber(saved.schedulerIntervalMs, 0, 600000, aiConfig.schedulerIntervalMs);
     aiConfig.virtualMinutesPerPulse = clampNumber(saved.virtualMinutesPerPulse || saved.tickMinutes, 1, 240, aiConfig.virtualMinutesPerPulse);
     aiConfig.maxActionsPerCycle = clampNumber(saved.maxActionsPerCycle, 1, MAX_ACTIONS_HARD_LIMIT, aiConfig.maxActionsPerCycle);
+    if (saved.vectorMemoryEnabled !== undefined) aiConfig.vectorMemoryEnabled = Boolean(saved.vectorMemoryEnabled);
+    if (typeof saved.vectorBaseUrl === "string" && saved.vectorBaseUrl.trim()) aiConfig.vectorBaseUrl = saved.vectorBaseUrl.trim().replace(/\/$/, "");
+    if (typeof saved.vectorModel === "string") aiConfig.vectorModel = saved.vectorModel.trim();
+    aiConfig.vectorMaxRecall = clampNumber(saved.vectorMaxRecall, 1, 20, aiConfig.vectorMaxRecall);
   } catch (error) {
     console.warn(`Failed to load config: ${error.message}`);
   }
@@ -391,7 +409,11 @@ function saveConfig() {
     judgementBatchSize: aiConfig.judgementBatchSize,
     schedulerIntervalMs: aiConfig.schedulerIntervalMs,
     virtualMinutesPerPulse: aiConfig.virtualMinutesPerPulse,
-    maxActionsPerCycle: aiConfig.maxActionsPerCycle
+    maxActionsPerCycle: aiConfig.maxActionsPerCycle,
+    vectorMemoryEnabled: aiConfig.vectorMemoryEnabled,
+    vectorBaseUrl: aiConfig.vectorBaseUrl,
+    vectorModel: aiConfig.vectorModel,
+    vectorMaxRecall: aiConfig.vectorMaxRecall
   }, null, 2), "utf8");
 }
 
@@ -432,6 +454,10 @@ function savePostedConfigToFile(body) {
   if (body.schedulerIntervalMs !== undefined) next.schedulerIntervalMs = clampNumber(body.schedulerIntervalMs, 0, 600000, existing.schedulerIntervalMs ?? aiConfig.schedulerIntervalMs);
   if (body.virtualMinutesPerPulse !== undefined) next.virtualMinutesPerPulse = clampNumber(body.virtualMinutesPerPulse, 1, 240, existing.virtualMinutesPerPulse ?? aiConfig.virtualMinutesPerPulse);
   if (body.maxActionsPerCycle !== undefined) next.maxActionsPerCycle = clampNumber(body.maxActionsPerCycle, 1, MAX_ACTIONS_HARD_LIMIT, existing.maxActionsPerCycle ?? aiConfig.maxActionsPerCycle);
+  if (body.vectorMemoryEnabled !== undefined) next.vectorMemoryEnabled = Boolean(body.vectorMemoryEnabled);
+  if (typeof body.vectorBaseUrl === "string") next.vectorBaseUrl = body.vectorBaseUrl.trim().replace(/\/$/, "");
+  if (typeof body.vectorModel === "string") next.vectorModel = body.vectorModel.trim();
+  if (body.vectorMaxRecall !== undefined) next.vectorMaxRecall = clampNumber(body.vectorMaxRecall, 1, 20, existing.vectorMaxRecall ?? aiConfig.vectorMaxRecall);
   fs.writeFileSync(CONFIG_PATH, JSON.stringify(next, null, 2), "utf8");
 }
 
@@ -457,6 +483,10 @@ function publicConfig() {
     effectiveMaxActionsPerCycle,
     maxConcurrentPerKey: aiConfig.maxConcurrentPerKey,
     judgementBatchSize: aiConfig.judgementBatchSize,
+    vectorMemoryEnabled: aiConfig.vectorMemoryEnabled,
+    vectorBaseUrl: aiConfig.vectorBaseUrl,
+    vectorModel: aiConfig.vectorModel,
+    vectorMaxRecall: aiConfig.vectorMaxRecall,
     configPath: CONFIG_PATH
   };
 }
@@ -626,6 +656,131 @@ function publicMetrics() {
   };
 }
 
+function vectorConfigForWorld(world = {}) {
+  const config = world?.config || {};
+  const enabled = config.vectorMemoryEnabled ?? aiConfig.vectorMemoryEnabled;
+  if (enabled === false) return null;
+  const baseUrl = String(config.vectorBaseUrl || aiConfig.vectorBaseUrl || "").trim().replace(/\/$/, "");
+  const model = String(config.vectorModel || aiConfig.vectorModel || "").trim();
+  if (!baseUrl || !model) return null;
+  return { baseUrl, model };
+}
+
+async function fetchLocalEmbeddings(texts = [], vectorConfig = null) {
+  const cfg = vectorConfig || vectorConfigForWorld({});
+  const input = texts.map(text => String(text || "").slice(0, 1200)).filter(Boolean);
+  if (!cfg || !input.length) return [];
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30000);
+  try {
+    const response = await fetch(`${cfg.baseUrl}/embeddings`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: cfg.model, input }),
+      signal: controller.signal
+    });
+    const rawText = await response.text();
+    let parsed = {};
+    try {
+      parsed = rawText ? JSON.parse(rawText) : {};
+    } catch {
+      parsed = { error: { message: rawText.slice(0, 300) } };
+    }
+    if (!response.ok) {
+      throw new Error(parsed?.error?.message || parsed?.message || `embedding http ${response.status}`);
+    }
+    const rows = Array.isArray(parsed.data) ? parsed.data : [];
+    return rows.map(row => Array.isArray(row.embedding) ? row.embedding.map(Number).filter(Number.isFinite) : []);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function vectorMemoryNeedsExternalEmbedding(item = {}, cfg = null) {
+  if (!cfg || !item?.scene) return false;
+  if (!Array.isArray(item.vector) || !item.vector.length) return true;
+  if (item.source !== "vector-memory-external") return true;
+  if (item.vectorModel !== cfg.model) return true;
+  if (item.vectorBaseUrl !== cfg.baseUrl) return true;
+  return false;
+}
+
+async function nodeRuntimeHydrateExternalVectors(world = {}, options = {}) {
+  const cfg = vectorConfigForWorld(world);
+  if (!cfg || !Array.isArray(world.agents)) return { enabled: false, updated: 0 };
+  const limit = Math.max(1, Math.min(1000, Number(options.limit || 120)));
+  const batchSize = Math.max(1, Math.min(32, Number(options.batchSize || 16)));
+  const targets = [];
+  for (const agent of world.agents) {
+    for (const item of (Array.isArray(agent.vectorMemory) ? agent.vectorMemory : [])) {
+      if (!vectorMemoryNeedsExternalEmbedding(item, cfg)) continue;
+      targets.push({ agent, item, text: item.scene || item.text || "" });
+      if (targets.length >= limit) break;
+    }
+    if (targets.length >= limit) break;
+  }
+  if (!targets.length) {
+    world.vectorMemoryState = {
+      ...(world.vectorMemoryState || {}),
+      enabled: true,
+      baseUrl: cfg.baseUrl,
+      model: cfg.model,
+      updated: 0,
+      checkedAt: world.clock || 0,
+      status: "ready"
+    };
+    return { enabled: true, updated: 0 };
+  }
+  let updated = 0;
+  try {
+    for (let i = 0; i < targets.length; i += batchSize) {
+      const batch = targets.slice(i, i + batchSize);
+      const embeddings = await fetchLocalEmbeddings(batch.map(target => target.text), cfg);
+      embeddings.forEach((embedding, index) => {
+        if (!embedding.length) return;
+        const target = batch[index];
+        target.item.vector = embedding.slice(0, 4096);
+        target.item.source = "vector-memory-external";
+        target.item.vectorModel = cfg.model;
+        target.item.vectorBaseUrl = cfg.baseUrl;
+        target.item.vectorDimensions = target.item.vector.length;
+        target.item.externalVectorAt = Date.now();
+        target.item.factAuthority = false;
+        updated += 1;
+      });
+    }
+    world.vectorMemoryState = {
+      enabled: true,
+      baseUrl: cfg.baseUrl,
+      model: cfg.model,
+      updated,
+      checkedAt: world.clock || 0,
+      status: "ready"
+    };
+    return { enabled: true, updated };
+  } catch (error) {
+    world.vectorMemoryState = {
+      enabled: true,
+      baseUrl: cfg.baseUrl,
+      model: cfg.model,
+      updated,
+      checkedAt: world.clock || 0,
+      status: "fallback_hash",
+      lastError: error.message
+    };
+    world.logs ||= [];
+    world.logs.unshift({
+      title: "Vector Memory",
+      body: `Local embedding failed: ${error.message}; fallback to built-in hash vectors`,
+      type: "node_runtime_warning",
+      time: minutesToClock(world.clock || 0).text,
+      clock: world.clock || 0,
+      source: "vector-memory"
+    });
+    return { enabled: true, updated, error: error.message };
+  }
+}
+
 function readJsonIfExists(filePath, fallback = null) {
   return jsonUtils.readJsonIfExists(filePath, fallback);
 }
@@ -681,6 +836,9 @@ function agentInfoSnapshot(agent = {}) {
   const {
     memory,
     intentState,
+    internalState,
+    subjectiveIntent,
+    lastInternalStateAt,
     contextJudgement,
     crisisTriage,
     knowledgeJudgement,
@@ -696,6 +854,16 @@ function agentInfoSnapshot(agent = {}) {
     age: agent.age ?? agent.ageYears ?? null,
     emotions: agent.emotions || agent.emotionVector || {},
     longTermGoal: agent.longTermGoal || (Array.isArray(agent.longTermGoals) ? agent.longTermGoals[0]?.title : "") || "",
+    selfModel: agent.selfModel || null,
+    goalRuntime: agent.goalRuntime || null,
+    emotionCause: Array.isArray(agent.emotionCause) ? agent.emotionCause.slice(0, 40) : [],
+    longTermMemory: {
+      episodicMemory: Array.isArray(agent.episodicMemory) ? agent.episodicMemory.slice(0, 30) : [],
+      beliefMemory: Array.isArray(agent.beliefMemory) ? agent.beliefMemory.slice(0, 30) : [],
+      habitMemory: Array.isArray(agent.habitMemory) ? agent.habitMemory.slice(0, 30) : [],
+      preferenceMemory: Array.isArray(agent.preferenceMemory) ? agent.preferenceMemory.slice(0, 30) : [],
+      relationshipMemory: Array.isArray(agent.relationshipMemory) ? agent.relationshipMemory.slice(0, 40) : []
+    },
     relationships: agent.relationships || agent.relations || {}
   };
 }
@@ -717,6 +885,9 @@ function agentStateSnapshot(agent = {}) {
     sleepQuality: agent.sleepQuality,
     mood: agent.mood,
     currentTask: agent.currentTask,
+    internalState: agent.internalState || null,
+    subjectiveIntent: agent.subjectiveIntent || null,
+    lastInternalStateAt: agent.lastInternalStateAt || 0,
     activeProcess: agent.activeProcess || null,
     actionPlan: agent.actionPlan || [],
     dailyPlan: agent.dailyPlan || [],
@@ -724,6 +895,14 @@ function agentStateSnapshot(agent = {}) {
     planGeneratedAt: agent.planGeneratedAt || 0,
     decisionState: agent.decisionState || null,
     reflection: agent.reflection || null,
+    selfModel: agent.selfModel || null,
+    goalRuntime: agent.goalRuntime || null,
+    emotionCause: Array.isArray(agent.emotionCause) ? agent.emotionCause.slice(0, 40) : [],
+    memoryInfluence: agent.memoryInfluence || null,
+    cognitiveState: agent.cognitiveState || null,
+    decisionWeights: agent.decisionWeights || null,
+    personalityRuntime: agent.personalityRuntime || null,
+    debugDecision: agent.debugDecision || null,
     worldMasterJudgement: agent.worldMasterJudgement || null
   };
 }
@@ -738,6 +917,8 @@ function agentJudgementSnapshot(agent = {}) {
     knowledgeJudgement: agent.knowledgeJudgement || null,
     outcomeJudgement: agent.outcomeJudgement || null,
     decisionState: agent.decisionState || null,
+    personalityRuntime: agent.personalityRuntime || null,
+    debugDecision: agent.debugDecision || null,
     worldMasterJudgement: agent.worldMasterJudgement || null,
     lastTimePassage: agent.lastTimePassage || null,
     multiDimensionalNotes: agent.multiDimensionalNotes || [],
@@ -759,6 +940,9 @@ function writeAgentFolders(saveFolder, agents = []) {
     lifeStatus: agent.lifeStatus || "alive"
   })));
   agents.forEach(agent => {
+    ensureSelfModel(agent);
+    normalizeGoalRuntime(agent, { clock: agent.goalRuntime?.updatedAt || agent.planGeneratedAt || 0 });
+    syncLongTermMemoryViews(agent);
     const agentDir = path.join(agentsDir, safeSaveName(agent.id || agent.name || "agent"));
     ensureDir(agentDir);
     writeJsonFile(path.join(agentDir, "info.json"), agentInfoSnapshot(agent));
@@ -766,6 +950,24 @@ function writeAgentFolders(saveFolder, agents = []) {
       id: agent.id,
       name: agent.name,
       memory: agent.memory || { short: [], long: [], emotional: [], secret: [], rumor: [] },
+      semanticMemory: agent.semanticMemory || { habit: [], experience: [], episodic: [], belief: [], relationship: [], social: [], preference: [], goal: [] },
+      structuredMemory: agent.structuredMemory || { habit: [], belief: [], preference: [], episodic: [], social: [], goal: [] },
+      vectorMemory: Array.isArray(agent.vectorMemory) ? agent.vectorMemory.slice(0, 180) : [],
+      episodicMemory: Array.isArray(agent.episodicMemory) ? agent.episodicMemory.slice(0, 30) : [],
+      beliefMemory: Array.isArray(agent.beliefMemory) ? agent.beliefMemory.slice(0, 30) : [],
+      habitMemory: Array.isArray(agent.habitMemory) ? agent.habitMemory.slice(0, 30) : [],
+      preferenceMemory: Array.isArray(agent.preferenceMemory) ? agent.preferenceMemory.slice(0, 30) : [],
+      relationshipMemory: Array.isArray(agent.relationshipMemory) ? agent.relationshipMemory.slice(0, 40) : [],
+      memoryProfile: agent.memoryProfile || null,
+      selfModel: agent.selfModel || null,
+      goalRuntime: agent.goalRuntime || null,
+    emotionCause: Array.isArray(agent.emotionCause) ? agent.emotionCause.slice(0, 40) : [],
+    memoryInfluence: agent.memoryInfluence || null,
+    cognitiveState: agent.cognitiveState || null,
+    decisionWeights: agent.decisionWeights || null,
+    personalityRuntime: agent.personalityRuntime || null,
+      debugDecision: agent.debugDecision || null,
+      eventLog: Array.isArray(agent.eventLog) ? agent.eventLog.slice(0, 120) : [],
       knownFacts: agent.knownFacts || []
     });
     writeJsonFile(path.join(agentDir, "state.json"), agentStateSnapshot(agent));
@@ -786,6 +988,9 @@ function writeCharacterFolders(saveFolder, agents = []) {
     lifeStatus: agent.lifeStatus || "alive"
   })));
   agents.forEach(agent => {
+    ensureSelfModel(agent);
+    normalizeGoalRuntime(agent, { clock: agent.goalRuntime?.updatedAt || agent.planGeneratedAt || 0 });
+    syncLongTermMemoryViews(agent);
     const characterDir = path.join(charactersDir, safeSaveName(`${agent.id || "agent"}-${agent.name || ""}`));
     const judgementsDir = path.join(characterDir, "judgements");
     ensureDir(judgementsDir);
@@ -795,6 +1000,24 @@ function writeCharacterFolders(saveFolder, agents = []) {
       id: agent.id,
       name: agent.name,
       memory: agent.memory || { short: [], long: [], emotional: [], secret: [], rumor: [] },
+      semanticMemory: agent.semanticMemory || { habit: [], experience: [], episodic: [], belief: [], relationship: [], social: [], preference: [], goal: [] },
+      structuredMemory: agent.structuredMemory || { habit: [], belief: [], preference: [], episodic: [], social: [], goal: [] },
+      vectorMemory: Array.isArray(agent.vectorMemory) ? agent.vectorMemory.slice(0, 180) : [],
+      episodicMemory: Array.isArray(agent.episodicMemory) ? agent.episodicMemory.slice(0, 30) : [],
+      beliefMemory: Array.isArray(agent.beliefMemory) ? agent.beliefMemory.slice(0, 30) : [],
+      habitMemory: Array.isArray(agent.habitMemory) ? agent.habitMemory.slice(0, 30) : [],
+      preferenceMemory: Array.isArray(agent.preferenceMemory) ? agent.preferenceMemory.slice(0, 30) : [],
+      relationshipMemory: Array.isArray(agent.relationshipMemory) ? agent.relationshipMemory.slice(0, 40) : [],
+      memoryProfile: agent.memoryProfile || null,
+      selfModel: agent.selfModel || null,
+      goalRuntime: agent.goalRuntime || null,
+      emotionCause: Array.isArray(agent.emotionCause) ? agent.emotionCause.slice(0, 40) : [],
+      memoryInfluence: agent.memoryInfluence || null,
+      cognitiveState: agent.cognitiveState || null,
+      decisionWeights: agent.decisionWeights || null,
+      personalityRuntime: agent.personalityRuntime || null,
+      debugDecision: agent.debugDecision || null,
+      eventLog: Array.isArray(agent.eventLog) ? agent.eventLog.slice(0, 120) : [],
       knownFacts: agent.knownFacts || [],
       memorySummary: agent.memorySummary || ""
     });
@@ -811,6 +1034,7 @@ function writeWorldTables(saveFolder, world = {}) {
     ["places", Array.isArray(world.places) ? world.places : []],
     ["events", {
       records: Array.isArray(world.records) ? world.records.slice(0, 500) : [],
+      eventLog: Array.isArray(world.eventLog) ? world.eventLog.slice(0, 2000) : [],
       eventImpacts: Array.isArray(world.eventImpacts) ? world.eventImpacts : [],
       informationFlows: Array.isArray(world.informationFlows) ? world.informationFlows : [],
       socialProcesses: Array.isArray(world.socialProcesses) ? world.socialProcesses : []
@@ -927,6 +1151,11 @@ function readCharacterFolders(saveFolder) {
         ...info,
         ...state,
         memory: memory.memory || info.memory || state.memory || { short: [], long: [], emotional: [], secret: [], rumor: [] },
+        semanticMemory: memory.semanticMemory || info.semanticMemory || state.semanticMemory || { habit: [], experience: [], episodic: [], belief: [], relationship: [], social: [], preference: [], goal: [] },
+        structuredMemory: memory.structuredMemory || info.structuredMemory || state.structuredMemory || { habit: [], belief: [], preference: [], episodic: [], social: [], goal: [] },
+        vectorMemory: memory.vectorMemory || info.vectorMemory || state.vectorMemory || [],
+        memoryProfile: memory.memoryProfile || info.memoryProfile || state.memoryProfile || null,
+        eventLog: memory.eventLog || info.eventLog || state.eventLog || [],
         knownFacts: memory.knownFacts || info.knownFacts || [],
         memorySummary: memory.memorySummary || info.memorySummary || "",
         ...judgements
@@ -993,18 +1222,28 @@ function readSavePayload(slot) {
   const folderWorldPath = path.join(folderPath, "world.json");
   if (fs.existsSync(folderWorldPath)) {
     const payload = readJsonIfExists(folderWorldPath, null);
-    if (payload) normalizeWorldBeforeSave(payload.world || payload || {});
+    if (payload) {
+      const migration = migrateWorldPersonalityRuntime(payload);
+      normalizeWorldBeforeSave(payload.world || payload || {});
+      if (migration.changed) writeFolderSave(slot, payload);
+    }
     return payload;
   }
   const splitPayload = readSplitSavePayload(slot);
   if (splitPayload) {
+    const migration = migrateWorldPersonalityRuntime(splitPayload);
     normalizeWorldBeforeSave(splitPayload.world || splitPayload || {});
+    if (migration.changed) writeFolderSave(slot, splitPayload);
     return splitPayload;
   }
   const jsonPath = savePathFor(slot);
   if (fs.existsSync(jsonPath)) {
     const payload = readJsonIfExists(jsonPath, null);
-    if (payload) normalizeWorldBeforeSave(payload.world || payload || {});
+    if (payload) {
+      const migration = migrateWorldPersonalityRuntime(payload);
+      normalizeWorldBeforeSave(payload.world || payload || {});
+      if (migration.changed) writeFolderSave(slot, payload);
+    }
     return payload;
   }
   return null;
@@ -1018,6 +1257,8 @@ function compactText(value, fallback = "", limit = 180) {
 
 function compactAgentForMobile(agent = {}) {
   const memory = agent.memory && typeof agent.memory === "object" ? agent.memory : {};
+  const semanticMemory = agent.semanticMemory && typeof agent.semanticMemory === "object" ? agent.semanticMemory : {};
+  const structuredMemory = agent.structuredMemory && typeof agent.structuredMemory === "object" ? agent.structuredMemory : {};
   return {
     id: compactText(agent.id || agent.name, "agent"),
     name: compactText(agent.name || agent.id, "居民", 40),
@@ -1042,6 +1283,15 @@ function compactAgentForMobile(agent = {}) {
       short: Array.isArray(memory.short) ? memory.short.slice(0, 2).map(item => ({ text: compactText(item?.text || item, "", 100) })) : [],
       rumor: Array.isArray(memory.rumor) ? memory.rumor.slice(0, 1).map(item => ({ text: compactText(item?.text || item, "", 100) })) : []
     },
+    semanticMemory: Object.fromEntries(["habit", "experience", "episodic", "belief", "relationship", "social", "preference", "goal"].map(type => {
+      const items = Array.isArray(semanticMemory[type]) ? semanticMemory[type] : [];
+      return [type, items.slice(0, 2).map(item => ({ text: compactText(item?.text || item?.meaning || item, "", 120), importance: item?.importance || 3 }))];
+    })),
+    structuredMemory: Object.fromEntries(["habit", "belief", "preference", "episodic", "social", "goal"].map(type => {
+      const items = Array.isArray(structuredMemory[type]) ? structuredMemory[type] : [];
+      return [type, items.slice(0, 2).map(item => ({ text: compactText(item?.text || item?.meaning || item, "", 120), importance: item?.importance || 3 }))];
+    })),
+    vectorMemory: Array.isArray(agent.vectorMemory) ? agent.vectorMemory.slice(0, 3).map(item => ({ scene: compactText(item.scene || item.text, "", 120), importance: item.importance || 3 })) : [],
     relationshipMatrix: Object.fromEntries(Object.entries(agent.relationshipMatrix || {}).slice(0, 8))
   };
 }
@@ -1375,6 +1625,163 @@ function setupRepairPlacement(world = {}) {
   });
 }
 
+function worldHasSemanticMemory(agent = {}) {
+  return Object.values(agent.semanticMemory || {}).some(items => Array.isArray(items) && items.length);
+}
+
+function roleHabitText(agent = {}) {
+  const job = String(agent.job || agent.role || "");
+  const age = Number(agent.ageYears || agent.age || ((agent.ageDays || 0) / 365) || 30);
+  if (/student|瀛︾敓|灏忓|涓/.test(job)) return "Keeps a school-centered daily rhythm and usually respects class arrangements.";
+  if (/doctor|nurse|medical|鍖荤敓|鎶ゅ＋|鍖绘姢/.test(job)) return "Pays attention to health-related responsibilities and clinic service windows.";
+  if (/teacher|school|鑰佸笀|鏁欏笀/.test(job)) return "Tries to keep teaching duties and student care stable.";
+  if (/shop|store|vendor|restaurant|搴梶灏忓崠|鏃╅/.test(job)) return "Keeps a shopkeeper rhythm around opening hours, familiar customers and stock order.";
+  if (/elder|retired|閫€浼|鑰佷汉/.test(job) || age >= 65) return "Moves more cautiously and values familiar places, rest and safety.";
+  if (/commuter|work|worker|office|涓婄彮|宸ヤ綔|閫氬嫟/.test(job)) return "Keeps a workday rhythm and tends to balance duties with recovery.";
+  return "Keeps a stable ordinary town-life rhythm.";
+}
+
+function addInitialSemanticMemory(agent, world = {}) {
+  const clock = Number(world.clock || 0);
+  const selfModel = ensureSelfModel(agent);
+  const goalRuntime = normalizeGoalRuntime(agent, world);
+  const firstGoal = goalRuntime.goals?.[0]?.name || agent.longTermGoal || agent.goal || "";
+  if (firstGoal) {
+    appendMemory(agent, {
+      type: "goal",
+      text: `Long-term direction: ${firstGoal}`,
+      meaning: `This person uses "${firstGoal}" as a stable long-term direction.`,
+      at: clock,
+      importance: 3,
+      strength: 58,
+      source: "personality-migration",
+      tags: ["initial", "goal"],
+      dedupeKey: `personality-migration:goal:${agent.id}:${firstGoal}`
+    });
+  }
+  const habit = selfModel.selfBeliefs?.[0] || agent.identityCore?.habits?.[0] || roleHabitText(agent);
+  if (habit) {
+    appendMemory(agent, {
+      type: "habit",
+      text: `Stable habit: ${habit}`,
+      meaning: habit,
+      at: clock,
+      importance: 2,
+      strength: 52,
+      source: "personality-migration",
+      tags: ["initial", "habit"],
+      dedupeKey: `personality-migration:habit:${agent.id}:${habit}`
+    });
+  }
+  const value = selfModel.values?.[0] || agent.identityCore?.values?.[0] || "";
+  if (value) {
+    appendMemory(agent, {
+      type: "belief",
+      text: `Self value: ${value}`,
+      meaning: `This person tends to judge choices through the value "${value}".`,
+      at: clock,
+      importance: 2,
+      strength: 50,
+      source: "personality-migration",
+      tags: ["initial", "belief"],
+      dedupeKey: `personality-migration:belief:${agent.id}:${value}`
+    });
+  }
+}
+
+function migrateEmotionCauses(agent = {}, world = {}) {
+  const clock = Number(world.clock || 0);
+  const needs = agent.needs || {};
+  const emotions = agent.emotionVector || agent.emotions || {};
+  const needToEmotion = {
+    hunger: "tired",
+    hygiene: "anxious",
+    health: "anxious",
+    social: "lonely",
+    responsibility: "anxious",
+    stress: "anxious",
+    comfort: "tired",
+    safety: "anxious"
+  };
+  Object.entries(needs)
+    .filter(([, value]) => Number(value) < 40)
+    .sort((a, b) => Number(a[1]) - Number(b[1]))
+    .slice(0, 3)
+    .forEach(([key, value]) => {
+      recordEmotionCause(agent, {
+        emotion: needToEmotion[key] || "anxious",
+        intensity: Math.min(1, Math.max(0.25, (40 - Number(value)) / 40)),
+        causes: [`Low ${key} state during save migration (${Number(value).toFixed(1)})`],
+        source: "personality-migration",
+        at: clock
+      });
+    });
+  Object.entries(emotions)
+    .filter(([, value]) => Number(value) >= 75)
+    .sort((a, b) => Number(b[1]) - Number(a[1]))
+    .slice(0, 2)
+    .forEach(([key, value]) => {
+      recordEmotionCause(agent, {
+        emotion: key,
+        intensity: Math.min(1, Math.max(0.25, Number(value) / 100)),
+        causes: [`High ${key} emotion preserved from existing save (${Number(value).toFixed(1)})`],
+        source: "personality-migration",
+        at: clock
+      });
+    });
+}
+
+function migrateAgentPersonalityRuntime(agent = {}, world = {}) {
+  if (!agent?.id) return false;
+  const before = {
+    selfModel: Boolean(agent.selfModel),
+    goalRuntime: Boolean(agent.goalRuntime),
+    emotionCause: Array.isArray(agent.emotionCause),
+    structuredMemory: Boolean(agent.structuredMemory),
+    vectorMemory: Array.isArray(agent.vectorMemory),
+    relationshipMemory: Array.isArray(agent.relationshipMemory),
+    semantic: worldHasSemanticMemory(agent)
+  };
+  ensureSelfModel(agent);
+  normalizeGoalRuntime(agent, world);
+  if (!worldHasSemanticMemory(agent)) addInitialSemanticMemory(agent, world);
+  if (!Array.isArray(agent.emotionCause) || !agent.emotionCause.length) migrateEmotionCauses(agent, world);
+  syncLongTermMemoryViews(agent);
+  agent.memorySummary = agent.memorySummary || buildMemorySummary(agent, world);
+  const after = {
+    selfModel: Boolean(agent.selfModel),
+    goalRuntime: Boolean(agent.goalRuntime),
+    emotionCause: Array.isArray(agent.emotionCause),
+    structuredMemory: Boolean(agent.structuredMemory),
+    vectorMemory: Array.isArray(agent.vectorMemory),
+    relationshipMemory: Array.isArray(agent.relationshipMemory),
+    semantic: worldHasSemanticMemory(agent)
+  };
+  return Object.keys(before).some(key => before[key] !== after[key]);
+}
+
+function migrateWorldPersonalityRuntime(payloadOrWorld = {}, options = {}) {
+  const world = payloadOrWorld.world || payloadOrWorld;
+  if (!world || !Array.isArray(world.agents)) return { changed: false, count: 0 };
+  let changed = false;
+  let count = 0;
+  world.agents.forEach(agent => {
+    if (migrateAgentPersonalityRuntime(agent, world)) {
+      changed = true;
+      count += 1;
+    }
+  });
+  const previousChangedAgents = Number(world.personalityRuntimeMigration?.changedAgents || 0);
+  world.personalityRuntimeMigration ||= {};
+  world.personalityRuntimeMigration.version = "v2.5.1";
+  world.personalityRuntimeMigration.lastRunClock = Number(world.clock || 0);
+  world.personalityRuntimeMigration.agentCount = world.agents.length;
+  world.personalityRuntimeMigration.changedAgents = count || previousChangedAgents;
+  world.personalityRuntimeMigration.updatedAt = options.now || new Date().toISOString();
+  world.personalityRuntimeMigration.rule = "Ensures runtime personality loop fields exist when creating, loading, or saving a town.";
+  return { changed, count };
+}
+
 function normalizeWorldBeforeSave(world = {}) {
   if (!Array.isArray(world.agents)) return world;
   normalizeWorldEventTimes(world);
@@ -1409,6 +1816,7 @@ function normalizeWorldBeforeSave(world = {}) {
     normalizeMemoryLayers(agent, world);
     freezeDeadAgent(agent, world);
   });
+  migrateWorldPersonalityRuntime(world);
   return world;
 }
 
@@ -1474,16 +1882,41 @@ function nodeRuntimePlace(world, placeId) {
 
 function nodeRuntimeMemoryItems(agent = {}) {
   const memory = agent.memory && typeof agent.memory === "object" ? agent.memory : {};
-  const layerWeight = { emotional: 1.5, long: 1.25, secret: 1.15, short: 1.0, rumor: 0.65 };
-  return Object.entries(layerWeight).flatMap(([layer, multiplier]) => {
+  const semanticMemory = agent.semanticMemory && typeof agent.semanticMemory === "object" ? agent.semanticMemory : {};
+  const semanticTypeWeight = { belief: 1.6, experience: 1.4, episodic: 1.4, relationship: 1.35, social: 1.35, goal: 1.25, preference: 1.2, habit: 0.8 };
+  const routineLogPattern = /^(Followed the plan|Followed plan|按计划).*(sleep|dinner|lunch|breakfast|work|class|homework|吃|饭|睡|上班|上课|通勤|回家|日常)/i;
+  const semanticItems = Object.entries(semanticTypeWeight).flatMap(([type, multiplier]) => {
+    const items = Array.isArray(semanticMemory[type]) ? semanticMemory[type] : [];
+    return items.slice(0, type === "habit" ? 8 : 10).map(item => {
+      const text = String(item?.text || item?.meaning || item || "").trim();
+      const importance = clampNumber(item?.importance, 1, 5, 3);
+      const strength = Number.isFinite(Number(item?.strength)) ? clampNumber(item.strength, 0, 100, 50) / 50 : 1;
+      return {
+        layer: type,
+        type,
+        text,
+        weight: Math.max(1, Math.round(importance * multiplier * strength)),
+        memorySource: "semantic"
+      };
+    }).filter(item => item.text);
+  });
+  const layerWeight = { emotional: 1.5, long: 1.1, secret: 1.15, short: 0.75, rumor: 0.65 };
+  const legacyItems = Object.entries(layerWeight).flatMap(([layer, multiplier]) => {
     const items = Array.isArray(memory[layer]) ? memory[layer] : [];
     return items.slice(0, layer === "short" ? 12 : 8).map(item => {
       const text = String(item?.text || item || "").trim();
       const importance = clampNumber(item?.importance, 1, 5, 3);
       const strength = Number.isFinite(Number(item?.strength)) ? clampNumber(item.strength, 0, 100, 50) / 50 : 1;
-      return { layer, text, weight: Math.max(1, Math.round(importance * multiplier * strength)) };
-    }).filter(item => item.text);
+      return {
+        layer,
+        type: item?.type || layer,
+        text,
+        weight: Math.max(1, Math.round(importance * multiplier * strength)),
+        memorySource: "legacy"
+      };
+    }).filter(item => item.text && !routineLogPattern.test(item.text));
   });
+  return [...semanticItems, ...legacyItems];
 }
 
 function nodeRuntimeBumpWeighted(list, id, name, weight, reason, max = 8) {
@@ -1568,33 +2001,34 @@ function nodeRuntimeMemoryActionWeights(world = {}, agent = {}) {
 
   items.forEach(item => {
     const text = item.text;
+    const reason = item.type || item.layer || item.memorySource || "memory";
     const negative = hasNegative(text);
     const positive = hasPositive(text);
     if (!negative && !positive && !hasFood(text) && !hasMedical(text) && !hasSocialHelp(text)) return;
     const base = item.weight;
     if (negative) {
-      addAction("avoid_risk", base + 2, item.layer);
-      addAction("seek_safe_place", base, item.layer);
+      addAction("avoid_risk", base + 2, reason);
+      addAction("seek_safe_place", base, reason);
       weights.priorityDelta += Math.min(8, base);
     }
-    if (hasFood(text)) addAction("eat_or_buy_food", base + 2, item.layer);
-    if (hasMedical(text)) addAction("visit_clinic_or_seek_care", base + 2, item.layer);
-    if (hasSocialHelp(text)) addAction("seek_help_or_check_in", base + 1, item.layer);
+    if (hasFood(text)) addAction("eat_or_buy_food", base + 2, reason);
+    if (hasMedical(text)) addAction("visit_clinic_or_seek_care", base + 2, reason);
+    if (hasSocialHelp(text)) addAction("seek_help_or_check_in", base + 1, reason);
 
     places.forEach(place => {
       const id = String(place.id || "");
       const name = String(place.name || "");
       if (!id && !name) return;
       if (!text.includes(id) && (!name || !text.includes(name))) return;
-      if (negative) nodeRuntimeBumpWeighted(weights.avoidPlaces, id, name, base + 4, item.layer);
-      if (positive || hasFood(text) || hasMedical(text)) nodeRuntimeBumpWeighted(weights.seekPlaces, id, name, base + 3, item.layer);
+      if (negative) nodeRuntimeBumpWeighted(weights.avoidPlaces, id, name, base + 4, reason);
+      if (positive || hasFood(text) || hasMedical(text)) nodeRuntimeBumpWeighted(weights.seekPlaces, id, name, base + 3, reason);
     });
     agents.forEach(other => {
       if (!other?.id || other.id === agent.id) return;
       const name = String(other.name || "");
       if (!text.includes(other.id) && (!name || !text.includes(name))) return;
-      if (negative && /冲突|争吵|威胁|害怕|conflict|threat|fear/i.test(text)) nodeRuntimeBumpWeighted(weights.avoidAgents, other.id, name, base + 4, item.layer);
-      if (positive || hasSocialHelp(text)) nodeRuntimeBumpWeighted(weights.seekAgents, other.id, name, base + 3, item.layer);
+      if (negative && /冲突|争吵|威胁|害怕|conflict|threat|fear/i.test(text)) nodeRuntimeBumpWeighted(weights.avoidAgents, other.id, name, base + 4, reason);
+      if (positive || hasSocialHelp(text)) nodeRuntimeBumpWeighted(weights.seekAgents, other.id, name, base + 3, reason);
     });
   });
 
@@ -1637,11 +2071,61 @@ function nodeRuntimeMemoryActionWeights(world = {}, agent = {}) {
   return weights;
 }
 
+function nodeRuntimeCompactSemanticMemory(agent = {}, perType = 3) {
+  const semanticMemory = agent.semanticMemory && typeof agent.semanticMemory === "object" ? agent.semanticMemory : {};
+  const types = ["habit", "experience", "episodic", "belief", "relationship", "social", "preference", "goal"];
+  return Object.fromEntries(types.map(type => {
+    const items = Array.isArray(semanticMemory[type]) ? semanticMemory[type] : [];
+    return [type, items.slice(0, perType).map(item => ({
+      id: item.id || "",
+      text: compactText(item.text || item.meaning || "", "", 140),
+      importance: item.importance || 3,
+      strength: item.strength || 50,
+      lastSeenAt: item.lastSeenAt || item.at || 0
+    }))];
+  }));
+}
+
+function nodeRuntimeCompactStructuredMemory(agent = {}, perType = 3) {
+  const structuredMemory = agent.structuredMemory && typeof agent.structuredMemory === "object" ? agent.structuredMemory : {};
+  const types = ["habit", "belief", "preference", "episodic", "social", "goal"];
+  return Object.fromEntries(types.map(type => {
+    const items = Array.isArray(structuredMemory[type]) ? structuredMemory[type] : [];
+    return [type, items.slice(0, perType).map(item => ({
+      id: item.id || "",
+      text: compactText(item.text || item.meaning || "", "", 140),
+      importance: item.importance || 3,
+      strength: item.strength || 50,
+      lastSeenAt: item.lastSeenAt || item.at || 0
+    }))];
+  }));
+}
+
+function nodeRuntimeMemoryContext(agent = {}, relevantMemories = [], memoryActionWeights = null) {
+  return {
+    summary: agent.memorySummary || "",
+    semanticMemory: nodeRuntimeCompactSemanticMemory(agent, 4),
+    structuredMemory: nodeRuntimeCompactStructuredMemory(agent, 4),
+    vectorMemoryRule: "Vector memory is associative recall only; it cannot create facts, override knowledge boundaries, or decide actions.",
+    recentRelevant: (Array.isArray(relevantMemories) ? relevantMemories : []).slice(0, 8).map(item => ({
+      id: item.id || "",
+      type: item.type || item.layer || "",
+      text: compactText(item.text || item.meaning || "", "", 160),
+      importance: item.importance || 3,
+      score: item.score || 0
+    })),
+    behaviorBias: memoryActionWeights || nodeRuntimeMemoryActionWeights({}, agent),
+    rule: "Use semantic memory as meaning for future behavior. EventLog is only replay history; routine eating/sleeping/work/class events are not independent memories."
+  };
+}
+
 function nodeRuntimeAgentBrief(agent, world = null) {
   const memoryActionWeights = world && typeof world === "object" ? nodeRuntimeMemoryActionWeights(world, agent) : null;
   const planItem = world && typeof world === "object" ? currentPlanItem(world, agent) : null;
   const interruption = world && typeof world === "object" ? detectInterruption(world, agent) : null;
   const decision = world && typeof world === "object" ? aggregateDecision(world, agent, { plan: planItem, interruption }) : null;
+  const utility = world && typeof world === "object" ? utilityDecision(world, agent, { plan: planItem, interruption }) : null;
+  syncLongTermMemoryViews(agent);
   return {
     id: agent.id,
     name: agent.name,
@@ -1658,16 +2142,47 @@ function nodeRuntimeAgentBrief(agent, world = null) {
     activeProcess: agent.activeProcess || null,
     eventQueue: Array.isArray(agent.eventQueue) ? agent.eventQueue.slice(0, 5) : [],
     longTermGoals: Array.isArray(agent.longTermGoals) ? agent.longTermGoals.slice(0, 3) : [],
+    goalRuntime: utility?.goalRuntime || agent.goalRuntime || null,
     identityCore: agent.identityCore || null,
+    selfModel: utility?.selfModel || agent.selfModel || null,
     personalityProfile: agent.personalityProfile || null,
+    decisionWeights: agent.decisionWeights || null,
+    cognitiveState: utility?.cognitiveState || agent.cognitiveState || null,
+    personalityRuntime: utility?.personalityRuntime || agent.personalityRuntime || null,
+    debugDecision: utility?.debugDecision || agent.debugDecision || null,
+    emotionCause: Array.isArray(agent.emotionCause) ? agent.emotionCause.slice(0, 8) : [],
     dailyPlan: Array.isArray(agent.dailyPlan) ? agent.dailyPlan.slice(0, 24) : [],
     currentPlanItem: planItem,
     interruption,
     decision,
     decisionState: agent.decisionState || null,
+    utilityPriority: utility ? {
+      priority: utility.priority,
+      reason: utility.priorityReason,
+      components: utility.priorityComponents,
+      selectedAction: utility.selectedAction ? {
+        id: utility.selectedAction.id,
+        label: utility.selectedAction.label,
+        score: utility.selectedAction.score,
+        probability: utility.selectedAction.probability
+      } : null
+    } : null,
     reflection: agent.reflection || null,
     worldMasterJudgement: agent.worldMasterJudgement || null,
-    memoryActionWeights
+    internalState: agent.internalState || null,
+    subjectiveIntent: agent.subjectiveIntent || null,
+    memoryActionWeights,
+    memoryInfluence: utility?.memoryInfluence || agent.memoryInfluence || null,
+    semanticMemory: nodeRuntimeCompactSemanticMemory(agent, 2),
+    structuredMemory: nodeRuntimeCompactStructuredMemory(agent, 2),
+    longTermMemory: {
+      episodicMemory: Array.isArray(agent.episodicMemory) ? agent.episodicMemory.slice(0, 4) : [],
+      beliefMemory: Array.isArray(agent.beliefMemory) ? agent.beliefMemory.slice(0, 4) : [],
+      habitMemory: Array.isArray(agent.habitMemory) ? agent.habitMemory.slice(0, 4) : [],
+      preferenceMemory: Array.isArray(agent.preferenceMemory) ? agent.preferenceMemory.slice(0, 4) : [],
+      relationshipMemory: Array.isArray(agent.relationshipMemory) ? agent.relationshipMemory.slice(0, 4) : []
+    },
+    vectorMemory: Array.isArray(agent.vectorMemory) ? agent.vectorMemory.slice(0, 3).map(item => ({ scene: compactText(item.scene || item.text, "", 120), importance: item.importance || 3 })) : []
   };
 }
 
@@ -1693,20 +2208,215 @@ function nodeRuntimeCandidates(world) {
       const planItem = currentPlanItem(world, agent);
       const interruption = detectInterruption(world, agent);
       const decision = aggregateDecision(world, agent, { plan: planItem, interruption });
+      const utility = utilityDecision(world, agent, { plan: planItem, interruption });
       const planPressure = planItem ? Number(planItem.priority || 45) : 0;
       const interruptionPressure = interruption ? Number(interruption.priority || 0) : 0;
       return {
         agent,
-        pressure: Math.max(nodeRuntimeNeedPressure(agent), planPressure, interruptionPressure, decision.priority || 0) + Number(memoryWeights.priorityDelta || 0),
+        pressure: Math.max(nodeRuntimeNeedPressure(agent), planPressure, interruptionPressure, decision.priority || 0, utility.priority || 0) + Number(memoryWeights.priorityDelta || 0),
         memoryWeights,
         planItem,
         interruption,
-        decision
+        decision,
+        utility
       };
     })
-    .filter(item => item.decision?.route !== "skip" && (item.pressure >= 18 || item.agent.activeProcess || (Array.isArray(item.agent.eventQueue) && item.agent.eventQueue.length)))
+    .filter(item => item.pressure >= 18 || item.agent.activeProcess || (Array.isArray(item.agent.eventQueue) && item.agent.eventQueue.length))
     .sort((a, b) => b.pressure - a.pressure)
-    .map(item => ({ ...nodeRuntimeAgentBrief(item.agent, world), schedulingPressure: Math.round(item.pressure), memoryActionWeights: item.memoryWeights }));
+    .map(item => ({
+      ...nodeRuntimeAgentBrief(item.agent, world),
+      schedulingPressure: Math.round(item.pressure),
+      memoryActionWeights: item.memoryWeights,
+      utilityDecision: {
+        priority: item.utility.priority,
+        priorityReason: item.utility.priorityReason,
+        priorityComponents: item.utility.priorityComponents,
+        selectedAction: item.utility.selectedAction ? {
+          id: item.utility.selectedAction.id,
+          label: item.utility.selectedAction.label,
+          score: item.utility.selectedAction.score,
+          probability: item.utility.selectedAction.probability,
+          type: item.utility.selectedAction.type,
+          targetPlace: item.utility.selectedAction.targetPlace,
+          targetNeed: item.utility.selectedAction.targetNeed
+        } : null,
+        candidateActions: (item.utility.candidateActions || []).slice(0, 5).map(action => ({
+          id: action.id,
+          label: action.label,
+          score: action.score,
+          type: action.type,
+          targetPlace: action.targetPlace,
+          components: action.components
+        }))
+      }
+    }));
+}
+
+function nodeRuntimeUtilityBrief(utility = {}, extras = {}) {
+  return {
+    priority: utility.priority,
+    priorityReason: utility.priorityReason,
+    priorityComponents: utility.priorityComponents,
+    selectedAction: utility.selectedAction ? {
+      id: utility.selectedAction.id,
+      label: utility.selectedAction.label,
+      score: utility.selectedAction.score,
+      probability: utility.selectedAction.probability,
+      type: utility.selectedAction.type,
+      targetPlace: utility.selectedAction.targetPlace,
+      targetNeed: utility.selectedAction.targetNeed
+    } : null,
+    candidateActions: (utility.candidateActions || []).slice(0, 8).map(action => ({
+      id: action.id,
+      label: action.label,
+      score: action.score,
+      type: action.type,
+      targetPlace: action.targetPlace,
+      targetNeed: action.targetNeed,
+      components: action.components
+    })),
+    vectorRecall: (utility.vectorRecall || []).slice(0, 5).map(item => ({
+      id: item.id,
+      scene: compactText(item.scene || item.text || "", "", 180),
+      structuredType: item.structuredType,
+      similarity: item.similarity,
+      importance: item.importance,
+      score: item.score,
+      source: item.source || "",
+      vectorModel: item.vectorModel || ""
+    })),
+    cognitiveState: utility.cognitiveState || null,
+    selectionTemperature: utility.selectionTemperature || null,
+    personalityRuntime: utility.personalityRuntime || null,
+    decisionTrace: utility.decisionTrace || null,
+    debugDecision: utility.debugDecision || null,
+    source: extras.source || utility.source || "local-utility-scheduler",
+    vectorQuerySource: extras.vectorQuerySource || utility.vectorQuerySource || "",
+    vectorModel: extras.vectorModel || utility.vectorModel || ""
+  };
+}
+
+function nodeRuntimeVectorQueryText(world = {}, agent = {}, plan = null, interruption = null) {
+  const place = nodeRuntimePlace(world, nodeRuntimePlaceId(world, agent));
+  const goals = Array.isArray(agent.goalRuntime)
+    ? agent.goalRuntime
+    : Array.isArray(agent.longTermGoals)
+      ? agent.longTermGoals
+      : [];
+  const needs = Object.entries(agent.needs || {})
+    .sort((a, b) => Number(a[1] || 0) - Number(b[1] || 0))
+    .slice(0, 4)
+    .map(([key, value]) => `${key}:${value}`)
+    .join(" ");
+  const emotions = Object.entries(agent.emotionVector || agent.emotions || {})
+    .sort((a, b) => Number(b[1] || 0) - Number(a[1] || 0))
+    .slice(0, 4)
+    .map(([key, value]) => `${key}:${value}`)
+    .join(" ");
+  return compactText([
+    agent.name,
+    agent.job,
+    agent.ageStage || agent.ageYears || agent.age,
+    `地点:${place?.name || agent.position || agent.place || ""}`,
+    `当前:${agent.currentTask || ""}`,
+    plan ? `计划:${plan.title || plan.localAction || ""}` : "",
+    interruption ? `打断:${interruption.type || ""} ${interruption.reason || ""}` : "",
+    `需求:${needs}`,
+    `情绪:${emotions}`,
+    `自我:${agent.selfModel?.identity || agent.identityCore?.identity || ""}`,
+    `目标:${goals.slice(0, 3).map(goal => goal.name || goal.text || goal).join(" ")}`
+  ].filter(Boolean).join(" "), "", 900);
+}
+
+async function nodeRuntimeAttachExternalVectorUtility(world = {}, dueAgents = []) {
+  const cfg = vectorConfigForWorld(world);
+  if (!cfg || !Array.isArray(dueAgents) || !dueAgents.length) return { enabled: false, updated: 0 };
+  const byId = new Map((world.agents || []).map(agent => [agent.id, agent]));
+  const targets = dueAgents
+    .map(item => {
+      const agent = byId.get(item.id);
+      if (!agent || isDeadAgent(agent)) return null;
+      const plan = currentPlanItem(world, agent);
+      const interruption = detectInterruption(world, agent);
+      const query = nodeRuntimeVectorQueryText(world, agent, plan, interruption);
+      return query ? { item, agent, plan, interruption, query } : null;
+    })
+    .filter(Boolean);
+  if (!targets.length) return { enabled: true, updated: 0 };
+  try {
+    const embeddings = await fetchLocalEmbeddings(targets.map(target => target.query), cfg);
+    let updated = 0;
+    embeddings.forEach((embedding, index) => {
+      if (!Array.isArray(embedding) || !embedding.length) return;
+      const target = targets[index];
+      const utility = utilityDecision(world, target.agent, {
+        plan: target.plan,
+        interruption: target.interruption,
+        vectorQueryVector: embedding
+      });
+      target.item.utilityDecision = nodeRuntimeUtilityBrief(utility, {
+        source: "local-utility-scheduler-external-vector",
+        vectorQuerySource: "local-embedding",
+        vectorModel: cfg.model
+      });
+      target.item.schedulingPressure = Math.max(
+        Number(target.item.schedulingPressure || 0),
+        Math.round(Number(utility.priority || 0))
+      );
+      updated += 1;
+    });
+    world.vectorMemoryState = {
+      ...(world.vectorMemoryState || {}),
+      enabled: true,
+      baseUrl: cfg.baseUrl,
+      model: cfg.model,
+      queryStatus: "ready",
+      queryUpdated: updated,
+      queryCheckedAt: world.clock || 0
+    };
+    return { enabled: true, updated };
+  } catch (error) {
+    world.vectorMemoryState = {
+      ...(world.vectorMemoryState || {}),
+      enabled: true,
+      baseUrl: cfg.baseUrl,
+      model: cfg.model,
+      queryStatus: "fallback_hash",
+      queryError: error.message,
+      queryCheckedAt: world.clock || 0
+    };
+    world.logs ||= [];
+    world.logs.unshift({
+      title: "Vector Utility",
+      body: `Local query embedding failed: ${error.message}; utility recall uses built-in hash this round`,
+      type: "node_runtime_warning",
+      time: minutesToClock(world.clock || 0).text,
+      clock: world.clock || 0,
+      source: "vector-memory"
+    });
+    return { enabled: true, updated: 0, error: error.message };
+  }
+}
+
+function nodeRuntimeMergeUtilityDecision(base = {}, provided = null) {
+  if (!provided || typeof provided !== "object") return base;
+  return {
+    ...base,
+    priority: provided.priority ?? base.priority,
+    priorityReason: provided.priorityReason || base.priorityReason,
+    priorityComponents: provided.priorityComponents || base.priorityComponents,
+    selectedAction: provided.selectedAction || base.selectedAction,
+    candidateActions: Array.isArray(provided.candidateActions) && provided.candidateActions.length ? provided.candidateActions : base.candidateActions,
+    vectorRecall: Array.isArray(provided.vectorRecall) && provided.vectorRecall.length ? provided.vectorRecall : base.vectorRecall,
+    cognitiveState: provided.cognitiveState || base.cognitiveState,
+    selectionTemperature: provided.selectionTemperature || base.selectionTemperature,
+    personalityRuntime: provided.personalityRuntime || base.personalityRuntime,
+    decisionTrace: provided.decisionTrace || base.decisionTrace,
+    debugDecision: provided.debugDecision || base.debugDecision,
+    source: provided.source || base.source,
+    vectorQuerySource: provided.vectorQuerySource || base.vectorQuerySource,
+    vectorModel: provided.vectorModel || base.vectorModel
+  };
 }
 
 function nodeRuntimeCounters(world) {
@@ -2046,6 +2756,10 @@ function nodeRuntimeActionPayload(world, agent, candidate = {}) {
   const planItem = currentPlanItem(world, agent);
   const interruption = detectInterruption(world, agent);
   const decision = aggregateDecision(world, agent, { plan: planItem, interruption });
+  const utility = nodeRuntimeMergeUtilityDecision(
+    utilityDecision(world, agent, { plan: planItem, interruption }),
+    candidate.utilityDecision
+  );
   const relevantMemories = retrieveRelevantMemories(agent, {
     clock: world.clock || 0,
     type: decision.actionHint || interruption?.type || planItem?.localAction || "",
@@ -2074,13 +2788,58 @@ function nodeRuntimeActionPayload(world, agent, candidate = {}) {
     visibleKnowledge: Array.isArray(agent.knownFacts) ? agent.knownFacts.slice(0, 12) : [],
     memorySummary: agent.memorySummary || "",
     memory: agent.memory || {},
+    semanticMemory: nodeRuntimeCompactSemanticMemory(agent, 6),
+    structuredMemory: utility.structuredMemory,
+    longTermMemory: {
+      episodicMemory: Array.isArray(agent.episodicMemory) ? agent.episodicMemory.slice(0, 8) : [],
+      beliefMemory: Array.isArray(agent.beliefMemory) ? agent.beliefMemory.slice(0, 8) : [],
+      habitMemory: Array.isArray(agent.habitMemory) ? agent.habitMemory.slice(0, 8) : [],
+      preferenceMemory: Array.isArray(agent.preferenceMemory) ? agent.preferenceMemory.slice(0, 8) : []
+    },
+    vectorRecall: utility.vectorRecall.map(item => ({
+      id: item.id,
+      scene: item.scene,
+      structuredType: item.structuredType,
+      similarity: item.similarity,
+      importance: item.importance,
+      score: item.score,
+      rule: "Associative recall only; not a fact source."
+    })),
+    selfModel: utility.selfModel || agent.selfModel || null,
+    goalRuntime: utility.goalRuntime || agent.goalRuntime || null,
+    emotionCause: Array.isArray(agent.emotionCause) ? agent.emotionCause.slice(0, 12) : [],
+    memoryInfluence: utility.memoryInfluence || agent.memoryInfluence || null,
     dailyPlan: Array.isArray(agent.dailyPlan) ? agent.dailyPlan.slice(0, 24) : [],
     currentPlanItem: planItem,
     interruption,
     decision,
+    utilityDecision: {
+      priority: utility.priority,
+      priorityComponents: utility.priorityComponents,
+      priorityReason: utility.priorityReason,
+      selectedAction: utility.selectedAction,
+      candidateActions: utility.candidateActions,
+      memoryInfluence: utility.memoryInfluence,
+      personalityRuntime: utility.personalityRuntime,
+      decisionTrace: utility.decisionTrace,
+      debugDecision: utility.debugDecision,
+      goalRuntime: utility.goalRuntime,
+      selfModel: utility.selfModel,
+      rule: utility.rule
+    },
+    candidateActions: utility.candidateActions,
     relevantMemories,
+    memoryContext: nodeRuntimeMemoryContext(agent, relevantMemories, memoryActionWeights),
     reflection: agent.reflection || null,
+    previousInternalState: agent.internalState || null,
+    previousIntent: agent.subjectiveIntent || null,
     lifeEngineGuidance: "Local life engine already handled simple actions such as eating, commuting, resting, cleaning up, sleeping, and routine work. If this payload still reaches AgentAction, focus on complex conversation, social meaning, blocked process, unusual decision, or plan exception. If interruption exists, it overrides ordinary plan unless the plan is non-interruptible and no health/safety/hunger risk exists.",
+    personalityLoopGuidance: [
+      "Use selfModel as the character's long-term self-understanding, not as objective world fact. Do not rewrite it in internalState.",
+      "Use memoryInfluence, goalRuntime, GoalBias and SelfConsistency as soft behavior bias only; they do not mean an action has happened.",
+      "Use emotionCause to keep emotion changes explainable by events, needs, relationships or goal frustration. Avoid uncaused mood swings.",
+      "Use longTermMemory and structuredMemory for habits, beliefs, preferences and similar experiences. EventLog is replay history, not direct memory."
+    ],
     memoryActionWeights,
     memoryActionGuidance: "Use memoryActionWeights as soft behavior weights. emotionModulation.explorationDrive means curiosity/hope can support cautious exploration; avoidanceDrive means anxiety/tiredness/risk sensitivity strengthens avoidance; helpDrive means loneliness/help-seeking supports asking or checking in; conflictCoolingDrive means anger/conflict pressure supports cooling down. Health, safety or hunger urgency can override soft memory avoidance.",
     intentState: agent.intentState || null,
@@ -2099,6 +2858,58 @@ function nodeRuntimeClampDelta(value, min = -8, max = 8) {
 
 const nodeRuntimeNeedKeys = ["hunger", "hygiene", "health", "social", "responsibility", "stress", "comfort", "safety"];
 const nodeRuntimeEmotionKeys = ["happy", "anxious", "angry", "sad", "tired", "lonely", "hopeful", "calm", "curious"];
+const nodeRuntimeInternalStateKeys = ["desire", "thought", "worry", "expectation", "hesitation", "preference", "interpretation"];
+
+function nodeRuntimeSubjectiveText(value, fallback = "", limit = 120) {
+  let text = compactText(value, fallback, limit);
+  if (!text) return "";
+  if (/全镇|所有人都知道|大家都知道|人人都知道|都听说|全家都知道|所有同学都知道|所有同事都知道/.test(text)) {
+    return "我不确定别人是否知道这件事，只能按自己掌握的信息判断。";
+  }
+  text = text
+    .replace(/事实是|确定是|肯定是|必然是/g, "我感觉")
+    .replace(/系统|调度|队列|Scheduler|AgentAction|AI\b/gi, "当前安排");
+  if (/(讨厌我|恨我|看不起我|故意针对我|都在议论我)/.test(text) && !/(我觉得|我担心|可能|也许|好像|不确定|像是)/.test(text)) {
+    text = "我担心对方可能对我有不满，但还没有确认。";
+  }
+  return compactText(text, "", limit);
+}
+
+function nodeRuntimeNormalizeInternalState(action = {}, agent = {}) {
+  const raw = action?.internalState && typeof action.internalState === "object" ? action.internalState : {};
+  const internalState = {};
+  nodeRuntimeInternalStateKeys.forEach(key => {
+    internalState[key] = nodeRuntimeSubjectiveText(raw[key] ?? action[key] ?? "", "", 110);
+  });
+  const hasAny = Object.values(internalState).some(Boolean);
+  if (!hasAny) {
+    internalState.desire = nodeRuntimeSubjectiveText(action.currentTask || action.summary || "维持当前生活节奏", "", 110);
+    internalState.thought = "我先按眼前能确认的情况做一个小决定。";
+    internalState.worry = "";
+    internalState.expectation = "";
+    internalState.hesitation = "";
+    internalState.preference = nodeRuntimeSubjectiveText(agent.personalityProfile?.habits?.[0] || agent.identityCore?.habits?.[0] || "", "", 110);
+    internalState.interpretation = "这只是我对此刻处境的个人理解，不等于世界事实。";
+  }
+  return internalState;
+}
+
+function nodeRuntimeNormalizeSubjectiveIntent(action = {}, agent = {}) {
+  const raw = action?.intent && typeof action.intent === "object" ? action.intent : {};
+  const internalState = action.internalState && typeof action.internalState === "object" ? action.internalState : {};
+  return {
+    want: nodeRuntimeSubjectiveText(raw.want || internalState.desire || action.currentTask || action.summary || "维持当前安排", "", 120),
+    reason: nodeRuntimeSubjectiveText(raw.reason || internalState.thought || "结合当前需求、日程、地点和已知信息形成的主观选择。", "", 160),
+    emotion: nodeRuntimeSubjectiveText(raw.emotion || action.mood || "", "", 60)
+  };
+}
+
+function nodeRuntimeAttachSubjectiveLayer(action = {}, agent = {}) {
+  if (!action || typeof action !== "object") return action;
+  action.internalState = nodeRuntimeNormalizeInternalState(action, agent);
+  action.intent = nodeRuntimeNormalizeSubjectiveIntent(action, agent);
+  return action;
+}
 
 function nodeRuntimeAdjustNeeds(agent, changes = {}, limit = 8) {
   agent.needs ||= {};
@@ -2117,6 +2928,20 @@ function nodeRuntimeAdjustEmotion(agent, changes = {}, limit = 8) {
     agent.emotionVector[key] = Math.max(0, Math.min(100, before + nodeRuntimeClampDelta(value, -limit, limit)));
   });
   agent.emotions = agent.emotionVector;
+}
+
+function nodeRuntimeRecordEmotionDeltaCauses(world, agent, changes = {}, cause = "") {
+  Object.entries(changes || {}).forEach(([key, value]) => {
+    const delta = Number(value || 0);
+    if (!nodeRuntimeEmotionKeys.includes(key) || Math.abs(delta) < 0.1) return;
+    recordEmotionCause(agent, {
+      emotion: key,
+      intensity: Math.min(1, Math.max(0.15, Math.abs(delta) / 10)),
+      causes: [cause || "本轮行动结算造成情绪变化"],
+      source: "node-runtime-emotion-delta",
+      at: world?.clock || 0
+    });
+  });
 }
 
 function nodeRuntimeApplyMemoryActionGuard(world, agent, guarded) {
@@ -2160,7 +2985,9 @@ function nodeRuntimeApplyMemoryActionGuard(world, agent, guarded) {
 
 function nodeRuntimeGuardAction(world, agent, aiResult) {
   const guarded = guardAction({ world, agent, aiResult, visibleAgents: nodeRuntimeVisibleAgents(world, agent) });
-  return nodeRuntimeApplyMemoryActionGuard(world, agent, guarded);
+  const memoryGuarded = nodeRuntimeApplyMemoryActionGuard(world, agent, guarded);
+  if (memoryGuarded?.action) nodeRuntimeAttachSubjectiveLayer(memoryGuarded.action, agent);
+  return memoryGuarded;
 }
 
 function nodeRuntimeTimePassagePayload(world, actionItems) {
@@ -2386,6 +3213,7 @@ function nodeRuntimeApplySettlementPatch(world, agent, patch) {
   if (!patch || typeof patch !== "object") return;
   nodeRuntimeAdjustNeeds(agent, patch.needDelta || {}, 8);
   nodeRuntimeAdjustEmotion(agent, patch.emotionDelta || {}, 8);
+  nodeRuntimeRecordEmotionDeltaCauses(world, agent, patch.emotionDelta || {}, patch.explanation || patch.reason || "状态结算造成情绪变化");
   if (Array.isArray(patch.memoryWrites)) {
     patch.memoryWrites.slice(0, 2).forEach(memory => {
       const layer = ["short", "long", "emotional", "secret", "rumor"].includes(memory.layer) ? memory.layer : "short";
@@ -2450,10 +3278,16 @@ function nodeRuntimeStoreTrainingSample(world, agent, aiResult, timePassage = nu
 function nodeRuntimeApplyAction(world, agent, aiResult, timePassage = null, settlementPatch = null) {
   if (freezeDeadAgent(agent, world)) return null;
   const action = aiResult?.action || {};
+  nodeRuntimeAttachSubjectiveLayer(action, agent);
+  if (aiResult && typeof aiResult === "object") aiResult.action = action;
+  agent.internalState = action.internalState || null;
+  agent.subjectiveIntent = action.intent || null;
+  agent.lastInternalStateAt = world.clock || 0;
   nodeRuntimeStoreTrainingSample(world, agent, aiResult, timePassage, settlementPatch);
   agent.currentTask = String(action.currentTask || action.summary || agent.currentTask || "维持当前安排").slice(0, 80);
   agent.mood = String(action.mood || agent.mood || "").slice(0, 40);
   nodeRuntimeAdjustEmotion(agent, action.emotionDelta || {}, 8);
+  nodeRuntimeRecordEmotionDeltaCauses(world, agent, action.emotionDelta || {}, action.summary || action.currentTask || "角色行动造成情绪变化");
   if (timePassage) {
     agent.lastTimePassage = timePassage;
     const remainingTask = timePassage.finished ? timePassage.remainingActivity?.currentTask : "";
@@ -2649,6 +3483,8 @@ async function runNodeRuntimeStep(slot) {
   const beforeClock = Number(world.clock || 0);
   const counters = nodeRuntimeCounters(world);
   counters.tick = Number(counters.tick || 0) + 1;
+  updateRuntimeProgress("state-migration", { phaseIndex: 2, currentTask: "state migration" });
+  migrateWorldPersonalityRuntime(world);
   ensureDailyPlans(world);
   updateRuntimeProgress("life-engine", { phaseIndex: 2, currentTask: "local life actions" });
   const lifeResult = runLifeEngine(world, { maxLocalActions: Number(world?.config?.maxLocalActionsPerTick || 10000) });
@@ -2677,11 +3513,16 @@ async function runNodeRuntimeStep(slot) {
     });
   }
   const handledByLife = new Set(lifeResult.handledIds || []);
-  const dueAgents = nodeRuntimeCandidates(world).filter(agent => !handledByLife.has(agent.id));
+  updateRuntimeProgress("vector-memory", { phaseIndex: 3, currentTask: "local vector memory" });
+  await nodeRuntimeHydrateExternalVectors(world, { limit: Number(world?.config?.vectorHydrateLimit || 240), batchSize: Number(world?.config?.vectorBatchSize || 16) });
+  let dueAgents = nodeRuntimeCandidates(world).filter(agent => !handledByLife.has(agent.id));
+  await nodeRuntimeAttachExternalVectorUtility(world, dueAgents);
+  dueAgents = dueAgents.sort((a, b) => Number(b.schedulingPressure || b.utilityDecision?.priority || 0) - Number(a.schedulingPressure || a.utilityDecision?.priority || 0));
   const policy = nodeRuntimeSchedulePolicy(world, dueAgents);
   updateRuntimeProgress("candidates", { phaseIndex: 3, currentTask: `${dueAgents.length} candidates` });
   if (dueAgents.length) {
     const byId = new Map((world.agents || []).map(agent => [agent.id, agent]));
+    const dueById = new Map(dueAgents.map(agent => [agent.id, agent]));
     if (policy.runContext) {
       updateRuntimeProgress("context-agents", { phaseIndex: 4, currentTask: "context agents" });
       await nodeRuntimeRunLocationAndProcessAgents(world, dueAgents);
@@ -2692,8 +3533,23 @@ async function runNodeRuntimeStep(slot) {
       await nodeRuntimeRunPreJudgement(world, dueAgents);
     }
     updateRuntimeProgress("scheduler", { phaseIndex: 6, currentTask: "scheduler" });
+    const maxActions = Math.max(1, Math.min(MAX_ACTIONS_HARD_LIMIT, Number(world?.config?.maxActionsPerCycle || aiConfig.maxActionsPerCycle || 3)));
     const scheduled = await callAiWithRetry("scheduler", nodeRuntimeSchedulerPayload(world, dueAgents));
-    const selected = (Array.isArray(scheduled?.candidates) ? scheduled.candidates : [])
+    const aiCandidates = Array.isArray(scheduled?.candidates) ? scheduled.candidates : [];
+    const utilityCandidates = dueAgents
+      .filter(item => byId.has(item.id) && !isDeadAgent(byId.get(item.id)))
+      .filter(item => item.utilityDecision?.selectedAction)
+      .sort((a, b) => Number(b.utilityDecision?.priority || b.schedulingPressure || 0) - Number(a.utilityDecision?.priority || a.schedulingPressure || 0))
+      .slice(0, maxActions)
+      .map(item => ({
+        agentId: item.id,
+        type: item.utilityDecision.selectedAction.type || "observe",
+        reason: `utility:${item.utilityDecision.selectedAction.label || item.utilityDecision.selectedAction.id}`,
+        utilityAction: item.utilityDecision.selectedAction,
+        utilityDecision: item.utilityDecision,
+        source: "local-utility-scheduler"
+      }));
+    const selected = (aiCandidates.length ? aiCandidates : utilityCandidates)
       .filter(item => {
         const agent = byId.get(item?.agentId);
         return agent && !isDeadAgent(agent);
@@ -2701,6 +3557,8 @@ async function runNodeRuntimeStep(slot) {
       .map(item => {
         const agent = byId.get(item.agentId);
         const decision = aggregateDecision(world, agent);
+        const baseUtility = utilityDecision(world, agent, { plan: currentPlanItem(world, agent), interruption: detectInterruption(world, agent) });
+        const utility = nodeRuntimeMergeUtilityDecision(baseUtility, item.utilityDecision || dueById.get(item.agentId)?.utilityDecision);
         agent.decisionState = {
           at: world.clock || 0,
           time: nodeRuntimeClockText(world),
@@ -2708,17 +3566,21 @@ async function runNodeRuntimeStep(slot) {
           priority: decision.priority,
           actionHint: decision.actionHint,
           reason: decision.reason,
-          source: "node-decision-aggregator"
+          utilityPriority: utility.priority,
+          utilitySelectedAction: utility.selectedAction,
+          decisionTrace: utility.decisionTrace || null,
+          debugDecision: utility.debugDecision || null,
+          source: aiCandidates.length ? "node-decision-aggregator" : "local-utility-scheduler"
         };
         return {
           ...item,
           memoryActionWeights: nodeRuntimeMemoryActionWeights(world, agent),
           currentPlanItem: currentPlanItem(world, agent),
           interruption: detectInterruption(world, agent),
-          decision
+          decision,
+          utilityDecision: utility
         };
       });
-    const maxActions = Math.max(1, Math.min(MAX_ACTIONS_HARD_LIMIT, Number(world?.config?.maxActionsPerCycle || aiConfig.maxActionsPerCycle || 3)));
     updateRuntimeProgress("agent-actions", { phaseIndex: 7, currentTask: `${Math.min(selected.length, maxActions)} action calls` });
     const actionCalls = selected
       .filter(item => byId.has(item.agentId) && !isDeadAgent(byId.get(item.agentId)))
@@ -2783,6 +3645,7 @@ async function runNodeRuntimeStep(slot) {
   }
   updateRuntimeProgress("save", { phaseIndex: 14, currentTask: "write save files" });
   const resultWorld = result.payload?.world || result.payload;
+  await nodeRuntimeHydrateExternalVectors(resultWorld, { limit: Number(resultWorld?.config?.vectorHydrateLimit || 240), batchSize: Number(resultWorld?.config?.vectorBatchSize || 16) });
   const resultCounters = nodeRuntimeCounters(resultWorld);
   resultCounters.saveSplit = Number(resultCounters.saveSplit || 0) + 1;
   writeRuntimePayload(safeSlot, result.payload);
@@ -3146,7 +4009,7 @@ function fallbackJson(task) {
   if (task === "outcomeJudgeAgent") return { agentOutcomes: [], logs: [] };
   if (task === "familySyncAgent") return { householdSyncs: [], logs: [] };
   if (task === "worldMasterAgent") return { judgements: [], logs: [] };
-  if (task === "agentAction") return { action: { type: "wait", summary: "AI 返回格式错误，角色暂时停在原地整理思路。", newLocation: "", mood: "", emotionDelta: {}, currentTask: "停下整理思路", actionSteps: [{ title: "停下整理思路", status: "blocked", reason: "JSON 修复兜底" }], processUpdate: { goal: "整理当前状况", stage: "blocked", progressDelta: 5, currentStep: "停下整理思路", completedSteps: [], blockedBy: "JSON 修复兜底", finished: false }, relationChanges: [], newEvents: [] } };
+  if (task === "agentAction") return { action: { type: "wait", summary: "AI 返回格式错误，角色暂时停在原地整理思路。", newLocation: "", mood: "", internalState: { desire: "先稳住当前状态", thought: "我需要先整理眼前能确认的信息。", worry: "担心自己判断太急。", expectation: "希望下一步能更清楚。", hesitation: "暂时不贸然行动。", preference: "选择保守观察。", interpretation: "这只是我此刻的主观整理，不代表新事实。" }, intent: { want: "停下整理思路", reason: "上一次输出格式不可用，只能先维持当前状态。", emotion: "谨慎" }, emotionDelta: {}, currentTask: "停下整理思路", actionSteps: [{ title: "停下整理思路", status: "blocked", reason: "JSON 修复兜底" }], processUpdate: { goal: "整理当前状况", stage: "blocked", progressDelta: 5, currentStep: "停下整理思路", completedSteps: [], blockedBy: "JSON 修复兜底", finished: false }, relationChanges: [], newEvents: [] } };
   if (task === "timePassageAgent") return { passages: [], logs: [] };
   if (task === "reporter") return { logs: [], digest: "" };
   if (task === "dailyPlanner") return { agentPlans: [], eventUpdates: [], logs: [] };
@@ -3239,6 +4102,10 @@ function systemPrompt(task) {
     "relationshipDynamics 是关系慢变量：warming/strained/cooling/stable/dependent/avoidant/familiar 代表近期趋势和惯性；它会影响角色是否主动接近、回避、求助、误解或关心对方。",
     "personalityProfile 是人格锚点：values、habits、avoidance、decisionBias 是角色长期稳定倾向。行动可以被当日状态推动，但不能无视这些人格锚点，也不能每轮变成另一个人。",
     "identityCore 是更硬的人格核心：values/fears/habits/biases 会稳定影响职责优先、风险回避、求助、家庭牵引、冲突回避和体面压力；除 PersonalityConsistencyAgent 的小幅日结外，其他 Agent 不能改写它。",
+    "EventLog 只是回放用的事实历史，不等于角色记忆，禁止直接驱动角色行为，禁止逐条作为 memory 使用。MemoryConsolidator 只能把 EventLog 沉淀为 Structured Memory 和 Vector Memory。",
+    "Structured Memory 是主记忆，用于形成角色人格和长期倾向，类型为 habit、belief、preference、episodic、social、goal；旧 experience 等同 episodic，旧 relationship 等同 social。普通吃饭、睡觉、通勤、上班、上课不能作为独立记忆，只能在重复后沉淀成 habit。",
+    "Vector Memory 只负责“想起类似经历”，不是事实来源，不能直接决定行动，不能覆盖 Structured Memory，也不能让角色知道未传播的信息。",
+    "记忆必须回答“这个经历对角色意味着什么”，不要把“发生了什么”原样写成记忆。memorySummary 应描述近期状态、健康波动、偏好、关系变化和长期目标变化，不要列今天吃饭、睡觉、上班、上课。",
     "长期目标/性格稳定性、地点 Agent 日结、承诺/任务债务跨天压力在每天 0 点结算；白天行动只留下证据和局部推进。",
     "visibleKnowledge 是严格知识边界；只能使用其中的信息，不要使用全局日志、别人记忆或未公开信息。",
     "移动不能瞬移；如果要去新地点，只能提出 newLocation，由系统按路线处理。",
@@ -3255,7 +4122,7 @@ function systemPrompt(task) {
     "输出前必须静默自检：1) 是否属于本 Agent 权限；2) 是否有 payload 证据；3) 是否符合知识边界；4) 是否有真实在场人物/地点；5) 是否没有隐藏 NPC/全镇广播/瞬移/死亡复活。任何不合格字段或数组项必须删除，不要解释。",
     "数组输出采用丢弃策略：某个 candidate/event/update/obligation/plan/log 不确定或越权时，删除该项；不要为了凑数量而补写。",
     "文本输出采用降级策略：无法确定的因果、心理、关系、传播、地点状态，用“观察、等待、维持当前职责、信息不足”这类保守表达。",
-    "严格遵守当前任务的 JSON schema 字段白名单；不要添加 schema 之外的新字段，例如 explanation、analysis、thought、system、worldChanges、death、teleport、broadcast。",
+    "严格遵守当前任务的 JSON schema 字段白名单；不要添加 schema 之外的新字段，例如 explanation、analysis、system、worldChanges、death、teleport、broadcast。thought/desire/worry 等心理字段只允许出现在 AgentAction schema 的 internalState 中，并且只表示角色主观心理，不是世界事实。",
     "所有 ID 必须来自 payload 中已有 id；不能发明 agentId、place、event id、obligation id、knownBy id、relation target id。",
     "如果信息不足，输出空数组、idle、wait 或保守结论；不要用想象补齐缺失事实。",
     "输出严格 JSON，不要 Markdown，不要解释。",
@@ -3340,7 +4207,7 @@ function systemPrompt(task) {
     return `${common}\n你是 WorldMasterAgent，行动落地裁判。你不扮演角色，不写剧情，不做状态结算；你只判断 AgentAction + TimePassage 给出的行动结果是否真的能在当前世界成立。必须尊重 currentLocation、visibleAgents、allowedKnowledgeIds、allowedPlaces、localJudgement 和 timePassage。不能制造隐藏 NPC，不能让全镇凭空知道，不能宣布死亡/复活，不能把未完成的看病/购买/上课/上班写成完成，不能改变天气、地点制度、承诺或关系。你只能输出 accepted/process/downgrade/blocked 这类裁判建议，必要时给很小的 needDelta/emotionDelta 和角色本人可记住的 memoryWrites。`;
   }
   if (task === "agentAction") {
-    return `${common}\n你正在模拟 payload.agent 这个生活在小镇上的人。你不是上帝视角、旁白或系统管理员；你只知道这个人亲眼看到、亲耳听到、记得、被告知或通过公开广播知道的信息。你不知道全镇日志、别人的记忆、别人的内心、未公开事件和未来结果。你只能基于这个人的身份、年龄、日程、地点、关系、记忆、情绪、需求和可见环境，做出当下一个很小的生活行动。不能越权改变世界，不能替地点/天气/承诺/多维状态 Agent 做结算，不能直接声明“已经到达”或“全镇知道”。若角色 isSleeping 且没有紧急事件，应保持睡眠。行动可以包含 2-4 个 actionSteps，表示本行动内部的微步骤和下一步阻塞点。输出仍必须是严格 JSON。`;
+    return `${common}\n你正在模拟 payload.agent 这个生活在小镇上的人。你不是需求执行器、上帝视角、旁白或系统管理员；你是一个具有有限主观意识的个体。你只知道这个人亲眼看到、亲耳听到、记得、被告知或通过公开广播知道的信息。你不知道全镇日志、别人的记忆、别人的内心、未公开事件和未来结果。行动生成必须先经过 needs/environment -> internalThought -> desire -> intent -> candidateAction，再接受世界约束检查和后续结算。你可以输出角色自己的 desire、thought、worry、expectation、hesitation、preference、interpretation，但这些只属于心理层，不是世界事实，不能直接改变位置、需求、关系、事件或记忆。可以写“我最近感觉有点累”“我想早点回家”“我希望和朋友聊聊”“我担心明天工作状态”；不能写“王强讨厌我”“大家都知道这件事”，除非 payload 中有观察、对话、knownFacts 或 KnowledgeFlow 证据。你只能基于这个人的身份、年龄、日程、地点、关系、记忆、情绪、需求和可见环境，做出当下一个很小的生活行动。允许等待、犹豫、保持现状、思考、小范围尝试、调整计划、散步、整理房间、规划未来、想起过去经历、联系熟悉的人或观察环境，但必须符合 currentLocation、dailyPlan、needs、personalityProfile、relationship 和 knownFacts。不能越权改变世界，不能替地点/天气/承诺/多维状态 Agent 做结算，不能直接声明“已经到达”或“全镇知道”。若角色 isSleeping 且没有紧急事件，应保持睡眠。行动可以包含 2-4 个 actionSteps，表示本行动内部的微步骤和下一步阻塞点。输出仍必须是严格 JSON。`;
   }
   if (task === "timePassageAgent") {
     return `${common}\n你是 TimePassageAgent，时间流逝判断器。你的权限只有在 AgentAction 已经给出一个主行动后，判断本轮虚拟时间内这个主行动消耗多少分钟、是否完成、剩余时间如何被角色自然使用、是否需要留下 activeProcess 下回合继续。主行动提前完成时，你可以安排同地点、低风险、低颗粒的 remainingActivity，例如思考、观察、整理、短暂休息、准备下一步或原地等待；这不是第二个大行动，不能移动角色，不能完成新复杂事项，不能创建承诺/事件/关系/记忆。移动、排队、看病、上课、上班、购买、等待都必须消耗时间；estimatedMinutes 大于 tickMinutes 时必须 finished=false。`;
@@ -3735,6 +4602,9 @@ function userPrompt(task, payload) {
       instruction: "返回 JSON：{\"candidates\":[{\"agentId\":\"\",\"priority\":1,\"reason\":\"\",\"actionType\":\"work|move|observe|talk|react|wait|plan\"}],\"idle\":[\"agentId\"]}。",
       constraints: [
         "最多返回 maxActions 个 candidates",
+        "Scheduler 分两层：第一层 Agent Priority 决定谁需要行动；第二层 Action Selection 已由本地 Utility Scheduler 在 dueAgents[].utilityDecision 中给出概率参考。你只选人和粗 actionType，不做最终行动内容。",
+        "必须参考 dueAgents[].utilityDecision.priorityComponents：Crisis、NeedPressure、ActiveObligation、EmotionalInstability、UnfinishedProcess 是主要优先级来源。",
+        "必须参考 dueAgents[].utilityDecision.selectedAction 和 candidateActions，但它们只是概率建议；不要把 selectedAction 写成已经发生。",
         "必须优先参考 intentState、contextJudgement、crisisTriage、knowledgeJudgement：危机分诊高于普通动机，场景规则高于普通需求，知识判断限制行动理由",
         "只能返回 agentId/priority/reason/actionType；不能写行动摘要、地点变化、数值变化、记忆、关系或事件",
         "只能从 world.dueAgents 中选择；如果 dueAgents 为空，必须返回空 candidates",
@@ -3881,9 +4751,18 @@ function userPrompt(task, payload) {
   }
   if (task === "agentAction") {
     return JSON.stringify({
-      instruction: "返回 JSON：{\"action\":{\"type\":\"work|move|observe|talk|react|wait|plan\",\"summary\":\"\",\"newLocation\":\"\",\"mood\":\"\",\"emotionDelta\":{\"happy\":0,\"anxious\":0,\"angry\":0,\"sad\":0,\"tired\":0,\"lonely\":0,\"hopeful\":0,\"calm\":0,\"curious\":0},\"currentTask\":\"\",\"actionSteps\":[{\"title\":\"\",\"status\":\"todo|doing|done|blocked\",\"reason\":\"\"}],\"processUpdate\":{\"goal\":\"\",\"stage\":\"prepare|move|wait|execute|feedback|blocked\",\"progressDelta\":30,\"currentStep\":\"\",\"completedSteps\":[\"\"],\"blockedBy\":\"\",\"finished\":false},\"memory\":{\"layer\":\"short|long|emotional|secret|rumor\",\"text\":\"\",\"importance\":3},\"relationChanges\":[{\"to\":\"\",\"delta\":0,\"reason\":\"\"}],\"newEvents\":[{\"title\":\"\",\"stage\":\"seed|active\",\"summary\":\"\",\"knownBy\":[\"\"]}]}}。",
+      instruction: "返回 JSON：{\"action\":{\"type\":\"work|move|observe|talk|react|wait|plan\",\"internalState\":{\"desire\":\"\",\"thought\":\"\",\"worry\":\"\",\"expectation\":\"\",\"hesitation\":\"\",\"preference\":\"\",\"interpretation\":\"\"},\"intent\":{\"want\":\"\",\"reason\":\"\",\"emotion\":\"\"},\"summary\":\"\",\"newLocation\":\"\",\"mood\":\"\",\"emotionDelta\":{\"happy\":0,\"anxious\":0,\"angry\":0,\"sad\":0,\"tired\":0,\"lonely\":0,\"hopeful\":0,\"calm\":0,\"curious\":0},\"currentTask\":\"\",\"actionSteps\":[{\"title\":\"\",\"status\":\"todo|doing|done|blocked\",\"reason\":\"\"}],\"processUpdate\":{\"goal\":\"\",\"stage\":\"prepare|move|wait|execute|feedback|blocked\",\"progressDelta\":30,\"currentStep\":\"\",\"completedSteps\":[\"\"],\"blockedBy\":\"\",\"finished\":false},\"memory\":{\"layer\":\"short|long|emotional|secret|rumor\",\"text\":\"\",\"importance\":3},\"relationChanges\":[{\"to\":\"\",\"delta\":0,\"reason\":\"\"}],\"newEvents\":[{\"title\":\"\",\"stage\":\"seed|active\",\"summary\":\"\",\"knownBy\":[\"\"]}]}}。",
       constraints: [
         "行动必须很小且可信",
+        "必须先写 internalState，再写 intent，再写 summary/currentTask；角色不是 needs -> action 的执行器，而是 needs/environment -> internalThought -> desire -> intent -> candidateAction",
+        "必须在 candidateActions 中选择或小幅改写一个候选行为；candidateActions 已按 Utility 评分排序，包含 NeedDrive、MemoryBias、PersonalityBias、EmotionBias、SocialBias、ContextFit、VectorBonus、Cost、Risk",
+        "不要永远机械选择最高分；Utility 已用 softmax 保留随机性。你可以选择 selectedAction，也可以因角色主观犹豫选择其他高分候选，但必须解释在 intent.reason 中",
+        "internalState 只表示角色心理：desire 想要什么，thought 当前想法，worry 担忧，expectation 期待，hesitation 犹豫，preference 偏好，interpretation 个人理解",
+        "intent 只表示角色想做什么和为什么，不代表已经发生；想联系朋友不等于已经联系成功，想去诊所不等于已经到达或治疗完成",
+        "心理层不能直接改变世界状态；只有 summary/newLocation/actionSteps/processUpdate 经过 WorldMaster 和 StateSettlement 后，才可能改变位置、需求、关系、事件和记忆",
+        "internalState 可以写主观表达，例如“我最近感觉有点累”“我想早点回家”“我希望和朋友聊聊”“我担心明天工作状态”",
+        "internalState 禁止把猜测当事实；不要写“王强讨厌我”“大家都知道这件事”“所有人都在议论我”，除非 knownFacts、visibleKnowledge、同地点对话或 KnowledgeFlow 有明确证据",
+        "允许日常主动行为：散步、整理房间、规划未来、想起过去经历、联系熟悉的人、观察环境、等待、犹豫、保持现状、小范围尝试、调整计划",
         "你要把自己当作 payload.agent 这个小镇居民来判断：只依据自己知道、看到、听到、记得和被告知的信息行动，不要使用上帝视角",
         "必须参考 intentState、contextJudgement、crisisTriage、knowledgeJudgement：行动应符合动机、场景允许项、危机建议和知识边界",
         "只能输出 payload.agent 这个角色自己的一个行动；不能替其他角色行动、发言、移动、记忆或改变状态",
@@ -3907,12 +4786,16 @@ function userPrompt(task, payload) {
         "必须参考 personalityProfile、identityCore、identityModulation 和 relationshipDynamics：角色要像同一个人；价值观、恐惧、习惯和偏向数值会稳定影响职责优先、风险回避、求助、家庭牵引、冲突回避和体面压力",
         "必须参考 longTermGoals：普通行动应微弱推进或阻碍长期目标，不要每天重置人格方向",
         "必须参考 selfNarrative 和 actionPlan：角色应接着上一步做小推进；不要每轮重新换一个无关行动",
+        "可以参考 previousInternalState 和 previousIntent 延续角色的犹豫、担忧、期待或偏好，但当前地点、日程、危机、知识边界和世界约束优先",
+        "必须参考 memoryContext.semanticMemory：habit 影响日常计划，experience/episodic 影响决策，belief 影响人格判断，relationship/social 影响求助和回避，preference 影响选择；不要直接把 EventLog 当记忆",
+        "必须优先参考 structuredMemory：habit 影响日常计划，episodic 影响类似处境判断，belief 影响人格判断，social 影响求助和回避，preference 影响选择，goal 影响长期方向",
+        "vectorRecall 只表示联想到类似场景，VectorBonus 权重不得压过人格和结构化记忆；不能把 vectorRecall 当事实来源，不能因为召回内容就知道未传播事件",
         "如果 payload.agent.activeProcess 存在，优先推进这个过程的一小段；不要重新开无关新行动，除非健康/安全危机必须打断",
         "processUpdate 表示本 60 分钟 tick 内推进的一段过程摘要，不是精确分钟；progressDelta 普通推进 20-60，受阻 0-15，顺利完成可到 100",
         "processUpdate.finished 只有当前过程真正结束时才为 true；不要一轮就完成看病、上课、上班、买东西等复杂事项",
         "actionSteps 只写本行动内部 2-4 个微步骤，状态要反映已做、正在做、阻塞或待做",
         "必须遵守 visibleKnowledge：角色不知道的信息不能出现在 summary、memory、relationChanges 或 newEvents 中",
-        "memory 只能是该角色本人会记住的内容，不能写观察者视角、他人内心、全镇事实或角色未知事实",
+        "memory 只能是该角色本人会记住的内容，并且要写这个经历的意义或未来影响；不能写观察者视角、他人内心、全镇事实、角色未知事实，也不要把吃饭/睡觉/上班/上课/执行计划写成独立记忆",
         "newEvents.knownBy 只能包含该角色、同地点可见角色、家人同步能知道的人或 visibleKnowledge 中合理对象；不能全镇皆知",
         "newEvents 只能是由本行动自然留下的极小事件种子，例如一句提醒、一个等待事项；不能是地点 Agent 事件、天气事件、死亡事件或全镇公共事件",
         "relationChanges.to 必须是该角色可见、同地点、家人、已有关系或 visibleKnowledge 中合理知道的人；不能指向陌生且不可见的人",
@@ -5064,6 +5947,8 @@ async function runNodeSetupCreate(body = {}) {
     relations: fallbackRelations.relations
   };
   const payload = setupMakeWorld({ slot, prompt, startClock, config: publicConfig(), places, seeds, relationships: safeRelationships, setupTables: { blueprint, agents: seeds, places, relationships: safeRelationships, createdAt: new Date().toISOString() } });
+  updateRuntimeProgress("setup-vector-memory", { phaseIndex: 6, currentTask: "local vector memory" });
+  await nodeRuntimeHydrateExternalVectors(payload.world, { limit: Number(payload.world?.config?.vectorHydrateLimit || 1000), batchSize: Number(payload.world?.config?.vectorBatchSize || 16) });
   updateRuntimeProgress("setup-save", { phaseIndex: 6, currentTask: "write save files" });
   writeFolderSave(slot, payload);
   updateRuntimeProgress("setup-complete", { phaseIndex: 7, currentTask: "setup completed" });

@@ -5,6 +5,7 @@ const defaultSystemPrompt = [
   "你是一个生活在 AI 小镇里的居民行动模型。",
   "你只能根据角色自己知道的信息、当前地点、可见人物、记忆、需求、情绪、身份和场景规则行动。",
   "你不能使用上帝视角，不能凭空知道别人内心、全镇日志、未公开事件或未来结果。",
+  "你可以输出 internalState 和 intent 作为角色主观心理，但它们不是世界事实，不能直接改变位置、需求、关系、事件或记忆。",
   "你必须输出严格 JSON，字段只能描述一个小行动、移动意图、行动步骤、过程更新、记忆和轻微状态变化。"
 ].join("");
 
@@ -85,6 +86,8 @@ function agentContextFromWorld(world, agent, source = {}) {
       position,
       placeName: placeName(world, position),
       currentTask: agent.currentTask || "",
+      internalState: agent.internalState || null,
+      subjectiveIntent: agent.subjectiveIntent || null,
       needs: agent.needs || {},
       emotionVector: agent.emotionVector || agent.emotions || {},
       energy: agent.energy,
@@ -116,6 +119,8 @@ function normalizeAction(action = {}) {
   return compactObject({
     action: {
       type: action.type || "wait",
+      internalState: action.internalState || null,
+      intent: action.intent || null,
       summary: action.summary || action.currentTask || "",
       currentTask: action.currentTask || action.summary || "",
       newLocation: action.newLocation || "",

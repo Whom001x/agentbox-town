@@ -2,7 +2,7 @@
 
 const { currentPlanItem, ensureDailyPlans, findPlace } = require("./ai-town-planner");
 const { detectInterruption } = require("./ai-town-interruptions");
-const { recordPlanMemory } = require("./ai-town-memory-stream");
+const { recordLifeEvent } = require("./ai-town-memory-stream");
 const { clamp, placeId, isAlive } = require("./ai-town-sim-utils");
 
 function adjustNeeds(agent, delta = {}) {
@@ -123,7 +123,7 @@ function executeInterruption(world, agent, interruption) {
   }
 
   if (action) {
-    recordPlanMemory(world, agent, {
+    recordLifeEvent(world, agent, {
       interruption,
       summary: action.summary,
       type: action.type,
@@ -146,7 +146,7 @@ function executePlan(world, agent, plan) {
     startMovement(world, agent, plan.place, "daily_plan");
     agent.currentTask = `前往${plan.title}`;
     const action = { type: "plan_move", summary: localSummary(agent, `去${placeName(world, plan.place)}处理「${plan.title}」`), plan };
-    recordPlanMemory(world, agent, { plan, summary: action.summary, type: action.type, importance: plan.fixed ? 3 : 2 });
+    recordLifeEvent(world, agent, { plan, summary: action.summary, type: action.type, importance: plan.fixed ? 3 : 2 });
     return action;
   }
 
@@ -165,7 +165,7 @@ function executePlan(world, agent, plan) {
   }
   agent.currentTask = plan.title;
   const action = { type: `plan_${localAction}`, summary: localSummary(agent, `按计划进行「${plan.title}」`), plan };
-  recordPlanMemory(world, agent, { plan, summary: action.summary, type: action.type, importance: plan.fixed ? 3 : 2 });
+  recordLifeEvent(world, agent, { plan, summary: action.summary, type: action.type, importance: plan.fixed ? 3 : 2 });
   return action;
 }
 

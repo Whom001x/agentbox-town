@@ -1,9 +1,10 @@
 "use strict";
 
 const assert = require("node:assert/strict");
-const { appendMemory, runDailyReflection, retrieveRelevantMemories } = require("../ai-town-memory-stream");
+const { appendMemory, recordLifeEvent, runDailyReflection, retrieveRelevantMemories } = require("../ai-town-memory-stream");
 const { aggregateDecision } = require("../ai-town-decision-aggregator");
 const { judgeAction, mergeWorldMasterJudgement } = require("../ai-town-world-master");
+const { utilityDecision } = require("../ai-town-utility-scheduler");
 
 function agent(overrides = {}) {
   return {
@@ -78,12 +79,29 @@ function testWorldMasterAiCannotOverrideHardBlock() {
   assert.equal(judgement.reason.includes("dead_agent"), true);
 }
 
+function testExperienceMemoryPersonalityUtilityLoop() {
+  const a = agent({ needs: { health: 28, social: 45 }, identityCore: { identity: "reliable doctor", values: ["health"] } });
+  const w = world([a], 900);
+  recordLifeEvent(w, a, {
+    type: "health_rest",
+    interruption: { type: "health", priority: 96, canOverridePlan: true, reason: "health critical" },
+    summary: "Test Agent felt sick and changed the work plan."
+  });
+  const decision = utilityDecision(w, a);
+  assert.ok(a.semanticMemory.experience.length >= 1);
+  assert.ok(decision.personalityRuntime);
+  assert.ok(decision.memoryInfluence.memoryBias.some(item => item.action === "seek_care"));
+  assert.ok(decision.decisionTrace.scoreBreakdown.memory > 0);
+  assert.ok(decision.debugDecision.action);
+}
+
 const tests = [
   testReflectionUsesImportantMemory,
   testDecisionAggregatorPrioritizesHealth,
   testRelevantMemoryRetrieval,
   testWorldMasterBlocksUnmetMedicalResult,
-  testWorldMasterAiCannotOverrideHardBlock
+  testWorldMasterAiCannotOverrideHardBlock,
+  testExperienceMemoryPersonalityUtilityLoop
 ];
 
 for (const test of tests) {

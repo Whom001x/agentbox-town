@@ -12,7 +12,15 @@
     "check:life": "node scripts/check-life-model.js",
     "check:life-engine": "node scripts/check-life-engine.js",
     "check:cognitive": "node scripts/check-cognitive-loop.js",
+    "check:cognitive-loop": "node scripts/check-cognitive-loop.js",
+    "check:cognitive-decision": "node scripts/check-cognitive-decision-engine.js",
     "check:memory": "node scripts/check-memory-action-weights.js",
+    "check:memory-gate": "node scripts/check-memory-gate.js",
+    "check:memory-consolidator": "node scripts/check-memory-consolidator.js",
+    "check:internal-state": "node scripts/check-internal-state.js",
+    "check:personality-runtime": "node scripts/check-personality-runtime.js",
+    "check:utility-scheduler": "node scripts/check-utility-scheduler.js",
+    "check:personality-loop": "node scripts/check-personality-loop.js",
     "check:all": "node scripts/check-all.js"
   },
   "engines": {

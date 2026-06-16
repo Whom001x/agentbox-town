@@ -1345,6 +1345,10 @@
         <label><span>每 Key 并发上限</span><input id="maxConcurrentPerKeyInput" type="number" min="1" max="200" step="1"></label>
         <label><span>大请求每批角色数</span><input id="judgementBatchSizeInput" type="number" min="1" max="50" step="1"></label>
         <label><span>每轮最多执行 Action（按 Key 数 × 每 Key 并发封顶）</span><input id="maxActionsInput" type="number" min="1" max="200" step="1"></label>
+        <label><span>启用向量联想记忆</span><select id="vectorMemoryEnabledInput"><option value="true">启用</option><option value="false">关闭</option></select></label>
+        <label><span>本地向量 API 地址</span><input id="vectorBaseUrlInput" placeholder="http://localhost:1234/v1 或 http://localhost:11434/v1"></label>
+        <label><span>本地向量模型</span><input id="vectorModelInput" placeholder="例如 text-embedding 模型；留空使用内置轻量向量"></label>
+        <label><span>每次召回向量记忆数</span><input id="vectorMaxRecallInput" type="number" min="1" max="20" step="1"></label>
         <p id="settingsHint">配置读取中...</p>
         <div class="form-actions">
           <button type="button" id="testBtn">测试状态</button>
@@ -4772,7 +4776,11 @@
       effectiveMaxActionsPerCycle: 3,
       schedulerIntervalMs: 2500,
       virtualMinutesPerPulse: 5,
-      maxActionsPerCycle: 3
+      maxActionsPerCycle: 3,
+      vectorMemoryEnabled: true,
+      vectorBaseUrl: "http://localhost:1234/v1",
+      vectorModel: "",
+      vectorMaxRecall: 6
     };
 
     function makeInitialWorld(config = defaultConfig, options = {}) {
@@ -11379,7 +11387,11 @@
           effectiveMaxActionsPerCycle: Number(config.effectiveMaxActionsPerCycle || config.maxActionsPerCycle || 3),
           schedulerIntervalMs: Number(config.schedulerIntervalMs || 2500),
           virtualMinutesPerPulse: Number(config.virtualMinutesPerPulse || 5),
-          maxActionsPerCycle: Number(config.maxActionsPerCycle || 3)
+          maxActionsPerCycle: Number(config.maxActionsPerCycle || 3),
+          vectorMemoryEnabled: config.vectorMemoryEnabled !== false,
+          vectorBaseUrl: config.vectorBaseUrl || "",
+          vectorModel: config.vectorModel || "",
+          vectorMaxRecall: Number(config.vectorMaxRecall || 6)
         };
         byId("aiState").textContent = aiModeLabel();
       } catch {
@@ -11874,9 +11886,10 @@
         { name: "地点链", mode: "全局", type: "serial", split: "等待 LocationDaily 完成后推进 LocationChain", effect: "推进学校、诊所、小卖部等连续事件链。" },
         { name: "地点运行/社会模式", mode: "并行", type: "parallel", split: `LocationRuntime ${placeBatches} 批；SocialPattern 全局`, effect: "读取地点链，更新地点是否营业、真实在场岗位、队列、风险和社会压力背景。" },
         { name: "过程管理/职业服务", mode: "并行分批", type: "parallel", split: `ProcessManager 按 ${batchSize} 个过程一批；ProfessionService 按 ${batchSize} 个真实服务请求一批`, effect: "同时推进未完成过程和职业服务请求；职业人员只处理同地点真实在场请求，并回写双方事件/记忆。" },
-        { name: "DecisionAggregator", mode: "本地认知聚合", type: "serial", split: "所有候选角色逐个计算", effect: "综合日计划、打断、记忆相关性、情绪调制和事件队列，判断 local / ai / worldMaster / skip。" },
+        { name: "DecisionAggregator", mode: "本地认知聚合", type: "serial", split: "所有候选角色逐个计算", effect: "综合日计划、打断、结构化记忆、情绪调制和事件队列，判断 local / ai / worldMaster / skip。" },
+        { name: "Utility Scheduler", mode: "本地人格评分", type: "serial", split: "Agent Priority + Action Selection + Softmax", effect: "按需求、人格、经历、关系、情绪、环境、向量联想、成本和风险计算候选行为概率。" },
         { name: "行动前判断", mode: "5类并行分批", type: "batched", split: `5 个判断 Agent × ${agentBatches} 批`, effect: "计算需求意图、场景规则、危机、知识边界和后果限制。" },
-        { name: "Scheduler", mode: "分批合并", type: "batched", split: `${agentBatches} 批候选，按优先级合并`, effect: "只选谁该行动和行动类型，不直接改变世界。" },
+        { name: "Scheduler", mode: "分批合并", type: "batched", split: `${agentBatches} 批候选，按 Utility 优先级合并`, effect: "只选谁该行动和行动类型；AI 不给具体结果，本地 Utility 为空时兜底。" },
         { name: "AgentAction", mode: "行动分批", type: "batched", split: `最多 ${actionLimit} 个 Action，约 ${actionBatches} 批；批并发 ${actionBatchConcurrency}，真实请求约 ${actionBatchConcurrency * batchSize}`, effect: "每个被调度角色生成一个小行动或推进一个过程片段。" },
         { name: "TimePassage", mode: "行动分批", type: "batched", split: `按 ${batchSize} 个行动一批`, effect: "判断本轮耗时、余时轻量活动、是否完成；未完成则留下 activeProcess 下回合继续。" },
         { name: "WorldMasterAgent", mode: "按行动并发", type: "batched", split: `每个行动 1 个裁判请求，并发由 Key 容量控制`, effect: "AI 辅助判断行动能否落地；本地硬审查仍保底，不能制造隐藏 NPC、全镇知识、死亡/复活或未完成结果。" },
@@ -12375,6 +12388,10 @@
       byId("maxConcurrentPerKeyInput").value = world.config.maxConcurrentPerKey ?? 20;
       byId("judgementBatchSizeInput").value = world.config.judgementBatchSize ?? 5;
       byId("maxActionsInput").value = world.config.maxActionsPerCycle ?? 20;
+      byId("vectorMemoryEnabledInput").value = String(world.config.vectorMemoryEnabled !== false);
+      byId("vectorBaseUrlInput").value = world.config.vectorBaseUrl || "";
+      byId("vectorModelInput").value = world.config.vectorModel || "";
+      byId("vectorMaxRecallInput").value = world.config.vectorMaxRecall ?? 6;
       try {
         const config = await api("/api/config", {}, CONFIG_TIMEOUT_MS);
         byId("baseUrlInput").value = config.baseUrl || "";
@@ -12387,10 +12404,14 @@
         byId("maxConcurrentPerKeyInput").value = config.maxConcurrentPerKey ?? 20;
         byId("judgementBatchSizeInput").value = config.judgementBatchSize ?? 5;
         byId("maxActionsInput").value = config.maxActionsPerCycle ?? 3;
+        byId("vectorMemoryEnabledInput").value = String(config.vectorMemoryEnabled !== false);
+        byId("vectorBaseUrlInput").value = config.vectorBaseUrl || "";
+        byId("vectorModelInput").value = config.vectorModel || "";
+        byId("vectorMaxRecallInput").value = config.vectorMaxRecall ?? 6;
         if (config.localAi && !config.hasApiKey) {
-          byId("settingsHint").textContent = `已配置本地 AI：${config.model} @ ${config.baseUrl}；无需 API Key；本地并发 ${config.maxConcurrentPerKey || 20}，大请求每批 ${config.judgementBatchSize || 5} 人，有效上限 ${config.effectiveMaxActionsPerCycle || config.maxActionsPerCycle}。`;
+          byId("settingsHint").textContent = `已配置本地 AI：${config.model} @ ${config.baseUrl}；无需 API Key；本地并发 ${config.maxConcurrentPerKey || 20}，大请求每批 ${config.judgementBatchSize || 5} 人，有效上限 ${config.effectiveMaxActionsPerCycle || config.maxActionsPerCycle}；向量记忆${config.vectorMemoryEnabled === false ? "关闭" : "启用"}。`;
         } else if (config.hasApiKey) {
-          byId("settingsHint").textContent = `已配置 AI：${config.model}，Key 池 ${config.keyCount || 1} 个；单 Key ${config.maxConcurrentPerKey || 20}，大请求每批 ${config.judgementBatchSize || 5} 人，有效上限 ${config.effectiveMaxActionsPerCycle || config.maxActionsPerCycle}。`;
+          byId("settingsHint").textContent = `已配置 AI：${config.model}，Key 池 ${config.keyCount || 1} 个；单 Key ${config.maxConcurrentPerKey || 20}，大请求每批 ${config.judgementBatchSize || 5} 人，有效上限 ${config.effectiveMaxActionsPerCycle || config.maxActionsPerCycle}；向量记忆${config.vectorMemoryEnabled === false ? "关闭" : "启用"}。`;
         } else {
           byId("settingsHint").textContent = "首次使用需要填写 AI 地址和模型；云端需要 API Key，本地 Ollama / LM Studio 可不填 Key。";
         }
@@ -12409,7 +12430,11 @@
         virtualMinutesPerPulse: byId("virtualMinutesInput").value,
         maxConcurrentPerKey: byId("maxConcurrentPerKeyInput").value,
         judgementBatchSize: byId("judgementBatchSizeInput").value,
-        maxActionsPerCycle: byId("maxActionsInput").value
+        maxActionsPerCycle: byId("maxActionsInput").value,
+        vectorMemoryEnabled: byId("vectorMemoryEnabledInput").value !== "false",
+        vectorBaseUrl: byId("vectorBaseUrlInput").value,
+        vectorModel: byId("vectorModelInput").value,
+        vectorMaxRecall: byId("vectorMaxRecallInput").value
       };
     }
 
@@ -12560,7 +12585,7 @@
         await api("/api/config", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(readSettings()) }, CONFIG_TIMEOUT_MS);
         await refreshConfig();
         const poolText = world.config.localAi && !world.config.hasApiKey ? "本地 AI，无需 Key" : `Key 池 ${world.config.keyCount || 1} 个`;
-        byId("settingsHint").textContent = `AI 配置已保存：${world.config.model}，${poolText}，大请求每批 ${world.config.judgementBatchSize || 5} 人，有效上限 ${effectiveMaxActions()}`;
+        byId("settingsHint").textContent = `AI 配置已保存：${world.config.model}，${poolText}，大请求每批 ${world.config.judgementBatchSize || 5} 人，有效上限 ${effectiveMaxActions()}；向量记忆${world.config.vectorMemoryEnabled === false ? "关闭" : "启用"} ${world.config.vectorModel || "内置轻量向量"}`;
       } catch (error) {
         byId("settingsHint").textContent = error.message;
       }
