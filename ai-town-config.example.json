@@ -18,5 +18,11 @@
   "cognitiveMemoryInfluence": 0.55,
   "cognitiveBeliefInfluence": 0.6,
   "cognitiveEmotionInfluence": 0.55,
-  "cognitiveGoalInfluence": 0.6
+  "cognitiveGoalInfluence": 0.6,
+  "contextBudget": {
+    "worldAgent": 12000,
+    "socialAgent": 10000,
+    "scheduler": 8000,
+    "agentAction": 6000
+  }
 }

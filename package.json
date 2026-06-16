@@ -18,6 +18,7 @@
     "check:action-eligibility": "node scripts/check-action-eligibility.js",
     "check:social-field": "node scripts/check-social-field.js",
     "check:social-feedback": "node scripts/check-social-feedback.js",
+    "check:context-boundary": "node scripts/check-context-boundary.js",
     "check:memory": "node scripts/check-memory-action-weights.js",
     "check:memory-gate": "node scripts/check-memory-gate.js",
     "check:memory-consolidator": "node scripts/check-memory-consolidator.js",

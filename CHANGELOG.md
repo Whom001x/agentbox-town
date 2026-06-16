@@ -1,5 +1,23 @@
 # 更新记录
 
+## 2026-06-16 - V3.3.2 Context Boundary & Runtime Compression Layer
+
+- 新增 `ai-town-context-builder.js`，把完整世界状态转换成 AgentAction、World Agent、Social Agent、Scheduler 各自需要的轻量上下文视图。
+- 新增 `contextBudget` 配置：`worldAgent=12000`、`socialAgent=10000`、`scheduler=8000`、`agentAction=6000`，超过预算会自动压缩到摘要或最小状态。
+- AgentAction 输入现在只保留身份、位置、需求摘要、情绪摘要、目标、人格核心、近期记忆摘要、社会反馈摘要和候选行动，不再把 raw memory、vector embedding、完整 cognitiveState、debugDecision、relationshipMatrix 送入 prompt。
+- World/Social/Scheduler 上下文改为专用边界视图：只给人口摘要、地点摘要、事件摘要、社会场、信息流摘要和必要决策字段，避免大规模小镇上下文膨胀。
+- 运行时新增 `runtime/contextCache.json` 摘要缓存，每个 tick 更新地点、人口、社会和角色运行摘要，避免重复构造完整上下文。
+- `judgementBatchSize` 现在真正接入 Node 后台大请求拆批：context agents、pre-judgement agents 和 scheduler 都按设置拆分，并共享并发队列，避免单个请求过大或同阶段超发。
+- 新增 `npm run check:context-boundary`，验证 100/500 角色上下文预算、敏感字段隔离、摘要一致性和 scheduler/agent context 边界。
+
+验证：
+- `npm run check:context-boundary`
+- `npm run check:all`
+- `npm run check:cognitive-state`
+- `npm run check:social-field`
+- `npm run check:social-feedback`
+- `npm run check:utility-scheduler`
+
 ## 2026-06-16 - V3.1.5 Character Genesis Upgrade
 
 - 升级角色创建系统，让新角色出生时就具备 V3.1 人格生命模型。

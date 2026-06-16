@@ -37,6 +37,14 @@ const {
   applyRelationshipIntents,
   runCharacterConsistencyAgent
 } = require("./ai-town-character-seed");
+const {
+  DEFAULT_CONTEXT_BUDGET,
+  buildAgentContext,
+  buildWorldContext,
+  buildSchedulerContext,
+  buildRuntimeSummaryCache,
+  writeRuntimeContextCache
+} = require("./ai-town-context-builder");
 
 const PORT = Number(process.env.AI_TOWN_V2_PORT || 8788);
 const HOST = String(process.env.AI_TOWN_V2_HOST || "0.0.0.0");
@@ -47,6 +55,7 @@ const ROOT = __dirname;
 const CONFIG_PATH = path.join(ROOT, "ai-town-config.json");
 const SAVE_DIR = path.join(ROOT, "saves");
 const EXPORT_DIR = path.join(SAVE_DIR, "exports");
+const RUNTIME_CONTEXT_CACHE_PATH = path.join(ROOT, "runtime", "contextCache.json");
 const RUNTIME_PROGRESS_PATH = path.join(SAVE_DIR, "runtime-progress.json");
 const AI_TIMEOUT_MS = Number(process.env.AI_TOWN_TIMEOUT_MS || 600000);
 const MAX_REQUEST_BODY_BYTES = Number(process.env.AI_TOWN_MAX_REQUEST_BODY_BYTES || 10_000_000);
@@ -76,7 +85,8 @@ const aiConfig = {
   cognitiveMemoryInfluence: 0.55,
   cognitiveBeliefInfluence: 0.6,
   cognitiveEmotionInfluence: 0.55,
-  cognitiveGoalInfluence: 0.6
+  cognitiveGoalInfluence: 0.6,
+  contextBudget: { ...DEFAULT_CONTEXT_BUDGET }
 };
 
 const metrics = {
@@ -384,6 +394,16 @@ function clampFloat(value, min, max, fallback) {
   return Number(Math.max(min, Math.min(max, n)).toFixed(3));
 }
 
+function normalizeContextBudget(value = {}, fallback = DEFAULT_CONTEXT_BUDGET) {
+  const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  return {
+    worldAgent: clampNumber(source.worldAgent, 1000, 200000, fallback.worldAgent),
+    socialAgent: clampNumber(source.socialAgent, 1000, 200000, fallback.socialAgent),
+    scheduler: clampNumber(source.scheduler, 1000, 200000, fallback.scheduler),
+    agentAction: clampNumber(source.agentAction, 1000, 200000, fallback.agentAction)
+  };
+}
+
 function loadConfig() {
   try {
     if (!fs.existsSync(CONFIG_PATH)) return;
@@ -418,6 +438,7 @@ function loadConfig() {
     aiConfig.cognitiveBeliefInfluence = clampFloat(saved.cognitiveBeliefInfluence, 0, 1, aiConfig.cognitiveBeliefInfluence);
     aiConfig.cognitiveEmotionInfluence = clampFloat(saved.cognitiveEmotionInfluence, 0, 1, aiConfig.cognitiveEmotionInfluence);
     aiConfig.cognitiveGoalInfluence = clampFloat(saved.cognitiveGoalInfluence, 0, 1, aiConfig.cognitiveGoalInfluence);
+    aiConfig.contextBudget = normalizeContextBudget(saved.contextBudget, aiConfig.contextBudget || DEFAULT_CONTEXT_BUDGET);
   } catch (error) {
     console.warn(`Failed to load config: ${error.message}`);
   }
@@ -449,7 +470,8 @@ function saveConfig() {
     cognitiveMemoryInfluence: aiConfig.cognitiveMemoryInfluence,
     cognitiveBeliefInfluence: aiConfig.cognitiveBeliefInfluence,
     cognitiveEmotionInfluence: aiConfig.cognitiveEmotionInfluence,
-    cognitiveGoalInfluence: aiConfig.cognitiveGoalInfluence
+    cognitiveGoalInfluence: aiConfig.cognitiveGoalInfluence,
+    contextBudget: aiConfig.contextBudget
   }, null, 2), "utf8");
 }
 
@@ -499,6 +521,7 @@ function savePostedConfigToFile(body) {
   if (body.cognitiveBeliefInfluence !== undefined) next.cognitiveBeliefInfluence = clampFloat(body.cognitiveBeliefInfluence, 0, 1, existing.cognitiveBeliefInfluence ?? aiConfig.cognitiveBeliefInfluence);
   if (body.cognitiveEmotionInfluence !== undefined) next.cognitiveEmotionInfluence = clampFloat(body.cognitiveEmotionInfluence, 0, 1, existing.cognitiveEmotionInfluence ?? aiConfig.cognitiveEmotionInfluence);
   if (body.cognitiveGoalInfluence !== undefined) next.cognitiveGoalInfluence = clampFloat(body.cognitiveGoalInfluence, 0, 1, existing.cognitiveGoalInfluence ?? aiConfig.cognitiveGoalInfluence);
+  if (body.contextBudget !== undefined) next.contextBudget = normalizeContextBudget(body.contextBudget, existing.contextBudget || aiConfig.contextBudget || DEFAULT_CONTEXT_BUDGET);
   fs.writeFileSync(CONFIG_PATH, JSON.stringify(next, null, 2), "utf8");
 }
 
@@ -533,6 +556,7 @@ function publicConfig() {
     cognitiveBeliefInfluence: aiConfig.cognitiveBeliefInfluence,
     cognitiveEmotionInfluence: aiConfig.cognitiveEmotionInfluence,
     cognitiveGoalInfluence: aiConfig.cognitiveGoalInfluence,
+    contextBudget: aiConfig.contextBudget,
     configPath: CONFIG_PATH
   };
 }
@@ -2261,6 +2285,225 @@ function nodeRuntimeAgentBrief(agent, world = null) {
   };
 }
 
+function nodeRuntimeCompactCognitiveForBatch(cognitive = null) {
+  if (!cognitive || typeof cognitive !== "object") return null;
+  return {
+    selfPressure: cognitive.selfPressure,
+    socialNeed: cognitive.socialNeed,
+    safetyConcern: cognitive.safetyConcern,
+    curiosityDrive: cognitive.curiosityDrive,
+    responsibilityDrive: cognitive.responsibilityDrive,
+    comfortNeed: cognitive.comfortNeed,
+    emotionalLoad: cognitive.emotionalLoad,
+    beliefActivation: cognitive.beliefActivation,
+    desireCandidates: (cognitive.desireCandidates || []).slice(0, 4).map(item => ({
+      id: item.id || "",
+      desire: compactText(item.desire || "", "", 80),
+      intensity: item.intensity,
+      source: compactText(item.source || "", "", 60)
+    })),
+    activeBeliefs: (cognitive.activeBeliefs || []).slice(0, 3).map(item => ({
+      id: item.id || "",
+      belief: compactText(item.belief || item.text || "", "", 100),
+      activation: item.activation,
+      strength: item.strength
+    })),
+    socialModifier: cognitive.socialModifier ? {
+      fearModifier: cognitive.socialModifier.fearModifier,
+      curiosityModifier: cognitive.socialModifier.curiosityModifier,
+      trustModifier: cognitive.socialModifier.trustModifier,
+      responsibilityModifier: cognitive.socialModifier.responsibilityModifier,
+      avoidanceModifier: cognitive.socialModifier.avoidanceModifier,
+      socialNeedModifier: cognitive.socialModifier.socialNeedModifier,
+      regulatedSocialEffect: cognitive.socialModifier.regulatedSocialEffect
+    } : null
+  };
+}
+
+function nodeRuntimeCompactUtilityForBatch(utility = null) {
+  if (!utility || typeof utility !== "object") return null;
+  return {
+    priority: utility.priority,
+    priorityReason: compactText(utility.priorityReason || "", "", 120),
+    priorityComponents: utility.priorityComponents || null,
+    selectedAction: utility.selectedAction ? {
+      id: utility.selectedAction.id,
+      label: compactText(utility.selectedAction.label || "", "", 80),
+      score: utility.selectedAction.score,
+      probability: utility.selectedAction.probability,
+      type: utility.selectedAction.type,
+      targetPlace: utility.selectedAction.targetPlace,
+      targetNeed: utility.selectedAction.targetNeed
+    } : null,
+    candidateActions: (utility.candidateActions || []).slice(0, 4).map(action => ({
+      id: action.id,
+      label: compactText(action.label || "", "", 80),
+      score: action.score,
+      probability: action.probability,
+      type: action.type,
+      targetPlace: action.targetPlace,
+      targetNeed: action.targetNeed
+    })),
+    vectorRecall: (utility.vectorRecall || []).slice(0, 3).map(item => ({
+      scene: compactText(item.scene || item.text || "", "", 100),
+      structuredType: item.structuredType,
+      similarity: item.similarity,
+      importance: item.importance
+    })),
+    cognitiveState: nodeRuntimeCompactCognitiveForBatch(utility.cognitiveState),
+    actionEligibility: utility.actionEligibility ? {
+      rawCount: utility.actionEligibility.rawCount,
+      eligibleCount: utility.actionEligibility.eligibleCount
+    } : null,
+    source: utility.source || "local-utility-scheduler"
+  };
+}
+
+function nodeRuntimeWorldAgentBrief(agent = {}, world = null) {
+  const place = agent.position || agent.place || "";
+  const utility = agent.utilityDecision || null;
+  const cognitive = agent.cognitiveState || utility?.cognitiveState || null;
+  return {
+    id: agent.id,
+    name: agent.name,
+    job: agent.job || "",
+    ageYears: agent.ageYears ?? agent.age ?? null,
+    ageStage: agent.ageStage || "",
+    lifeStatus: agent.lifeStatus || "alive",
+    position: place,
+    currentTask: compactText(agent.currentTask || "", "", 100),
+    needs: agent.needs || {},
+    emotionVector: agent.emotionVector || agent.emotions || {},
+    energy: agent.energy,
+    isSleeping: Boolean(agent.isSleeping),
+    schedulingPressure: agent.schedulingPressure,
+    activeProcess: agent.activeProcess ? {
+      goal: compactText(agent.activeProcess.goal || "", "", 80),
+      stage: compactText(agent.activeProcess.stage || "", "", 40),
+      currentStep: compactText(agent.activeProcess.currentStep || "", "", 100),
+      progress: agent.activeProcess.progress,
+      blockedBy: compactText(agent.activeProcess.blockedBy || "", "", 100)
+    } : null,
+    eventQueue: (agent.eventQueue || []).slice(0, 3).map(item => nodeRuntimeCompactItem(item, 100)),
+    longTermGoals: (agent.longTermGoals || []).slice(0, 2).map(goal => ({
+      title: compactText(goal.title || goal.name || "", "", 100),
+      priority: goal.priority,
+      progress: goal.progress
+    })),
+    currentPlanItem: agent.currentPlanItem ? nodeRuntimeCompactItem(agent.currentPlanItem, 100) : null,
+    interruption: agent.interruption ? nodeRuntimeCompactItem(agent.interruption, 100) : null,
+    decision: agent.decision ? nodeRuntimeCompactItem(agent.decision, 100) : null,
+    memoryActionWeights: agent.memoryActionWeights ? {
+      priorityDelta: agent.memoryActionWeights.priorityDelta,
+      preferredActions: (agent.memoryActionWeights.preferredActions || []).slice(0, 4),
+      avoidPlaces: (agent.memoryActionWeights.avoidPlaces || []).slice(0, 3),
+      seekPlaces: (agent.memoryActionWeights.seekPlaces || []).slice(0, 3),
+      seekAgents: (agent.memoryActionWeights.seekAgents || []).slice(0, 3),
+      notes: (agent.memoryActionWeights.notes || []).slice(0, 4)
+    } : null,
+    memorySummary: compactText(agent.memorySummary || "", "", 180),
+    personalityProfile: agent.personalityProfile ? {
+      values: (agent.personalityProfile.values || []).slice(0, 3),
+      habits: (agent.personalityProfile.habits || []).slice(0, 3),
+      avoidance: (agent.personalityProfile.avoidance || []).slice(0, 3),
+      decisionBias: compactText(agent.personalityProfile.decisionBias || "", "", 100)
+    } : null,
+    identityCore: agent.identityCore ? {
+      values: (agent.identityCore.values || []).slice(0, 3),
+      fears: (agent.identityCore.fears || []).slice(0, 3),
+      habits: (agent.identityCore.habits || []).slice(0, 3),
+      biases: agent.identityCore.biases || null,
+      socialSensitivity: agent.identityCore.socialSensitivity
+    } : null,
+    selfModel: agent.selfModel ? {
+      selfImage: compactText(agent.selfModel.selfImage || agent.selfModel.identity || "", "", 120),
+      currentSelfView: compactText(agent.selfModel.currentSelfView || "", "", 120),
+      values: (agent.selfModel.values || []).slice(0, 3),
+      fears: (agent.selfModel.fears || []).slice(0, 3)
+    } : null,
+    cognitiveState: nodeRuntimeCompactCognitiveForBatch(cognitive),
+    desireCandidates: (agent.desireCandidates || cognitive?.desireCandidates || []).slice(0, 4).map(item => ({
+      id: item.id || "",
+      desire: compactText(item.desire || "", "", 80),
+      intensity: item.intensity
+    })),
+    activeBeliefs: (agent.activeBeliefs || cognitive?.activeBeliefs || []).slice(0, 3).map(item => ({
+      belief: compactText(item.belief || item.text || "", "", 100),
+      activation: item.activation,
+      strength: item.strength
+    })),
+    utilityDecision: nodeRuntimeCompactUtilityForBatch(utility)
+  };
+}
+
+function nodeRuntimeJudgementBatchSize(world = {}) {
+  return Math.max(1, Math.min(50, Number(world?.config?.judgementBatchSize || aiConfig.judgementBatchSize || 5)));
+}
+
+function nodeRuntimeRequestCapacity() {
+  const keyCount = aiConfig.apiKeys.length || (isLocalAiBaseUrl(aiConfig.baseUrl) ? 1 : 0) || 1;
+  return Math.max(1, keyCount * Math.max(1, Number(aiConfig.maxConcurrentPerKey || 1)));
+}
+
+function nodeRuntimeBatchConcurrency(batchCount = 1, callsPerBatch = 1) {
+  const count = Math.max(1, Number(batchCount || 1));
+  const perBatch = Math.max(1, Number(callsPerBatch || 1));
+  const capacity = Math.max(1, Math.floor(nodeRuntimeRequestCapacity() / perBatch));
+  return Math.max(1, Math.min(count, capacity));
+}
+
+function nodeRuntimeChunkList(list = [], size = 5) {
+  const source = Array.isArray(list) ? list : [];
+  const batchSize = Math.max(1, Math.min(50, Number(size || 5)));
+  const chunks = [];
+  for (let i = 0; i < source.length; i += batchSize) chunks.push(source.slice(i, i + batchSize));
+  return chunks;
+}
+
+function nodeRuntimeMergeBatchedResultValues(results = [], key = "") {
+  const values = (Array.isArray(results) ? results : [])
+    .map(result => key && result && result[key] !== undefined ? result[key] : result)
+    .filter(value => value !== undefined && value !== null);
+  if (!values.length) return null;
+  if (values.every(Array.isArray)) return values.flat();
+  if (values.every(value => value && typeof value === "object" && !Array.isArray(value))) {
+    const merged = {};
+    values.forEach(value => {
+      Object.entries(value).forEach(([entryKey, entryValue]) => {
+        if (Array.isArray(entryValue)) {
+          merged[entryKey] = [...(Array.isArray(merged[entryKey]) ? merged[entryKey] : []), ...entryValue];
+        } else if (
+          entryValue &&
+          typeof entryValue === "object" &&
+          !Array.isArray(entryValue) &&
+          merged[entryKey] &&
+          typeof merged[entryKey] === "object" &&
+          !Array.isArray(merged[entryKey])
+        ) {
+          merged[entryKey] = { ...merged[entryKey], ...entryValue };
+        } else if (merged[entryKey] === undefined || entryValue !== undefined) {
+          merged[entryKey] = entryValue;
+        }
+      });
+    });
+    return merged;
+  }
+  return values;
+}
+
+function nodeRuntimeUniqueByAgent(items = []) {
+  const seen = new Set();
+  const output = [];
+  (Array.isArray(items) ? items : []).forEach(item => {
+    const id = String(item?.agentId || item?.id || "");
+    const key = id || JSON.stringify(item).slice(0, 120);
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    output.push(item);
+  });
+  return output;
+}
+
 function nodeRuntimeNeedPressure(agent) {
   const needs = agent?.needs || {};
   const lowNeeds = ["hunger", "health", "safety", "stress", "responsibility", "comfort", "social"]
@@ -2368,20 +2611,46 @@ function nodeRuntimeUtilityBrief(utility = {}, extras = {}) {
       source: item.source || "",
       vectorModel: item.vectorModel || ""
     })),
-    cognitiveState: utility.cognitiveState || null,
+    cognitiveState: nodeRuntimeCompactCognitiveForBatch(utility.cognitiveState),
     actionEligibility: utility.actionEligibility ? {
       rawCount: utility.actionEligibility.rawCount,
       eligibleCount: utility.actionEligibility.eligibleCount,
       removed: (utility.actionEligibility.removed || []).slice(0, 8),
       rule: utility.actionEligibility.rule
     } : null,
-    desireCandidates: utility.desireCandidates || utility.cognitiveState?.desireCandidates || [],
-    activeBeliefs: utility.activeBeliefs || utility.cognitiveState?.activeBeliefs || [],
-    thoughtStream: utility.thoughtStream || utility.cognitiveState?.thoughtStream || [],
+    desireCandidates: (utility.desireCandidates || utility.cognitiveState?.desireCandidates || []).slice(0, 4).map(item => ({
+      id: item.id || "",
+      desire: compactText(item.desire || "", "", 80),
+      intensity: item.intensity,
+      source: compactText(item.source || "", "", 60)
+    })),
+    activeBeliefs: (utility.activeBeliefs || utility.cognitiveState?.activeBeliefs || []).slice(0, 3).map(item => ({
+      id: item.id || "",
+      belief: compactText(item.belief || item.text || "", "", 100),
+      activation: item.activation,
+      strength: item.strength
+    })),
+    thoughtStream: (utility.thoughtStream || utility.cognitiveState?.thoughtStream || []).slice(0, 4).map(item => ({
+      trigger: compactText(item.trigger || "", "", 60),
+      thought: compactText(item.thought || "", "", 100),
+      intensity: item.intensity
+    })),
     selectionTemperature: utility.selectionTemperature || null,
-    personalityRuntime: utility.personalityRuntime || null,
-    decisionTrace: utility.decisionTrace || null,
-    debugDecision: utility.debugDecision || null,
+    personalityRuntime: utility.personalityRuntime ? {
+      socialDrive: utility.personalityRuntime.socialDrive,
+      riskTolerance: utility.personalityRuntime.riskTolerance,
+      responsibilityDrive: utility.personalityRuntime.responsibilityDrive,
+      actionBias: nodeRuntimeCompactItem(utility.personalityRuntime.actionBias || {}, 80),
+      avoidance: nodeRuntimeCompactItem(utility.personalityRuntime.avoidance || {}, 80)
+    } : null,
+    decisionTrace: utility.decisionTrace ? {
+      chosenAction: utility.decisionTrace.chosenAction,
+      scoreBreakdown: utility.decisionTrace.scoreBreakdown || null
+    } : null,
+    debugDecision: utility.debugDecision ? {
+      action: utility.debugDecision.action,
+      reasons: utility.debugDecision.reasons || utility.debugDecision.scoreBreakdown || null
+    } : null,
     source: extras.source || utility.source || "local-utility-scheduler",
     vectorQuerySource: extras.vectorQuerySource || utility.vectorQuerySource || "",
     vectorModel: extras.vectorModel || utility.vectorModel || ""
@@ -2519,6 +2788,26 @@ function nodeRuntimeCounters(world) {
   return world.nodeRuntimeCounters;
 }
 
+function nodeRuntimeRefreshContextCache(world) {
+  try {
+    const cache = buildRuntimeSummaryCache(world, world.agents || []);
+    const file = writeRuntimeContextCache(ROOT, cache);
+    world.runtimeContextCachePath = file || RUNTIME_CONTEXT_CACHE_PATH;
+    return cache;
+  } catch (error) {
+    world.logs ||= [];
+    world.logs.unshift({
+      title: "Context cache skipped",
+      body: String(error.message || error).slice(0, 160),
+      type: "node_runtime_warning",
+      time: nodeRuntimeClockText(world),
+      clock: world.clock || 0,
+      source: "context-builder"
+    });
+    return world.runtimeContextCache || null;
+  }
+}
+
 function nodeRuntimeSchedulePolicy(world, dueAgents) {
   const counters = nodeRuntimeCounters(world);
   const mode = world?.config?.nodeRuntimeMode || "balanced";
@@ -2549,49 +2838,94 @@ function nodeRuntimeVisibleAgents(world, agent) {
     .map(nodeRuntimeAgentBrief);
 }
 
-function nodeRuntimeSchedulerPayload(world, dueAgents) {
+function nodeRuntimeSchedulerPayload(world, dueAgents, batchMeta = null) {
   const maxActions = Math.max(1, Math.min(MAX_ACTIONS_HARD_LIMIT, Number(world?.config?.maxActionsPerCycle || aiConfig.maxActionsPerCycle || 3)));
+  const payload = buildSchedulerContext({
+    world,
+    dueAgents,
+    maxActions,
+    batchMeta,
+    budget: aiConfig.contextBudget?.scheduler || DEFAULT_CONTEXT_BUDGET.scheduler
+  });
   return {
+    ...payload,
     clock: world.clock || 0,
     clockText: nodeRuntimeClockText(world),
-    calendar: world.weatherBox?.calendar || {},
-    maxActions,
-    dueAgents,
-    agents: dueAgents,
-    places: Array.isArray(world.places) ? world.places.map(place => ({ id: place.id, name: place.name, type: place.type || "" })).slice(0, 120) : [],
-    recentRecords: Array.isArray(world.records) ? world.records.slice(0, 12) : [],
-    recentLogs: Array.isArray(world.logs) ? world.logs.slice(0, 12) : [],
+    agents: payload.dueAgents,
     simulationLevel: "node-core-v1",
     memoryActionGuidance: "memoryActionWeights is extracted locally from memory and modulated by multidimensional emotion. Use priorityDelta, preferredActions, avoidPlaces, seekPlaces, avoidAgents, seekAgents and emotionModulation as behavior weights, not as new facts."
   };
 }
 
-function nodeRuntimeWorldContext(world, agents = null) {
-  const selectedAgents = agents || (world.agents || []).filter(agent => agent?.id && !isDeadAgent(agent)).slice(0, 80).map(nodeRuntimeAgentBrief);
+async function nodeRuntimeRunScheduler(world, dueAgents) {
+  const agents = Array.isArray(dueAgents) ? dueAgents : [];
+  if (!agents.length) return { candidates: [], batches: 0 };
+  const batchSize = nodeRuntimeJudgementBatchSize(world);
+  const batches = nodeRuntimeChunkList(agents, batchSize);
+  const results = await aiRouter.runBatch(
+    batches,
+    nodeRuntimeBatchConcurrency(batches.length, 1),
+    async (batch, index) => callAiWithRetry("scheduler", nodeRuntimeSchedulerPayload(world, batch, {
+      index: index + 1,
+      total: batches.length,
+      batchSize,
+      totalCandidates: agents.length
+    }))
+  );
+  const maxActions = Math.max(1, Math.min(MAX_ACTIONS_HARD_LIMIT, Number(world?.config?.maxActionsPerCycle || aiConfig.maxActionsPerCycle || 3)));
+  const candidates = nodeRuntimeUniqueByAgent(results.flatMap(result => Array.isArray(result?.candidates) ? result.candidates : []))
+    .sort((a, b) => Number(b.score ?? b.priority ?? b.utilityDecision?.priority ?? 0) - Number(a.score ?? a.priority ?? a.utilityDecision?.priority ?? 0))
+    .slice(0, maxActions);
   return {
+    candidates,
+    idle: results.flatMap(result => Array.isArray(result?.idle) ? result.idle : []),
+    batches: batches.length,
+    batchSize
+  };
+}
+
+function nodeRuntimeWorldContext(world, agents = null, kind = "worldAgent") {
+  const selectedAgents = (agents
+    ? (Array.isArray(agents) ? agents : [])
+    : (world.agents || []).filter(agent => agent?.id && !isDeadAgent(agent)).slice(0, 80))
+    .slice(0, 80);
+  const payload = buildWorldContext({
+    world,
+    agents: selectedAgents,
+    kind,
+    budget: aiConfig.contextBudget?.[kind] || DEFAULT_CONTEXT_BUDGET[kind] || DEFAULT_CONTEXT_BUDGET.worldAgent
+  });
+  return {
+    ...payload,
     time: nodeRuntimeClockText(world),
     virtualMinute: world.clock || 0,
     calendar: world.weatherBox?.calendar || {},
-    weatherBox: world.weatherBox || {},
-    agents: selectedAgents,
-    places: Array.isArray(world.places) ? world.places.map(place => ({ id: place.id, name: place.name, type: place.type || "", visible: place.visible || [] })).slice(0, 160) : [],
-    recentRecords: Array.isArray(world.records) ? world.records.slice(0, 18) : [],
-    recentLogs: Array.isArray(world.logs) ? world.logs.slice(0, 12) : [],
-    households: Array.isArray(world.households) ? world.households.slice(0, 80) : [],
-    groups: Array.isArray(world.groups) ? world.groups.slice(0, 80) : [],
-    locationRuntimeState: world.locationRuntimeState || null,
-    socialPatterns: world.socialPatterns || null,
-    eventImpacts: world.eventImpacts || [],
-    informationFlows: world.informationFlows || [],
-    informationFlowGraph: world.informationFlowGraph || { nodes: [], edges: [] },
-    socialField: world.socialField || null,
-    socialDynamicsState: world.socialDynamicsState || null,
-    socialFeedbackState: world.socialFeedbackState || null,
-    agentSocialModifiers: Array.isArray(world.agentSocialModifiers) ? world.agentSocialModifiers.slice(0, 80) : [],
-    relationshipDynamics: world.relationshipDynamics || [],
-    socialProcesses: world.socialProcesses || [],
+    agents: payload.agents,
+    places: payload.locationSummary,
+    recentRecords: payload.eventSummary?.recentRecords || [],
+    recentLogs: Array.isArray(world.logs) ? world.logs.slice(0, 8).map(item => nodeRuntimeCompactItem(item, 100)) : [],
+    eventImpacts: payload.eventSummary?.recentImpacts || [],
+    informationFlows: payload.informationFlowSummary || [],
     simulationLevel: "node-core-v1"
   };
+}
+
+function nodeRuntimeCompactInformationFlowsForAi(world = {}, max = 30) {
+  return Array.isArray(world.informationFlows)
+    ? world.informationFlows.slice(0, max).map(item => nodeRuntimeCompactItem(item, 120))
+    : [];
+}
+
+function nodeRuntimeCompactEventImpactsForAi(world = {}, max = 20) {
+  return Array.isArray(world.eventImpacts)
+    ? world.eventImpacts.slice(0, max).map(item => nodeRuntimeCompactItem(item, 120))
+    : [];
+}
+
+function nodeRuntimeCompactSocialProcessesForAi(world = {}, max = 40) {
+  return Array.isArray(world.socialProcesses)
+    ? world.socialProcesses.slice(0, max).map(item => nodeRuntimeCompactItem(item, 100))
+    : [];
 }
 
 function nodeRuntimeCompactItem(item = {}, maxText = 180) {
@@ -2781,7 +3115,10 @@ function nodeRuntimeSeedSocialProcesses(world, eventImpacts = [], informationFlo
 }
 
 async function nodeRuntimeRunLocationAndProcessAgents(world, dueAgents) {
-  const activeProcessAgents = (world.agents || []).filter(agent => agent?.activeProcess && agent.lifeStatus !== "dead").slice(0, 40).map(nodeRuntimeAgentBrief);
+  const batchSize = nodeRuntimeJudgementBatchSize(world);
+  const due = Array.isArray(dueAgents) ? dueAgents : [];
+  const agentById = new Map((world.agents || []).map(agent => [agent.id, agent]));
+  const activeProcessAgents = (world.agents || []).filter(agent => agent?.activeProcess && agent.lifeStatus !== "dead").slice(0, 40);
   const requests = (world.agents || [])
     .filter(agent => agent?.lifeStatus !== "dead")
     .filter(agent => /候诊|等待|求助|问诊|结账|上课|请假|复核|服务/.test(String(agent.currentTask || "") + " " + JSON.stringify(agent.eventQueue || [])))
@@ -2797,28 +3134,62 @@ async function nodeRuntimeRunLocationAndProcessAgents(world, dueAgents) {
         professionalCandidates: visible.filter(item => /医生|护士|老师|店员|老板|职员|工作人员|医护/.test(String(item.job || ""))).map(item => ({ id: item.id, name: item.name, job: item.job }))
       };
     });
-  const tasks = [
-    callAiWithRetry("locationRuntimeAgent", nodeRuntimeWorldContext(world, dueAgents)).then(result => ({ task: "locationRuntimeAgent", result })),
-    activeProcessAgents.length
-      ? callAiWithRetry("processManagerAgent", { ...nodeRuntimeWorldContext(world, activeProcessAgents), activeProcesses: activeProcessAgents.map(agent => ({ agentId: agent.id, activeProcess: agent.activeProcess })) }).then(result => ({ task: "processManagerAgent", result }))
-      : Promise.resolve({ task: "processManagerAgent", result: null }),
-    requests.length
-      ? callAiWithRetry("professionServiceAgent", { ...nodeRuntimeWorldContext(world, dueAgents), requests }).then(result => ({ task: "professionServiceAgent", result }))
-      : Promise.resolve({ task: "professionServiceAgent", result: null }),
-    callAiWithRetry("socialPatternAgent", nodeRuntimeWorldContext(world, dueAgents)).then(result => ({ task: "socialPatternAgent", result }))
-  ];
-  const results = await Promise.all(tasks);
-  results.forEach(({ task, result }) => {
-    if (!result) return;
-    if (task === "locationRuntimeAgent") world.locationRuntimeState = nodeRuntimeCompactItem(result.locations || result);
-    if (task === "processManagerAgent") world.processRuntimeState = nodeRuntimeCompactItem(result.processUpdates || result);
-    if (task === "professionServiceAgent") world.professionServiceState = nodeRuntimeCompactItem(result.assignments || result);
-    if (task === "socialPatternAgent") world.socialPatterns = nodeRuntimeCompactItem(result);
+  const contextJobs = [];
+  const enqueueAgentBatches = (task, agents, buildPayload) => {
+    const batches = nodeRuntimeChunkList(agents, batchSize);
+    batches.forEach((batch, index) => {
+      contextJobs.push({
+        task,
+        payload: () => ({
+          ...buildPayload(batch),
+          aiBatch: { index: index + 1, total: batches.length, batchSize, totalAgents: agents.length }
+        })
+      });
+    });
+  };
+  enqueueAgentBatches("locationRuntimeAgent", due, batch => nodeRuntimeWorldContext(world, batch));
+  if (activeProcessAgents.length) enqueueAgentBatches("processManagerAgent", activeProcessAgents, batch => ({
+    ...nodeRuntimeWorldContext(world, batch),
+    activeProcesses: batch.map(agent => ({ agentId: agent.id, activeProcess: agent.activeProcess }))
+  }));
+  const requestBatches = nodeRuntimeChunkList(requests, batchSize);
+  requestBatches.forEach((batch, index) => {
+    contextJobs.push({
+      task: "professionServiceAgent",
+      payload: () => {
+        const requestAgents = batch.map(request => agentById.get(request.agentId)).filter(Boolean);
+        return {
+          ...nodeRuntimeWorldContext(world, requestAgents.length ? requestAgents : due.slice(0, batchSize)),
+          requests: batch,
+          aiBatch: { index: index + 1, total: requestBatches.length, batchSize, totalRequests: requests.length }
+        };
+      }
+    });
   });
+  enqueueAgentBatches("socialPatternAgent", due, batch => nodeRuntimeWorldContext(world, batch, "socialAgent"));
+  const contextResults = contextJobs.length
+    ? await aiRouter.runBatch(
+      contextJobs,
+      nodeRuntimeBatchConcurrency(contextJobs.length, 1),
+      async job => ({ task: job.task, result: await callAiWithRetry(job.task, job.payload()) })
+    )
+    : [];
+  const locationResults = contextResults.filter(item => item.task === "locationRuntimeAgent").map(item => item.result);
+  const processResults = contextResults.filter(item => item.task === "processManagerAgent").map(item => item.result);
+  const professionResults = contextResults.filter(item => item.task === "professionServiceAgent").map(item => item.result);
+  const socialResults = contextResults.filter(item => item.task === "socialPatternAgent").map(item => item.result);
+  const locationMerged = nodeRuntimeMergeBatchedResultValues(locationResults, "locations") || nodeRuntimeMergeBatchedResultValues(locationResults);
+  const processMerged = nodeRuntimeMergeBatchedResultValues(processResults, "processUpdates") || nodeRuntimeMergeBatchedResultValues(processResults);
+  const professionMerged = nodeRuntimeMergeBatchedResultValues(professionResults, "assignments") || nodeRuntimeMergeBatchedResultValues(professionResults);
+  const socialMerged = nodeRuntimeMergeBatchedResultValues(socialResults);
+  if (locationMerged) world.locationRuntimeState = nodeRuntimeCompactItem(locationMerged);
+  if (processMerged) world.processRuntimeState = nodeRuntimeCompactItem(processMerged);
+  if (professionMerged) world.professionServiceState = nodeRuntimeCompactItem(professionMerged);
+  if (socialMerged) world.socialPatterns = nodeRuntimeCompactItem(socialMerged);
   world.logs ||= [];
   world.logs.unshift({
     title: "Node Context Agents",
-    body: `LocationRuntime / ProcessManager / ProfessionService / SocialPattern completed`,
+    body: `LocationRuntime / ProcessManager / ProfessionService / SocialPattern completed in batches of ${batchSize}`,
     type: "node_runtime",
     time: nodeRuntimeClockText(world),
     clock: world.clock || 0,
@@ -2828,14 +3199,31 @@ async function nodeRuntimeRunLocationAndProcessAgents(world, dueAgents) {
 
 async function nodeRuntimeRunPreJudgement(world, dueAgents) {
   if (!dueAgents.length) return;
-  const payload = nodeRuntimeWorldContext(world, dueAgents);
-  const [intent, context, crisis, knowledge, outcome] = await Promise.all([
-    callAiWithRetry("needIntentAgent", payload),
-    callAiWithRetry("contextRuleAgent", payload),
-    callAiWithRetry("crisisTriageAgent", payload),
-    callAiWithRetry("knowledgeJudgeAgent", payload),
-    callAiWithRetry("outcomeJudgeAgent", payload)
-  ]);
+  const batchSize = nodeRuntimeJudgementBatchSize(world);
+  const batches = nodeRuntimeChunkList(dueAgents, batchSize);
+  const results = await aiRouter.runBatch(
+    batches,
+    nodeRuntimeBatchConcurrency(batches.length, 5),
+    async (batch, index) => {
+      const payload = {
+        ...nodeRuntimeWorldContext(world, batch),
+        aiBatch: { index: index + 1, total: batches.length, batchSize, totalCandidates: dueAgents.length }
+      };
+      const [intent, context, crisis, knowledge, outcome] = await Promise.all([
+        callAiWithRetry("needIntentAgent", payload),
+        callAiWithRetry("contextRuleAgent", payload),
+        callAiWithRetry("crisisTriageAgent", payload),
+        callAiWithRetry("knowledgeJudgeAgent", payload),
+        callAiWithRetry("outcomeJudgeAgent", payload)
+      ]);
+      return { intent, context, crisis, knowledge, outcome };
+    }
+  );
+  const intent = { agentIntents: results.flatMap(item => Array.isArray(item?.intent?.agentIntents) ? item.intent.agentIntents : []) };
+  const context = { agentContexts: results.flatMap(item => Array.isArray(item?.context?.agentContexts) ? item.context.agentContexts : []) };
+  const crisis = { triage: results.flatMap(item => Array.isArray(item?.crisis?.triage) ? item.crisis.triage : []) };
+  const knowledge = { agentKnowledge: results.flatMap(item => Array.isArray(item?.knowledge?.agentKnowledge) ? item.knowledge.agentKnowledge : []) };
+  const outcome = { agentOutcomes: results.flatMap(item => Array.isArray(item?.outcome?.agentOutcomes) ? item.outcome.agentOutcomes : []) };
   const byId = new Map((world.agents || []).map(agent => [agent.id, agent]));
   (intent.agentIntents || []).forEach(item => { if (byId.has(item.agentId)) byId.get(item.agentId).intentState = { ...item, time: nodeRuntimeClockText(world), source: "node-need-intent" }; });
   (context.agentContexts || []).forEach(item => { if (byId.has(item.agentId)) byId.get(item.agentId).contextJudgement = { ...item, time: nodeRuntimeClockText(world), source: "node-context-rule" }; });
@@ -2845,7 +3233,7 @@ async function nodeRuntimeRunPreJudgement(world, dueAgents) {
   world.logs ||= [];
   world.logs.unshift({
     title: "Node Pre-Judgement Agents",
-    body: `NeedIntent ${intent.agentIntents?.length || 0}; ContextRule ${context.agentContexts?.length || 0}; CrisisTriage ${crisis.triage?.length || 0}; KnowledgeJudge ${knowledge.agentKnowledge?.length || 0}; OutcomeJudge ${outcome.agentOutcomes?.length || 0}`,
+    body: `NeedIntent ${intent.agentIntents?.length || 0}; ContextRule ${context.agentContexts?.length || 0}; CrisisTriage ${crisis.triage?.length || 0}; KnowledgeJudge ${knowledge.agentKnowledge?.length || 0}; OutcomeJudge ${outcome.agentOutcomes?.length || 0}; batches=${batches.length}; batchSize=${batchSize}`,
     type: "node_runtime",
     time: nodeRuntimeClockText(world),
     clock: world.clock || 0,
@@ -2872,6 +3260,45 @@ function nodeRuntimeActionPayload(world, agent, candidate = {}) {
     title: planItem?.title || "",
     reason: decision.reason || interruption?.reason || ""
   }, 8);
+  const contextPayload = buildAgentContext({
+    world,
+    agent,
+    candidate,
+    utility,
+    relevantMemories,
+    memoryActionWeights,
+    place,
+    visibleAgents,
+    planItem,
+    interruption,
+    decision,
+    tickMinutes: Number(world?.config?.virtualMinutesPerPulse || aiConfig.virtualMinutesPerPulse || 30),
+    previousInternalState: agent.internalState || null,
+    previousIntent: agent.subjectiveIntent || null,
+    budget: aiConfig.contextBudget?.agentAction || DEFAULT_CONTEXT_BUDGET.agentAction,
+    guidance: {
+      lifeEngine: "Local life engine already handled simple actions such as eating, commuting, resting, cleaning up, sleeping, and routine work. If this payload still reaches AgentAction, focus on complex conversation, social meaning, blocked process, unusual decision, or plan exception.",
+      personalityLoop: [
+        "Use personalityCore as long-term self-understanding, not objective world fact.",
+        "Use memoryBiasSummary and goal information as soft behavior bias only; they do not mean an action has happened.",
+        "Keep emotion changes explainable by events, needs, relationships or goal frustration.",
+        "EventLog is replay history, not direct memory."
+      ],
+      memoryAction: "Use memoryBiasSummary as soft behavior weights. Health, safety or hunger urgency can override soft memory avoidance."
+    }
+  });
+  return {
+    ...contextPayload,
+    calendar: world.weatherBox?.calendar || {},
+    visibleAgents: contextPayload.currentLocation?.population?.visibleAgents || [],
+    locations: Array.isArray(world.places) ? world.places.map(item => ({ id: item.id, name: item.name })).slice(0, 120) : [],
+    recentRecords: Array.isArray(world.records) ? world.records.slice(0, 8).map(item => nodeRuntimeCompactItem(item, 120)) : [],
+    intentState: agent.intentState || null,
+    contextJudgement: agent.contextJudgement || null,
+    crisisTriage: agent.crisisTriage || null,
+    knowledgeJudgement: agent.knowledgeJudgement || null,
+    outcomeJudgement: agent.outcomeJudgement || null
+  };
   return {
     agent: nodeRuntimeAgentBrief(agent, world),
     candidate,
@@ -3466,6 +3893,7 @@ function nodeRuntimeApplyAction(world, agent, aiResult, timePassage = null, sett
 
 async function nodeRuntimeRunPostAgents(world, actionItems, settlementPatches = []) {
   if (!actionItems.length) return;
+  const postContextAgents = actionItems.map(item => item.agent).filter(Boolean);
   const actionEvents = actionItems.map(item => ({
     id: item.queueId,
     eventId: item.queueId,
@@ -3477,7 +3905,7 @@ async function nodeRuntimeRunPostAgents(world, actionItems, settlementPatches = 
     timePassage: item.timePassage || null,
     settlementPatch: nodeRuntimeFindPatch(settlementPatches, item)
   }));
-  const impact = await callAiWithRetry("eventImpactAgent", { ...nodeRuntimeWorldContext(world), actionEvents, events: actionEvents });
+  const impact = await callAiWithRetry("eventImpactAgent", { ...nodeRuntimeWorldContext(world, postContextAgents), actionEvents, events: actionEvents });
   if (!Array.isArray(world.eventImpacts)) world.eventImpacts = [];
   const eventImpacts = nodeRuntimeDedupBySignature(
     world.eventImpacts,
@@ -3502,16 +3930,27 @@ async function nodeRuntimeRunPostAgents(world, actionItems, settlementPatches = 
   });
   updateSocialFeedback(world, { eventImpacts, informationFlows });
   const propagationPayload = {
-    ...nodeRuntimeWorldContext(world),
-    eventImpacts: eventImpacts.length ? eventImpacts : world.eventImpacts.slice(0, 20),
-    informationFlows: world.informationFlows || [],
-    informationFlowGraph: world.informationFlowGraph || propagation.informationFlowGraph || { nodes: [], edges: [] },
-    socialField,
-    socialDynamicsState: world.socialDynamicsState || null
+    ...nodeRuntimeWorldContext(world, postContextAgents, "socialAgent"),
+    eventImpacts: eventImpacts.length ? eventImpacts.map(item => nodeRuntimeCompactItem(item, 120)) : nodeRuntimeCompactEventImpactsForAi(world, 20),
+    informationFlows: nodeRuntimeCompactInformationFlowsForAi(world, 30),
+    informationFlowGraph: {
+      nodes: Array.isArray((world.informationFlowGraph || propagation.informationFlowGraph || {}).nodes)
+        ? (world.informationFlowGraph || propagation.informationFlowGraph).nodes.slice(0, 40).map(item => nodeRuntimeCompactItem(item, 80))
+        : [],
+      edges: Array.isArray((world.informationFlowGraph || propagation.informationFlowGraph || {}).edges)
+        ? (world.informationFlowGraph || propagation.informationFlowGraph).edges.slice(0, 80).map(item => nodeRuntimeCompactItem(item, 80))
+        : []
+    },
+    socialField: nodeRuntimeCompactItem(socialField, 100),
+    socialDynamicsState: nodeRuntimeCompactItem(world.socialDynamicsState || null, 100)
   };
   const [dynamics, social] = await Promise.all([
-    callAiWithRetry("relationshipDynamicsAgent", { ...propagationPayload, informationFlows: world.informationFlows || [] }),
-    callAiWithRetry("socialProcessAgent", { ...propagationPayload, relationshipDynamics: world.relationshipDynamics || [], existingProcesses: world.socialProcesses || [] })
+    callAiWithRetry("relationshipDynamicsAgent", { ...propagationPayload, informationFlows: nodeRuntimeCompactInformationFlowsForAi(world, 30) }),
+    callAiWithRetry("socialProcessAgent", {
+      ...propagationPayload,
+      relationshipDynamics: Array.isArray(world.relationshipDynamics) ? world.relationshipDynamics.slice(0, 40).map(item => nodeRuntimeCompactItem(item, 100)) : [],
+      existingProcesses: nodeRuntimeCompactSocialProcessesForAi(world, 40)
+    })
   ]);
   if (!Array.isArray(world.relationshipDynamics)) world.relationshipDynamics = [];
   const relationItems = dynamics.pairDynamics || dynamics.relationshipDynamics || dynamics.relationUpdates || [];
@@ -3626,6 +4065,7 @@ async function runNodeRuntimeStep(slot) {
   ensureDailyPlans(world);
   updateSocialField(world, { informationFlows: world.informationFlows || [], eventImpacts: world.eventImpacts || [] });
   updateSocialFeedback(world, { informationFlows: world.informationFlows || [], eventImpacts: world.eventImpacts || [] });
+  nodeRuntimeRefreshContextCache(world);
   updateRuntimeProgress("life-engine", { phaseIndex: 2, currentTask: "local life actions" });
   const lifeResult = runLifeEngine(world, { maxLocalActions: Number(world?.config?.maxLocalActionsPerTick || 10000) });
   if (lifeResult.localActions.length) {
@@ -3674,7 +4114,7 @@ async function runNodeRuntimeStep(slot) {
     }
     updateRuntimeProgress("scheduler", { phaseIndex: 6, currentTask: "scheduler" });
     const maxActions = Math.max(1, Math.min(MAX_ACTIONS_HARD_LIMIT, Number(world?.config?.maxActionsPerCycle || aiConfig.maxActionsPerCycle || 3)));
-    const scheduled = await callAiWithRetry("scheduler", nodeRuntimeSchedulerPayload(world, dueAgents));
+    const scheduled = await nodeRuntimeRunScheduler(world, dueAgents);
     const aiCandidates = Array.isArray(scheduled?.candidates) ? scheduled.candidates : [];
     const utilityCandidates = dueAgents
       .filter(item => byId.has(item.id) && !isDeadAgent(byId.get(item.id)))
@@ -3788,6 +4228,7 @@ async function runNodeRuntimeStep(slot) {
     informationFlows: resultWorldAfterCore.informationFlows || [],
     eventImpacts: resultWorldAfterCore.eventImpacts || []
   });
+  nodeRuntimeRefreshContextCache(resultWorldAfterCore);
   if (policy.runDaily && nodeRuntimeIsMidnightCross(beforeClock, result.payload?.world?.clock || 0)) {
     updateRuntimeProgress("daily-agents", { phaseIndex: 13, currentTask: "daily agents" });
     await nodeRuntimeRunDailyAgents(result.payload.world);
