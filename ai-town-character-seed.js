@@ -67,7 +67,7 @@ function roleKind(job = "") {
   if (/artist|writer|painter|designer|艺术|画|写作|设计/.test(text)) return "creative";
   if (/farmer|garden|农|菜地|种植/.test(text)) return "farmer";
   if (/elder|retired|老人|退休/.test(text)) return "elder";
-  if (/worker|staff|office|factory|clerk|上班|职员|工人|办事|会计/.test(text)) return "worker";
+  if (/worker|staff|office|factory|clerk|commuter|freelance|上班|上班族|职员|工人|工作者|通勤|零工|办事|会计/.test(text)) return "worker";
   return "resident";
 }
 
@@ -909,6 +909,109 @@ function applyRelationshipIntents(agents = []) {
   return agents;
 }
 
+const GENESIS_REBUILD_KEYS = [
+  "identityCore",
+  "personalityProfile",
+  "selfModel",
+  "cognitiveProfile",
+  "decisionWeights",
+  "behaviorTendency",
+  "lifeHistorySeed",
+  "lifeHistory",
+  "initialBeliefs",
+  "initialHabits",
+  "preferences",
+  "episodicMemory",
+  "beliefMemory",
+  "habitMemory",
+  "preferenceMemory",
+  "goalRuntime",
+  "structuredMemory",
+  "semanticMemory",
+  "vectorMemory",
+  "characterGenesis"
+];
+
+function hasAnyText(value, terms = []) {
+  const text = JSON.stringify(value || "");
+  return terms.some(term => text.includes(term));
+}
+
+function roleAllowsSchoolMemory(role) {
+  return role === "student" || role === "teacher";
+}
+
+function genesisNeedsRebuild(agent = {}, role = "", stage = "") {
+  const previousRole = agent.characterGenesis?.roleKind || agent.roleKind || "";
+  const previousStage = agent.characterGenesis?.ageStage || agent.ageStage || "";
+  if (previousRole && previousRole !== role) return true;
+  if (previousStage && previousStage !== stage) return true;
+  const genesisText = {
+    identityCore: agent.identityCore,
+    selfModel: agent.selfModel,
+    lifeHistorySeed: agent.lifeHistorySeed,
+    beliefMemory: agent.beliefMemory,
+    habitMemory: agent.habitMemory,
+    preferenceMemory: agent.preferenceMemory,
+    episodicMemory: agent.episodicMemory
+  };
+  if (!roleAllowsSchoolMemory(role) && hasAnyText(genesisText, ["课程", "作业", "同学", "学习安排", "学校安排"])) return true;
+  return false;
+}
+
+function clearGenesisFields(agent = {}) {
+  GENESIS_REBUILD_KEYS.forEach(key => {
+    delete agent[key];
+  });
+  return agent;
+}
+
+function placeText(place = {}) {
+  return `${place.id || ""} ${place.name || ""} ${place.type || ""}`.toLowerCase();
+}
+
+function findPlaceId(places = [], terms = []) {
+  const found = places.find(place => terms.some(term => placeText(place).includes(term)));
+  return found?.id || "";
+}
+
+function placeHas(place = {}, terms = []) {
+  const text = placeText(place);
+  return terms.some(term => text.includes(term));
+}
+
+function preferredPlaceForRole(role = "", stage = "", places = []) {
+  if (role === "student" || role === "teacher") return findPlaceId(places, ["school", "学校", "小学", "中学", "校园"]);
+  if (role === "medical") return findPlaceId(places, ["clinic", "诊所", "医院", "卫生"]);
+  if (role === "service") return findPlaceId(places, ["store", "shop", "market", "breakfast", "小卖", "商店", "市场", "早餐", "摊"]);
+  if (role === "security") return findPlaceId(places, ["office", "square", "镇务", "办公", "广场"]);
+  if (role === "worker") return findPlaceId(places, ["office", "factory", "办公", "工厂", "单位"]) || findPlaceId(places, ["apartment", "home", "居民", "住宅"]);
+  if (role === "elder" || stage === "elder") return findPlaceId(places, ["apartment", "home", "居民", "住宅"]) || findPlaceId(places, ["square", "广场", "公园"]);
+  return findPlaceId(places, ["apartment", "home", "居民", "住宅"]) || findPlaceId(places, ["square", "广场"]);
+}
+
+function normalizeInitialPlace(agent = {}, role = "", stage = "", places = [], issues = []) {
+  const currentId = agent.place || agent.position;
+  const current = places.find(place => place.id === currentId);
+  if (!current) return;
+  const atSchool = placeHas(current, ["school", "学校", "小学", "中学", "校园"]);
+  const atClinic = placeHas(current, ["clinic", "诊所", "医院", "卫生"]);
+  const shouldMoveFromSchool = atSchool && !roleAllowsSchoolMemory(role);
+  const shouldMoveFromClinic = atClinic && role !== "medical" && role !== "elder" && stage !== "elder";
+  const serviceAtClinic = atClinic && role === "service";
+  if (!shouldMoveFromSchool && !shouldMoveFromClinic && !serviceAtClinic) return;
+  const fallback = preferredPlaceForRole(role, stage, places);
+  if (!fallback || fallback === currentId) return;
+  issues.push({
+    type: "role_place_mismatch",
+    agentId: agent.id,
+    severity: "medium",
+    note: `${currentId} -> ${fallback}`
+  });
+  agent.place = fallback;
+  agent.position = fallback;
+}
+
 function runCharacterConsistencyAgent(agents = [], context = {}) {
   const places = Array.isArray(context.places) ? context.places : [];
   const placeIds = new Set(places.map(place => place.id).filter(Boolean));
@@ -918,6 +1021,7 @@ function runCharacterConsistencyAgent(agents = [], context = {}) {
     const age = num(next.ageYears || next.age, 36);
     const stage = ageStageFromYears(age);
     const role = roleKind(next.job);
+    const rebuildGenesis = genesisNeedsRebuild(next, role, stage);
     next.ageYears = clamp(age, 1, 100, 36);
     next.ageStage = stage;
     if (placeIds.size && !placeIds.has(next.place || next.position)) {
@@ -933,6 +1037,7 @@ function runCharacterConsistencyAgent(agents = [], context = {}) {
     if ((role === "medical" || role === "teacher" || role === "security") && stage === "child") {
       issues.push({ type: "age_job_mismatch", agentId: next.id, severity: "medium", note: "professional role is too young" });
     }
+    normalizeInitialPlace(next, role, stage, places, issues);
     const seed = characterSeedForSlot({
       id: next.id,
       index,
@@ -940,6 +1045,10 @@ function runCharacterConsistencyAgent(agents = [], context = {}) {
       ageYears: next.ageYears,
       existing: next
     }, context);
+    if (rebuildGenesis) {
+      issues.push({ type: "genesis_role_mismatch", agentId: next.id, severity: "medium", note: `rebuilt ${next.characterGenesis?.roleKind || next.roleKind || "unknown"} -> ${role}` });
+      clearGenesisFields(next);
+    }
     mergeCharacterSeed(next, seed);
     if (!next.longTermGoals || !Array.isArray(next.longTermGoals) || !next.longTermGoals.length) {
       next.longTermGoals = [{ title: next.goal || seed.goal || "维持稳定生活", progress: 0.2, priority: 0.55, horizon: "month" }];

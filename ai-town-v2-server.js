@@ -27,6 +27,11 @@ const { judgeAction, mergeWorldMasterJudgement, applyWorldMasterPatch } = requir
 const { utilityDecision } = require("./ai-town-utility-scheduler");
 const { ensureDecisionWeights } = require("./ai-town-cognitive-state");
 const {
+  propagateInformation,
+  updateSocialField
+} = require("./ai-town-social-field");
+const { updateSocialFeedback } = require("./ai-town-social-feedback");
+const {
   buildCharacterSeeds,
   mergeCharacterSeeds,
   applyRelationshipIntents,
@@ -43,7 +48,7 @@ const CONFIG_PATH = path.join(ROOT, "ai-town-config.json");
 const SAVE_DIR = path.join(ROOT, "saves");
 const EXPORT_DIR = path.join(SAVE_DIR, "exports");
 const RUNTIME_PROGRESS_PATH = path.join(SAVE_DIR, "runtime-progress.json");
-const AI_TIMEOUT_MS = Number(process.env.AI_TOWN_TIMEOUT_MS || 180000);
+const AI_TIMEOUT_MS = Number(process.env.AI_TOWN_TIMEOUT_MS || 600000);
 const MAX_REQUEST_BODY_BYTES = Number(process.env.AI_TOWN_MAX_REQUEST_BODY_BYTES || 10_000_000);
 const DEFAULT_MAX_CONCURRENT_PER_KEY = Number(process.env.AI_TOWN_MAX_CONCURRENT_PER_KEY || 20);
 const MAX_ACTIONS_HARD_LIMIT = 30;
@@ -66,7 +71,12 @@ const aiConfig = {
   vectorMemoryEnabled: true,
   vectorBaseUrl: "http://localhost:1234/v1",
   vectorModel: "",
-  vectorMaxRecall: 6
+  vectorMaxRecall: 6,
+  cognitiveEngineEnabled: true,
+  cognitiveMemoryInfluence: 0.55,
+  cognitiveBeliefInfluence: 0.6,
+  cognitiveEmotionInfluence: 0.55,
+  cognitiveGoalInfluence: 0.6
 };
 
 const metrics = {
@@ -190,6 +200,7 @@ function completeRuntimeProgress(message = "completed") {
     updatedAt: new Date().toISOString()
   };
   persistRuntimeProgress();
+  if (runtimeProgress.slot) writeSaveRuntimeProgress(runtimeProgress.slot, runtimeProgress);
 }
 
 function failRuntimeProgress(error) {
@@ -203,6 +214,7 @@ function failRuntimeProgress(error) {
     updatedAt: new Date().toISOString()
   };
   persistRuntimeProgress();
+  if (runtimeProgress.slot) writeSaveRuntimeProgress(runtimeProgress.slot, runtimeProgress);
 }
 
 function ensureSaveDir() {
@@ -366,6 +378,12 @@ function clampNumber(value, min, max, fallback) {
   return Math.max(min, Math.min(max, Math.round(n)));
 }
 
+function clampFloat(value, min, max, fallback) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Number(Math.max(min, Math.min(max, n)).toFixed(3));
+}
+
 function loadConfig() {
   try {
     if (!fs.existsSync(CONFIG_PATH)) return;
@@ -395,6 +413,11 @@ function loadConfig() {
     if (typeof saved.vectorBaseUrl === "string" && saved.vectorBaseUrl.trim()) aiConfig.vectorBaseUrl = saved.vectorBaseUrl.trim().replace(/\/$/, "");
     if (typeof saved.vectorModel === "string") aiConfig.vectorModel = saved.vectorModel.trim();
     aiConfig.vectorMaxRecall = clampNumber(saved.vectorMaxRecall, 1, 20, aiConfig.vectorMaxRecall);
+    if (saved.cognitiveEngineEnabled !== undefined) aiConfig.cognitiveEngineEnabled = Boolean(saved.cognitiveEngineEnabled);
+    aiConfig.cognitiveMemoryInfluence = clampFloat(saved.cognitiveMemoryInfluence, 0, 1, aiConfig.cognitiveMemoryInfluence);
+    aiConfig.cognitiveBeliefInfluence = clampFloat(saved.cognitiveBeliefInfluence, 0, 1, aiConfig.cognitiveBeliefInfluence);
+    aiConfig.cognitiveEmotionInfluence = clampFloat(saved.cognitiveEmotionInfluence, 0, 1, aiConfig.cognitiveEmotionInfluence);
+    aiConfig.cognitiveGoalInfluence = clampFloat(saved.cognitiveGoalInfluence, 0, 1, aiConfig.cognitiveGoalInfluence);
   } catch (error) {
     console.warn(`Failed to load config: ${error.message}`);
   }
@@ -421,7 +444,12 @@ function saveConfig() {
     vectorMemoryEnabled: aiConfig.vectorMemoryEnabled,
     vectorBaseUrl: aiConfig.vectorBaseUrl,
     vectorModel: aiConfig.vectorModel,
-    vectorMaxRecall: aiConfig.vectorMaxRecall
+    vectorMaxRecall: aiConfig.vectorMaxRecall,
+    cognitiveEngineEnabled: aiConfig.cognitiveEngineEnabled,
+    cognitiveMemoryInfluence: aiConfig.cognitiveMemoryInfluence,
+    cognitiveBeliefInfluence: aiConfig.cognitiveBeliefInfluence,
+    cognitiveEmotionInfluence: aiConfig.cognitiveEmotionInfluence,
+    cognitiveGoalInfluence: aiConfig.cognitiveGoalInfluence
   }, null, 2), "utf8");
 }
 
@@ -466,6 +494,11 @@ function savePostedConfigToFile(body) {
   if (typeof body.vectorBaseUrl === "string") next.vectorBaseUrl = body.vectorBaseUrl.trim().replace(/\/$/, "");
   if (typeof body.vectorModel === "string") next.vectorModel = body.vectorModel.trim();
   if (body.vectorMaxRecall !== undefined) next.vectorMaxRecall = clampNumber(body.vectorMaxRecall, 1, 20, existing.vectorMaxRecall ?? aiConfig.vectorMaxRecall);
+  if (body.cognitiveEngineEnabled !== undefined) next.cognitiveEngineEnabled = Boolean(body.cognitiveEngineEnabled);
+  if (body.cognitiveMemoryInfluence !== undefined) next.cognitiveMemoryInfluence = clampFloat(body.cognitiveMemoryInfluence, 0, 1, existing.cognitiveMemoryInfluence ?? aiConfig.cognitiveMemoryInfluence);
+  if (body.cognitiveBeliefInfluence !== undefined) next.cognitiveBeliefInfluence = clampFloat(body.cognitiveBeliefInfluence, 0, 1, existing.cognitiveBeliefInfluence ?? aiConfig.cognitiveBeliefInfluence);
+  if (body.cognitiveEmotionInfluence !== undefined) next.cognitiveEmotionInfluence = clampFloat(body.cognitiveEmotionInfluence, 0, 1, existing.cognitiveEmotionInfluence ?? aiConfig.cognitiveEmotionInfluence);
+  if (body.cognitiveGoalInfluence !== undefined) next.cognitiveGoalInfluence = clampFloat(body.cognitiveGoalInfluence, 0, 1, existing.cognitiveGoalInfluence ?? aiConfig.cognitiveGoalInfluence);
   fs.writeFileSync(CONFIG_PATH, JSON.stringify(next, null, 2), "utf8");
 }
 
@@ -495,6 +528,11 @@ function publicConfig() {
     vectorBaseUrl: aiConfig.vectorBaseUrl,
     vectorModel: aiConfig.vectorModel,
     vectorMaxRecall: aiConfig.vectorMaxRecall,
+    cognitiveEngineEnabled: aiConfig.cognitiveEngineEnabled,
+    cognitiveMemoryInfluence: aiConfig.cognitiveMemoryInfluence,
+    cognitiveBeliefInfluence: aiConfig.cognitiveBeliefInfluence,
+    cognitiveEmotionInfluence: aiConfig.cognitiveEmotionInfluence,
+    cognitiveGoalInfluence: aiConfig.cognitiveGoalInfluence,
     configPath: CONFIG_PATH
   };
 }
@@ -1056,7 +1094,8 @@ function writeWorldTables(saveFolder, world = {}) {
       eventLog: Array.isArray(world.eventLog) ? world.eventLog.slice(0, 2000) : [],
       eventImpacts: Array.isArray(world.eventImpacts) ? world.eventImpacts : [],
       informationFlows: Array.isArray(world.informationFlows) ? world.informationFlows : [],
-      socialProcesses: Array.isArray(world.socialProcesses) ? world.socialProcesses : []
+      socialProcesses: Array.isArray(world.socialProcesses) ? world.socialProcesses : [],
+      informationFlowGraph: world.informationFlowGraph || { nodes: [], edges: [] }
     }],
     ["relations", {
       relationshipDynamics: Array.isArray(world.relationshipDynamics) ? world.relationshipDynamics : [],
@@ -1068,6 +1107,11 @@ function writeWorldTables(saveFolder, world = {}) {
       processRuntimeState: world.processRuntimeState || null,
       professionServiceState: world.professionServiceState || null,
       socialPatterns: world.socialPatterns || null,
+      socialField: world.socialField || null,
+      socialDynamicsState: world.socialDynamicsState || null,
+      socialFeedbackState: world.socialFeedbackState || null,
+      agentSocialModifiers: world.agentSocialModifiers || [],
+      socialFieldHistory: world.socialFieldHistory || [],
       dailyAgentState: world.dailyAgentState || null,
       lifeEngineState: world.lifeEngineState || null,
       memoryReflectionState: world.memoryReflectionState || null,
@@ -1122,6 +1166,9 @@ function writeJudgementFiles(saveFolder, world = {}) {
   writeJsonFile(path.join(agDir, "profession-services.json"), world.professionServiceRequests || []);
   writeJsonFile(path.join(agDir, "event-impacts.json"), world.eventImpacts || []);
   writeJsonFile(path.join(agDir, "information-flow.json"), world.informationFlows || world.informationFlow || []);
+  writeJsonFile(path.join(agDir, "social-field.json"), world.socialField || {});
+  writeJsonFile(path.join(agDir, "social-feedback.json"), world.socialFeedbackState || { modifiers: [], impressionCount: 0 });
+  writeJsonFile(path.join(agDir, "information-flow-graph.json"), world.informationFlowGraph || { nodes: [], edges: [] });
   writeJsonFile(path.join(agDir, "relationship-dynamics.json"), world.relationshipDynamics || { pairs: [], notes: [], updatedAt: 0 });
   writeJsonFile(path.join(agDir, "social-processes.json"), world.socialProcesses || []);
   writeJsonFile(path.join(agDir, "personality-profiles.json"), agents.map(agent => ({ id: agent.id, name: agent.name, personalityProfile: agent.personalityProfile || null, identityCore: agent.identityCore || null, identityStability: agent.identityStability || null })));
@@ -1214,6 +1261,7 @@ function readSplitSavePayload(slot) {
     records: events.records || worldState.records || [],
     eventImpacts: events.eventImpacts || worldState.eventImpacts || [],
     informationFlows: events.informationFlows || worldState.informationFlows || worldState.informationFlow || [],
+    informationFlowGraph: events.informationFlowGraph || worldState.informationFlowGraph || { nodes: [], edges: [] },
     socialProcesses: events.socialProcesses || worldState.socialProcesses || [],
     relationshipDynamics: relations.relationshipDynamics || worldState.relationshipDynamics || [],
     households: relations.households || worldState.households || [],
@@ -1222,6 +1270,11 @@ function readSplitSavePayload(slot) {
     processRuntimeState: runtime.processRuntimeState || worldState.processRuntimeState || null,
     professionServiceState: runtime.professionServiceState || worldState.professionServiceState || null,
     socialPatterns: runtime.socialPatterns || worldState.socialPatterns || null,
+    socialField: runtime.socialField || worldState.socialField || null,
+    socialDynamicsState: runtime.socialDynamicsState || worldState.socialDynamicsState || null,
+    socialFeedbackState: runtime.socialFeedbackState || worldState.socialFeedbackState || null,
+    agentSocialModifiers: runtime.agentSocialModifiers || worldState.agentSocialModifiers || [],
+    socialFieldHistory: runtime.socialFieldHistory || worldState.socialFieldHistory || [],
     dailyAgentState: runtime.dailyAgentState || worldState.dailyAgentState || null,
     lifeEngineState: runtime.lifeEngineState || worldState.lifeEngineState || null,
     memoryReflectionState: runtime.memoryReflectionState || worldState.memoryReflectionState || null,
@@ -2167,6 +2220,9 @@ function nodeRuntimeAgentBrief(agent, world = null) {
     personalityProfile: agent.personalityProfile || null,
     decisionWeights: agent.decisionWeights || null,
     cognitiveState: utility?.cognitiveState || agent.cognitiveState || null,
+    desireCandidates: utility?.desireCandidates || agent.desireCandidates || [],
+    activeBeliefs: utility?.activeBeliefs || agent.activeBeliefs || [],
+    thoughtStream: utility?.thoughtStream || agent.thoughtStream || [],
     personalityRuntime: utility?.personalityRuntime || agent.personalityRuntime || null,
     debugDecision: utility?.debugDecision || agent.debugDecision || null,
     emotionCause: Array.isArray(agent.emotionCause) ? agent.emotionCause.slice(0, 8) : [],
@@ -2266,7 +2322,15 @@ function nodeRuntimeCandidates(world) {
           type: action.type,
           targetPlace: action.targetPlace,
           components: action.components
-        }))
+        })),
+        actionEligibility: item.utility.actionEligibility ? {
+          rawCount: item.utility.actionEligibility.rawCount,
+          eligibleCount: item.utility.actionEligibility.eligibleCount,
+          removed: (item.utility.actionEligibility.removed || []).slice(0, 6)
+        } : null,
+        desireCandidates: item.utility.desireCandidates || [],
+        activeBeliefs: item.utility.activeBeliefs || [],
+        thoughtStream: item.utility.thoughtStream || []
       }
     }));
 }
@@ -2305,6 +2369,15 @@ function nodeRuntimeUtilityBrief(utility = {}, extras = {}) {
       vectorModel: item.vectorModel || ""
     })),
     cognitiveState: utility.cognitiveState || null,
+    actionEligibility: utility.actionEligibility ? {
+      rawCount: utility.actionEligibility.rawCount,
+      eligibleCount: utility.actionEligibility.eligibleCount,
+      removed: (utility.actionEligibility.removed || []).slice(0, 8),
+      rule: utility.actionEligibility.rule
+    } : null,
+    desireCandidates: utility.desireCandidates || utility.cognitiveState?.desireCandidates || [],
+    activeBeliefs: utility.activeBeliefs || utility.cognitiveState?.activeBeliefs || [],
+    thoughtStream: utility.thoughtStream || utility.cognitiveState?.thoughtStream || [],
     selectionTemperature: utility.selectionTemperature || null,
     personalityRuntime: utility.personalityRuntime || null,
     decisionTrace: utility.decisionTrace || null,
@@ -2428,6 +2501,9 @@ function nodeRuntimeMergeUtilityDecision(base = {}, provided = null) {
     candidateActions: Array.isArray(provided.candidateActions) && provided.candidateActions.length ? provided.candidateActions : base.candidateActions,
     vectorRecall: Array.isArray(provided.vectorRecall) && provided.vectorRecall.length ? provided.vectorRecall : base.vectorRecall,
     cognitiveState: provided.cognitiveState || base.cognitiveState,
+    desireCandidates: Array.isArray(provided.desireCandidates) && provided.desireCandidates.length ? provided.desireCandidates : base.desireCandidates,
+    activeBeliefs: Array.isArray(provided.activeBeliefs) && provided.activeBeliefs.length ? provided.activeBeliefs : base.activeBeliefs,
+    thoughtStream: Array.isArray(provided.thoughtStream) && provided.thoughtStream.length ? provided.thoughtStream : base.thoughtStream,
     selectionTemperature: provided.selectionTemperature || base.selectionTemperature,
     personalityRuntime: provided.personalityRuntime || base.personalityRuntime,
     decisionTrace: provided.decisionTrace || base.decisionTrace,
@@ -2507,6 +2583,11 @@ function nodeRuntimeWorldContext(world, agents = null) {
     socialPatterns: world.socialPatterns || null,
     eventImpacts: world.eventImpacts || [],
     informationFlows: world.informationFlows || [],
+    informationFlowGraph: world.informationFlowGraph || { nodes: [], edges: [] },
+    socialField: world.socialField || null,
+    socialDynamicsState: world.socialDynamicsState || null,
+    socialFeedbackState: world.socialFeedbackState || null,
+    agentSocialModifiers: Array.isArray(world.agentSocialModifiers) ? world.agentSocialModifiers.slice(0, 80) : [],
     relationshipDynamics: world.relationshipDynamics || [],
     socialProcesses: world.socialProcesses || [],
     simulationLevel: "node-core-v1"
@@ -2580,17 +2661,22 @@ function nodeRuntimeSanitizeInformationFlows(world, items = []) {
   const validIds = nodeRuntimeAgentIdSet(world);
   return (Array.isArray(items) ? items : []).slice(0, 20).map(item => {
     const compact = nodeRuntimeCompactItem(item);
-    const maxKnown = compact.public === true ? 12 : 8;
-    compact.knownBy = nodeRuntimeFilterIds(compact.knownBy, validIds, maxKnown);
-    compact.transmissions = (Array.isArray(compact.transmissions) ? compact.transmissions : [])
+    const critical = ["critical", "death"].includes(String(compact.informationPacket?.informationType || ""));
+    const maxKnown = critical ? 16 : compact.public === true ? 12 : 8;
+    const rawKnownBy = Array.isArray(item.knownBy) ? item.knownBy : compact.knownBy;
+    const rawTransmissions = Array.isArray(item.transmissions) ? item.transmissions : compact.transmissions;
+    compact.knownBy = nodeRuntimeFilterIds(rawKnownBy, validIds, maxKnown);
+    compact.transmissions = (Array.isArray(rawTransmissions) ? rawTransmissions : [])
+      .map(tx => nodeRuntimeCompactItem(tx, 120))
       .filter(tx => validIds.has(String(tx?.from || "")) && validIds.has(String(tx?.to || "")))
       .filter(tx => compact.public === true || String(tx.channel || "") !== "broadcast")
-      .slice(0, 8);
+      .slice(0, critical ? 16 : 8);
     if (!compact.knownBy.length && compact.transmissions.length) {
       compact.knownBy = nodeRuntimeFilterIds(compact.transmissions.flatMap(tx => [tx.from, tx.to]), validIds, maxKnown);
     }
     compact.at = world.clock || 0;
-    compact.source = "node-information-propagation";
+    compact.source = String(compact.source || compact.informationPacket?.source || compact.directKnownBy?.[0] || "");
+    compact.sourceModule = "node-information-propagation";
     return compact;
   }).filter(item => item.fact && item.knownBy.length);
 }
@@ -2792,6 +2878,11 @@ function nodeRuntimeActionPayload(world, agent, candidate = {}) {
     clock: world.clock || 0,
     tickMinutes: Number(world?.config?.virtualMinutesPerPulse || aiConfig.virtualMinutesPerPulse || 30),
     calendar: world.weatherBox?.calendar || {},
+    socialField: world.socialField || null,
+    socialDynamicsState: world.socialDynamicsState || null,
+    socialFeedbackState: world.socialFeedbackState || null,
+    agentSocialModifier: agent.agentSocialModifier || null,
+    socialImpressions: Array.isArray(agent.socialImpressions) ? agent.socialImpressions.slice(0, 8) : [],
     currentLocation: {
       ...place,
       population: {
@@ -2828,6 +2919,10 @@ function nodeRuntimeActionPayload(world, agent, candidate = {}) {
     goalRuntime: utility.goalRuntime || agent.goalRuntime || null,
     emotionCause: Array.isArray(agent.emotionCause) ? agent.emotionCause.slice(0, 12) : [],
     memoryInfluence: utility.memoryInfluence || agent.memoryInfluence || null,
+    cognitiveState: utility.cognitiveState || agent.cognitiveState || null,
+    desireCandidates: utility.desireCandidates || utility.cognitiveState?.desireCandidates || agent.desireCandidates || [],
+    activeBeliefs: utility.activeBeliefs || utility.cognitiveState?.activeBeliefs || agent.activeBeliefs || [],
+    thoughtStream: utility.thoughtStream || utility.cognitiveState?.thoughtStream || agent.thoughtStream || [],
     dailyPlan: Array.isArray(agent.dailyPlan) ? agent.dailyPlan.slice(0, 24) : [],
     currentPlanItem: planItem,
     interruption,
@@ -2838,7 +2933,12 @@ function nodeRuntimeActionPayload(world, agent, candidate = {}) {
       priorityReason: utility.priorityReason,
       selectedAction: utility.selectedAction,
       candidateActions: utility.candidateActions,
+      actionEligibility: utility.actionEligibility,
       memoryInfluence: utility.memoryInfluence,
+      cognitiveState: utility.cognitiveState,
+      desireCandidates: utility.desireCandidates || utility.cognitiveState?.desireCandidates || [],
+      activeBeliefs: utility.activeBeliefs || utility.cognitiveState?.activeBeliefs || [],
+      thoughtStream: utility.thoughtStream || utility.cognitiveState?.thoughtStream || [],
       personalityRuntime: utility.personalityRuntime,
       decisionTrace: utility.decisionTrace,
       debugDecision: utility.debugDecision,
@@ -3386,12 +3486,7 @@ async function nodeRuntimeRunPostAgents(world, actionItems, settlementPatches = 
   );
   world.eventImpacts.unshift(...eventImpacts);
   world.eventImpacts = world.eventImpacts.slice(0, 80);
-  const propagationPayload = { ...nodeRuntimeWorldContext(world), eventImpacts: eventImpacts.length ? eventImpacts : world.eventImpacts.slice(0, 20), informationFlows: world.informationFlows || [] };
-  const [propagation, dynamics, social] = await Promise.all([
-    callAiWithRetry("informationPropagationAgent", propagationPayload),
-    callAiWithRetry("relationshipDynamicsAgent", { ...propagationPayload, informationFlows: world.informationFlows || [] }),
-    callAiWithRetry("socialProcessAgent", { ...propagationPayload, relationshipDynamics: world.relationshipDynamics || [], existingProcesses: world.socialProcesses || [] })
-  ]);
+  const propagation = propagateInformation(world, eventImpacts.length ? eventImpacts : world.eventImpacts.slice(0, 20));
   if (!Array.isArray(world.informationFlows)) world.informationFlows = [];
   const informationFlows = nodeRuntimeDedupBySignature(
     world.informationFlows,
@@ -3400,6 +3495,24 @@ async function nodeRuntimeRunPostAgents(world, actionItems, settlementPatches = 
   );
   world.informationFlows.unshift(...informationFlows);
   world.informationFlows = world.informationFlows.slice(0, 120);
+  const socialField = updateSocialField(world, {
+    eventImpacts,
+    informationFlows,
+    affectedAgents: propagation.affectedAgents || []
+  });
+  updateSocialFeedback(world, { eventImpacts, informationFlows });
+  const propagationPayload = {
+    ...nodeRuntimeWorldContext(world),
+    eventImpacts: eventImpacts.length ? eventImpacts : world.eventImpacts.slice(0, 20),
+    informationFlows: world.informationFlows || [],
+    informationFlowGraph: world.informationFlowGraph || propagation.informationFlowGraph || { nodes: [], edges: [] },
+    socialField,
+    socialDynamicsState: world.socialDynamicsState || null
+  };
+  const [dynamics, social] = await Promise.all([
+    callAiWithRetry("relationshipDynamicsAgent", { ...propagationPayload, informationFlows: world.informationFlows || [] }),
+    callAiWithRetry("socialProcessAgent", { ...propagationPayload, relationshipDynamics: world.relationshipDynamics || [], existingProcesses: world.socialProcesses || [] })
+  ]);
   if (!Array.isArray(world.relationshipDynamics)) world.relationshipDynamics = [];
   const relationItems = dynamics.pairDynamics || dynamics.relationshipDynamics || dynamics.relationUpdates || [];
   world.relationshipDynamics.unshift(...relationItems.slice(0, 20).map(item => ({ ...nodeRuntimeCompactItem(item), at: world.clock || 0, source: "node-relationship-dynamics" })));
@@ -3417,7 +3530,7 @@ async function nodeRuntimeRunPostAgents(world, actionItems, settlementPatches = 
   world.logs ||= [];
   world.logs.unshift({
     title: "Node Post Agents",
-    body: `EventImpact ${eventImpacts.length}/${impact.eventImpacts?.length || 0}; InformationPropagation ${informationFlows.length}/${propagation.informationFlows?.length || 0}; RelationshipDynamics ${relationItems.length}; SocialProcess ${socialProcesses.length}/${processItems.length}`,
+    body: `EventImpact ${eventImpacts.length}/${impact.eventImpacts?.length || 0}; ProbabilisticInformation ${informationFlows.length}/${propagation.informationFlows?.length || 0}; SocialField fear=${socialField.fearLevel} rumor=${socialField.rumorDensity} tension=${socialField.socialTension}; SocialFeedback ${world.socialFeedbackState?.count || 0}; RelationshipDynamics ${relationItems.length}; SocialProcess ${socialProcesses.length}/${processItems.length}`,
     type: "node_runtime",
     time: nodeRuntimeClockText(world),
     clock: world.clock || 0,
@@ -3511,6 +3624,8 @@ async function runNodeRuntimeStep(slot) {
   updateRuntimeProgress("state-migration", { phaseIndex: 2, currentTask: "state migration" });
   migrateWorldPersonalityRuntime(world);
   ensureDailyPlans(world);
+  updateSocialField(world, { informationFlows: world.informationFlows || [], eventImpacts: world.eventImpacts || [] });
+  updateSocialFeedback(world, { informationFlows: world.informationFlows || [], eventImpacts: world.eventImpacts || [] });
   updateRuntimeProgress("life-engine", { phaseIndex: 2, currentTask: "local life actions" });
   const lifeResult = runLifeEngine(world, { maxLocalActions: Number(world?.config?.maxLocalActionsPerTick || 10000) });
   if (lifeResult.localActions.length) {
@@ -3664,6 +3779,15 @@ async function runNodeRuntimeStep(slot) {
   }
   updateRuntimeProgress("node-core", { phaseIndex: 13, currentTask: "advance world clock" });
   const result = nodeStepPayload(payload);
+  const resultWorldAfterCore = result.payload?.world || result.payload;
+  updateSocialField(resultWorldAfterCore, {
+    informationFlows: resultWorldAfterCore.informationFlows || [],
+    eventImpacts: resultWorldAfterCore.eventImpacts || []
+  });
+  updateSocialFeedback(resultWorldAfterCore, {
+    informationFlows: resultWorldAfterCore.informationFlows || [],
+    eventImpacts: resultWorldAfterCore.eventImpacts || []
+  });
   if (policy.runDaily && nodeRuntimeIsMidnightCross(beforeClock, result.payload?.world?.clock || 0)) {
     updateRuntimeProgress("daily-agents", { phaseIndex: 13, currentTask: "daily agents" });
     await nodeRuntimeRunDailyAgents(result.payload.world);
@@ -4831,6 +4955,14 @@ function userPrompt(task, payload) {
     return JSON.stringify({
       instruction: "返回 JSON：{\"action\":{\"type\":\"work|move|observe|talk|react|wait|plan\",\"internalState\":{\"desire\":\"\",\"thought\":\"\",\"worry\":\"\",\"expectation\":\"\",\"hesitation\":\"\",\"preference\":\"\",\"interpretation\":\"\"},\"intent\":{\"want\":\"\",\"reason\":\"\",\"emotion\":\"\"},\"summary\":\"\",\"newLocation\":\"\",\"mood\":\"\",\"emotionDelta\":{\"happy\":0,\"anxious\":0,\"angry\":0,\"sad\":0,\"tired\":0,\"lonely\":0,\"hopeful\":0,\"calm\":0,\"curious\":0},\"currentTask\":\"\",\"actionSteps\":[{\"title\":\"\",\"status\":\"todo|doing|done|blocked\",\"reason\":\"\"}],\"processUpdate\":{\"goal\":\"\",\"stage\":\"prepare|move|wait|execute|feedback|blocked\",\"progressDelta\":30,\"currentStep\":\"\",\"completedSteps\":[\"\"],\"blockedBy\":\"\",\"finished\":false},\"memory\":{\"layer\":\"short|long|emotional|secret|rumor\",\"text\":\"\",\"importance\":3},\"relationChanges\":[{\"to\":\"\",\"delta\":0,\"reason\":\"\"}],\"newEvents\":[{\"title\":\"\",\"stage\":\"seed|active\",\"summary\":\"\",\"knownBy\":[\"\"]}]}}。",
       constraints: [
+        "V3.2 CognitiveState: payload.cognitiveState is the only current cognitive field. Use its selfPressure/socialNeed/safetyConcern/curiosityDrive/responsibilityDrive/comfortNeed/emotionalLoad/beliefActivation as soft subjective cues.",
+        "V3.2 desireCandidates are wishes, not facts and not completed actions. Choose or rewrite one candidateAction only after checking currentLocation, dailyPlan, visibleKnowledge, context judgement and world constraints.",
+        "V3.3 socialField/socialDynamicsState only describes ambient social pressure. It may affect caution, curiosity, avoidance, or willingness to contact people, but it is not proof that this character knows a specific event unless visibleKnowledge/eventQueue/knownFacts contains it.",
+        "V3.3.1 agentSocialModifier/socialImpressions only describe this character's social pressure impression. They can modulate tone, caution, curiosity and help-seeking, but cannot create facts or override visibleKnowledge.",
+        "V3.2 activeBeliefs and activeMemories are activated personal cues. They can explain intent.reason, but they cannot create new world facts, other people's thoughts, or knowledge the character has not received.",
+        "V3.2 thoughtStream is transient cognition, not long-term memory. Do not copy it into memory unless the settled action creates a meaningful experience.",
+        "V3.2.1 ActionEligibility is hard filtering. If an action is listed in actionEligibility.removed, do not choose or recreate it; only choose from payload.candidateActions.",
+        "Do not invent psychological causes outside payload.cognitiveState, payload.desireCandidates, payload.activeBeliefs, previousInternalState, visibleKnowledge, selfModel, emotionCause and memoryContext.",
         "行动必须很小且可信",
         "必须先写 internalState，再写 intent，再写 summary/currentTask；角色不是 needs -> action 的执行器，而是 needs/environment -> internalThought -> desire -> intent -> candidateAction",
         "必须在 candidateActions 中选择或小幅改写一个候选行为；candidateActions 已按 Utility 评分排序，包含 NeedDrive、MemoryBias、PersonalityBias、EmotionBias、SocialBias、ContextFit、VectorBonus、Cost、Risk",
@@ -6126,7 +6258,7 @@ async function setupRunCharacterSeedAgent(slots = [], context = {}) {
   if (!context.aiSetupEnabled || !aiRouter || !localSeeds.length) {
     return { seeds: localSeeds, logs: [{ title: "CharacterSeedAgent", body: `local seeds ${localSeeds.length}` }] };
   }
-  const batchSize = 10;
+  const batchSize = 3;
   const batches = [];
   for (let i = 0; i < slots.length; i += batchSize) {
     batches.push({
@@ -6315,7 +6447,7 @@ async function runNodeSetupCreate(body = {}) {
           habitMemory: seed.habitMemory || [],
           preferenceMemory: seed.preferenceMemory || []
         }))
-      }, { once: true });
+      });
       seeds = setupNormalizeSeeds(setupApplyCharacterConsistencyFixes(seeds, aiCharacterConsistency?.fixAgents || [], places), targetAgentCount, places);
     } catch (error) {
       pushCallLog({

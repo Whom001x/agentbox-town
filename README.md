@@ -10,7 +10,9 @@ AgentBox Town 是一个多 Agent 虚拟小镇模拟器。它把多个 AI 角色�
 
 ## 当前版本
 
-**V3.1.5 Character Genesis + V3.1 Identity Evolution Engine + V3.0 Cognitive Decision Engine**
+**V3.3.1 Social Feedback & Stability + V3.3 Social Dynamics + V3.2 Cognitive State + V3.1.5 Character Genesis**
+
+V3.3.1 增加社会反馈稳定层：事件会通过信息传播改变社会场，再由 `SocialFeedback` 调制每个角色的认知状态和行动评分。社会影响不会直接覆盖人格或事实记忆，而是经过 `socialSensitivity` 和 `tanh` 稳定计算后，影响谨慎、好奇、求助、回避和责任倾向。
 
 V3.1.5 升级了建城阶段：新角色出生时会生成独特的人格基础、`lifeHistorySeed`、认知倾向、行为倾向、出生信念、习惯、偏好、重要经历、自我模型、目标运行态和关系动机。这些字段会写入存档，并从第一天开始参与后续 V3 Cognitive Decision Engine 和 V3.1 Identity Evolution。
 

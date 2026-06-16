@@ -5,6 +5,8 @@ const {
   normalizeGoalRuntime,
   structuredMemoryForAgent
 } = require("./ai-town-memory-stream");
+const { socialFieldInfluenceForAgent } = require("./ai-town-social-field");
+const { getSocialModifier } = require("./ai-town-social-feedback");
 
 function num(value, fallback = 0) {
   const number = Number(value);
@@ -269,10 +271,280 @@ function memoryToCognition(agent = {}, world = {}) {
   return { driveVector, biasVector, actionModifiers, evidence };
 }
 
+function config01(value, fallback = 0.55) {
+  if (value === undefined || value === null || value === "") return fallback;
+  return scale01(value, fallback);
+}
+
+function cognitiveEngineConfig(world = {}) {
+  const cfg = world?.config && typeof world.config === "object" ? world.config : {};
+  return {
+    enabled: cfg.cognitiveEngineEnabled !== false,
+    memoryInfluence: config01(cfg.cognitiveMemoryInfluence, 0.55),
+    beliefInfluence: config01(cfg.cognitiveBeliefInfluence, 0.6),
+    emotionInfluence: config01(cfg.cognitiveEmotionInfluence, 0.55),
+    goalInfluence: config01(cfg.cognitiveGoalInfluence, 0.6),
+    personalityInfluence: config01(cfg.cognitivePersonalityInfluence, 0.55)
+  };
+}
+
+function weightedInfluence(parts = []) {
+  let weighted = 0;
+  let total = 0;
+  parts.forEach(part => {
+    const weight = clamp(part?.weight, 0, 3, 0);
+    if (!weight) return;
+    weighted += clamp(part.value, 0, 1, 0) * weight;
+    total += weight;
+  });
+  return Number(clamp(total ? weighted / total : 0, 0, 1, 0).toFixed(3));
+}
+
+function tokenize(text = "") {
+  return (String(text || "").toLowerCase().match(/[a-z0-9_]+|[\u4e00-\u9fa5]{1,2}/g) || [])
+    .filter(token => token.length > 1)
+    .slice(0, 80);
+}
+
+function tokenRelevance(text = "", references = []) {
+  const tokens = tokenize(references.join(" "));
+  if (!tokens.length) return 0;
+  const source = String(text || "").toLowerCase();
+  const unique = [...new Set(tokens)];
+  const hits = unique.filter(token => source.includes(token)).length;
+  return clamp(hits / Math.max(3, unique.length), 0, 1, 0);
+}
+
+function emotionKeywords(emotions = {}, emotionCause = []) {
+  const pairs = [
+    ["tired", ["tired", "fatigue", "rest", "sleep", "累", "疲", "休息"]],
+    ["anxious", ["anxious", "risk", "safe", "worry", "焦虑", "担心", "安全"]],
+    ["angry", ["angry", "conflict", "argument", "愤怒", "争执", "冲突"]],
+    ["sad", ["sad", "lonely", "loss", "难过", "孤独", "失落"]],
+    ["lonely", ["lonely", "friend", "family", "孤独", "朋友", "家人"]],
+    ["curious", ["curious", "observe", "novel", "好奇", "观察", "新鲜"]],
+    ["hopeful", ["hope", "goal", "future", "希望", "目标", "以后"]]
+  ];
+  const words = [];
+  pairs.forEach(([key, items]) => {
+    if (scale01(emotions[key], 0) >= 0.45) words.push(...items);
+  });
+  emotionCause.slice(0, 6).forEach(item => {
+    words.push(item.emotion || "");
+    words.push(...(Array.isArray(item.causes) ? item.causes : []));
+  });
+  return words.filter(Boolean);
+}
+
+function flattenStructuredMemory(agent = {}, limit = 32) {
+  const structured = structuredMemoryForAgent(agent, limit);
+  const rows = [];
+  Object.entries(structured).forEach(([type, items]) => {
+    (Array.isArray(items) ? items : []).forEach(item => {
+      const text = item.text || item.meaning || item.belief || item.habit || item.preference || "";
+      if (!text) return;
+      rows.push({
+        ...item,
+        type,
+        text: String(text),
+        meaning: item.meaning || String(text),
+        importance: item.importance,
+        strength: item.strength,
+        at: item.at || item.createdAt || 0,
+        lastSeenAt: item.lastSeenAt || item.lastConfirmed || item.at || 0
+      });
+    });
+  });
+  const seen = new Set();
+  return rows.filter(item => {
+    const key = `${item.type}:${item.text}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function activateMemories(world = {}, agent = {}, context = {}, driveVector = {}, emotions = {}, goalRuntime = {}) {
+  const clock = num(world.clock, 0);
+  const emotionCause = Array.isArray(agent.emotionCause) ? agent.emotionCause : [];
+  const goalTexts = (goalRuntime.goals || []).map(goal => `${goal.name || ""} ${goal.title || ""} ${(goal.blockedBy || []).join(" ")}`);
+  const contextRefs = [
+    context.eventText || "",
+    context.summary || "",
+    context.plan?.title || "",
+    context.plan?.localAction || "",
+    context.interruption?.type || "",
+    context.interruption?.reason || "",
+    agent.currentTask || "",
+    Object.entries(driveVector).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([key]) => key).join(" ")
+  ];
+  const emotionRefs = emotionKeywords(emotions, emotionCause);
+  const rows = flattenStructuredMemory(agent, 36).map(item => {
+    const text = `${item.text || ""} ${item.meaning || ""} ${(item.tags || []).join(" ")}`;
+    const relevance = tokenRelevance(text, contextRefs);
+    const emotionMatch = tokenRelevance(text, emotionRefs);
+    const goalMatch = tokenRelevance(text, goalTexts);
+    const ageDays = Math.max(0, Math.floor((clock - num(item.lastSeenAt || item.at, clock)) / 1440));
+    const recency = Math.exp(-ageDays / (["habit", "belief", "preference"].includes(item.type) ? 120 : 45));
+    const importance = clamp(num(item.importance, 3) / 5, 0, 1, 0.6);
+    const strength = scale01(item.strength, 0.55);
+    const activation = weightedInfluence([
+      { value: relevance, weight: 0.38 },
+      { value: emotionMatch, weight: 0.22 },
+      { value: goalMatch, weight: 0.22 },
+      { value: recency, weight: 0.1 },
+      { value: importance * strength, weight: 0.28 }
+    ]);
+    return {
+      id: item.id || "",
+      type: item.type || "episodic",
+      text: String(item.meaning || item.text || "").slice(0, 180),
+      activation,
+      relevance: Number(relevance.toFixed(3)),
+      emotionMatch: Number(emotionMatch.toFixed(3)),
+      goalMatch: Number(goalMatch.toFixed(3)),
+      recency: Number(clamp(recency, 0, 1, 0).toFixed(3)),
+      importance: Number(importance.toFixed(3)),
+      factAuthority: false,
+      rule: "Activated memory is a behavioral cue, not a world fact."
+    };
+  });
+  return rows
+    .filter(item => item.activation >= 0.12 || ["belief", "habit"].includes(item.type))
+    .sort((a, b) => b.activation - a.activation)
+    .slice(0, 8);
+}
+
+function activeBeliefsFromMemories(agent = {}, activeMemories = []) {
+  const direct = Array.isArray(agent.beliefMemory) ? agent.beliefMemory : [];
+  const activated = activeMemories.filter(item => item.type === "belief");
+  const rows = [
+    ...activated.map(item => ({
+      id: item.id || "",
+      belief: item.text || "",
+      activation: item.activation,
+      strength: item.importance || 0.5,
+      source: "memory-activation"
+    })),
+    ...direct.map(item => ({
+      id: item.id || "",
+      belief: item.belief || item.text || item.meaning || "",
+      activation: clamp(scale01(item.strength, 0.5) * 0.72 + scale01(item.importance, 0.45) * 0.28, 0, 1, 0.5),
+      strength: scale01(item.strength, 0.5),
+      source: item.source || "beliefMemory"
+    }))
+  ].filter(item => item.belief);
+  const seen = new Set();
+  return rows
+    .filter(item => {
+      const key = item.belief;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .sort((a, b) => b.activation - a.activation)
+    .slice(0, 6)
+    .map(item => ({
+      ...item,
+      belief: String(item.belief).slice(0, 160),
+      activation: Number(clamp(item.activation, 0, 1, 0).toFixed(3)),
+      strength: Number(clamp(item.strength, 0, 1, 0.5).toFixed(3))
+    }));
+}
+
+function activeGoalsFromRuntime(goalRuntime = {}, context = {}) {
+  const refs = [context.eventText || "", context.summary || "", context.plan?.title || "", context.interruption?.type || "", context.interruption?.reason || ""];
+  return (goalRuntime.goals || []).slice(0, 8).map(goal => {
+    const text = `${goal.name || ""} ${goal.title || ""} ${(goal.blockedBy || []).join(" ")}`;
+    const priority = clamp(num(goal.priority, 0.5), 0, 1, 0.5);
+    const frustration = clamp(num(goal.frustration, 0), 0, 1, 0);
+    const progress = clamp(num(goal.progress, 0), 0, 1, 0);
+    const relevance = tokenRelevance(text, refs);
+    const activation = weightedInfluence([
+      { value: priority, weight: 0.42 },
+      { value: frustration, weight: 0.26 },
+      { value: 1 - progress, weight: 0.16 },
+      { value: relevance, weight: 0.2 }
+    ]);
+    return {
+      id: goal.id || "",
+      name: String(goal.name || goal.title || "").slice(0, 120),
+      activation,
+      priority: Number(priority.toFixed(3)),
+      frustration: Number(frustration.toFixed(3)),
+      progress: Number(progress.toFixed(3))
+    };
+  }).filter(goal => goal.name).sort((a, b) => b.activation - a.activation).slice(0, 5);
+}
+
+function pushDesire(list, id, desire, intensity, source, actionHints = []) {
+  const value = clamp(intensity, 0, 1, 0);
+  if (value < 0.08) return;
+  list.push({
+    id,
+    desire,
+    intensity: Number(value.toFixed(3)),
+    source,
+    actionHints: actionHints.slice(0, 4),
+    rule: "Desire is not an action; settlement must still pass world constraints."
+  });
+}
+
+function desireCandidatesFromState(state = {}, driveVector = {}, context = {}) {
+  const desires = [];
+  pushDesire(desires, "keep_duty", "finish_or_continue_current_responsibility", state.responsibilityDrive * 0.75 + (context.plan ? 0.16 : 0), "responsibilityDrive", ["follow_plan", "continue_process"]);
+  pushDesire(desires, "recover_comfort", "return_to_a_more_comfortable_or_restful_state", state.comfortNeed * 0.78 + state.emotionalLoad * 0.12, "comfortNeed", ["rest", "return_home", "think_and_plan"]);
+  pushDesire(desires, "reduce_risk", "avoid_or_check_current_risk", state.safetyConcern * 0.85, "safetyConcern", ["seek_safety", "observe_environment", "return_home"]);
+  pushDesire(desires, "seek_support", "contact_a_familiar_person_or_ask_for_help", state.socialNeed * 0.7 + state.safetyConcern * 0.12, "socialNeed", ["contact_familiar", "ask_guardian"]);
+  pushDesire(desires, "observe_or_explore", "observe_the_environment_or_explore_carefully", state.curiosityDrive * 0.78, "curiosityDrive", ["observe_environment", "walk_nearby", "record_observation"]);
+  pushDesire(desires, "eat", "find_a_reasonable_food_opportunity", clamp(num(driveVector.food, 0) / 1.1, 0, 1, 0), "body_attention", ["eat_or_buy_food"]);
+  pushDesire(desires, "seek_care", "handle_body_or_health_concern", clamp(num(driveVector.care, 0) / 1.05, 0, 1, 0), "health_attention", ["seek_care", "rest"]);
+  pushDesire(desires, "plan", "pause_and_adjust_next_step", state.selfPressure * 0.45 + state.emotionalLoad * 0.2, "selfPressure", ["think_and_plan", "observe_environment"]);
+  return desires.sort((a, b) => b.intensity - a.intensity).slice(0, 8);
+}
+
+function thoughtCandidatesFromState(state = {}, activeMemories = [], activeBeliefs = []) {
+  const thoughts = [];
+  const push = (trigger, thought, influence, intensity) => {
+    const value = clamp(intensity, 0, 1, 0);
+    if (value < 0.12) return;
+    thoughts.push({ trigger, thought, influence, intensity: Number(value.toFixed(3)), factAuthority: false });
+  };
+  push("body_state", "body state pulls attention toward recovery", "comfortNeed", state.comfortNeed);
+  push("responsibility", "current responsibility remains mentally active", "responsibilityDrive", state.responsibilityDrive);
+  push("risk_signal", "possible risk narrows choices", "safetyConcern", state.safetyConcern);
+  push("social_signal", "relationship needs become more noticeable", "socialNeed", state.socialNeed);
+  push("curiosity", "unusual details become easier to notice", "curiosityDrive", state.curiosityDrive);
+  const memory = activeMemories[0];
+  if (memory) push("memory_activation", `similar memory activated: ${memory.text}`, `memoryActivation+${memory.activation}`, memory.activation);
+  const belief = activeBeliefs[0];
+  if (belief) push("belief_activation", `active belief: ${belief.belief}`, `beliefActivation+${belief.activation}`, belief.activation);
+  return thoughts.sort((a, b) => b.intensity - a.intensity).slice(0, 8);
+}
+
+function appendThoughtStream(agent = {}, world = {}, thoughts = []) {
+  if (!agent || !Array.isArray(thoughts) || !thoughts.length) return [];
+  agent.thoughtStream = Array.isArray(agent.thoughtStream) ? agent.thoughtStream : [];
+  const clock = num(world.clock, 0);
+  const rows = thoughts.slice(0, 5).map(item => ({
+    at: clock,
+    timestamp: clock,
+    trigger: item.trigger,
+    thought: item.thought,
+    influence: item.influence,
+    intensity: item.intensity,
+    factAuthority: false
+  }));
+  agent.thoughtStream.unshift(...rows);
+  agent.thoughtStream = agent.thoughtStream.slice(0, 30);
+  return rows;
+}
+
 function cognitiveState(world = {}, agent = {}, context = {}) {
   const needs = agent.needs || {};
   const emotions = agent.emotionVector || agent.emotions || {};
   const emotionCause = Array.isArray(agent.emotionCause) ? agent.emotionCause : [];
+  const config = cognitiveEngineConfig(world);
   const selfModel = ensureSelfModel(agent);
   const goalRuntime = normalizeGoalRuntime(agent, world);
   const decisionWeights = ensureDecisionWeights(agent);
@@ -379,6 +651,45 @@ function cognitiveState(world = {}, agent = {}, context = {}) {
     biasVector.riskTolerance = clamp(biasVector.riskTolerance - 0.08, 0, 1, biasVector.riskTolerance);
   }
 
+  const socialFieldInfluence = socialFieldInfluenceForAgent(world, agent);
+  add(perceptionWeights, "socialField", socialFieldInfluence.socialField?.informationPressure || 0);
+  add(perceptionWeights, "threat", socialFieldInfluence.safetyNeed * 0.42);
+  add(perceptionWeights, "novelty", socialFieldInfluence.curiosity * 0.28);
+  add(driveVector, "safety", socialFieldInfluence.safetyNeed * 0.38);
+  add(driveVector, "observe", socialFieldInfluence.curiosity * 0.32);
+  add(driveVector, "curiosity", socialFieldInfluence.curiosity * 0.22);
+  add(driveVector, "comfort", socialFieldInfluence.comfortNeed * 0.26);
+  add(biasVector, "avoidance", socialFieldInfluence.avoidance * 0.18);
+  add(biasVector, "socialSeeking", socialFieldInfluence.socialActions * 0.16);
+  biasVector.riskTolerance = Number(clamp(
+    num(biasVector.riskTolerance, 0.5) - socialFieldInfluence.safetyNeed * 0.1 - socialFieldInfluence.avoidance * 0.08,
+    0.02,
+    0.98,
+    0.5
+  ).toFixed(3));
+  actionModifiers.socialField = socialFieldInfluence.actionBias || {};
+
+  const socialModifier = getSocialModifier(world, agent);
+  const socialEffect = num(socialModifier.regulatedSocialEffect, 0);
+  add(perceptionWeights, "socialFeedback", Math.abs(socialEffect));
+  add(perceptionWeights, "threat", Math.max(0, socialModifier.fearModifier) * 0.32 + Math.max(0, socialModifier.avoidanceModifier) * 0.22);
+  add(perceptionWeights, "novelty", Math.max(0, socialModifier.curiosityModifier) * 0.24);
+  add(driveVector, "safety", Math.max(0, socialModifier.fearModifier) * 0.28 + Math.max(0, socialModifier.avoidanceModifier) * 0.18);
+  add(driveVector, "observe", Math.max(0, socialModifier.curiosityModifier) * 0.24);
+  add(driveVector, "curiosity", Math.max(0, socialModifier.curiosityModifier) * 0.2);
+  add(driveVector, "support", Math.max(0, socialModifier.socialNeedModifier) * 0.2);
+  add(driveVector, "social", socialModifier.socialNeedModifier * 0.16);
+  add(driveVector, "duty", Math.max(0, socialModifier.responsibilityModifier) * 0.18);
+  add(biasVector, "avoidance", Math.max(0, socialModifier.avoidanceModifier) * 0.24);
+  add(biasVector, "socialSeeking", socialModifier.socialNeedModifier * 0.18);
+  biasVector.riskTolerance = Number(clamp(
+    num(biasVector.riskTolerance, 0.5) - Math.max(0, socialModifier.fearModifier) * 0.08 - Math.max(0, socialModifier.avoidanceModifier) * 0.1,
+    0.02,
+    0.98,
+    0.5
+  ).toFixed(3));
+  actionModifiers.socialFeedback = socialModifier;
+
   const rel = relationshipSignals(agent);
   if (rel.count) {
     add(driveVector, "social", clamp(rel.intimacy / 100, 0, 1, 0) * 0.18);
@@ -408,19 +719,111 @@ function cognitiveState(world = {}, agent = {}, context = {}) {
     if (includesAny(causeText, ["friend", "family", "help", "家人", "朋友"])) add(driveVector, "support", intensity * 0.16);
   });
 
+  const activeMemories = config.enabled ? activateMemories(world, agent, context, driveVector, emotions, goalRuntime) : [];
+  const activeBeliefs = config.enabled ? activeBeliefsFromMemories(agent, activeMemories) : [];
+  const activeGoals = config.enabled ? activeGoalsFromRuntime(goalRuntime, context) : [];
+  const beliefActivationRaw = activeBeliefs.length ? activeBeliefs.reduce((sum, item) => sum + item.activation, 0) / activeBeliefs.length : 0;
+  const memoryActivation = activeMemories.length ? activeMemories.reduce((sum, item) => sum + item.activation, 0) / activeMemories.length : 0;
+  const goalActivation = activeGoals.length ? activeGoals[0].activation : 0;
+  const personalityInfluence = weightedInfluence([
+    { value: scale01(agent.cognitiveProfile?.ambition, 0.5), weight: 0.25 },
+    { value: scale01(agent.cognitiveProfile?.routinePreference, 0.5), weight: 0.18 },
+    { value: scale01(agent.cognitiveProfile?.empathy, 0.5), weight: 0.15 },
+    { value: 1 - scale01(agent.cognitiveProfile?.conflictAvoidance, 0.5), weight: 0.12 }
+  ]);
+  const emotionLoad = weightedInfluence([
+    { value: scale01(emotions.anxious, 0), weight: 0.25 },
+    { value: scale01(emotions.angry, 0), weight: 0.18 },
+    { value: scale01(emotions.sad, 0), weight: 0.18 },
+    { value: scale01(emotions.tired, 0), weight: 0.2 },
+    { value: scale01(emotions.lonely, 0), weight: 0.12 },
+    { value: emotionCause.slice(0, 5).reduce((max, item) => Math.max(max, scale01(item.intensity, 0)), 0), weight: 0.18 }
+  ]);
+  const cognitiveScalars = {
+    selfPressure: weightedInfluence([
+      { value: stressLow, weight: 0.22 },
+      { value: responsibilityLow, weight: 0.2 },
+      { value: goalActivation, weight: config.goalInfluence },
+      { value: beliefActivationRaw, weight: config.beliefInfluence * 0.35 },
+      { value: emotionLoad, weight: config.emotionInfluence * 0.25 },
+      { value: personalityInfluence, weight: config.personalityInfluence * 0.2 },
+      { value: Math.abs(socialEffect), weight: 0.12 }
+    ]),
+    socialNeed: weightedInfluence([
+      { value: socialLow, weight: 0.35 },
+      { value: scale01(emotions.lonely, 0), weight: config.emotionInfluence * 0.28 },
+      { value: clamp(num(driveVector.social, 0) / 1.5, 0, 1, 0), weight: 0.22 },
+      { value: clamp(rel.count ? rel.intimacy / 100 : 0, 0, 1, 0), weight: config.beliefInfluence * 0.14 },
+      { value: clamp((socialModifier.socialNeedModifier + 1) / 2, 0, 1, 0.5), weight: 0.12 }
+    ]),
+    safetyConcern: weightedInfluence([
+      { value: safetyLow, weight: 0.35 },
+      { value: healthLow, weight: 0.18 },
+      { value: clamp(num(perceptionWeights.threat, 0) / 1.5, 0, 1, 0), weight: 0.22 },
+      { value: 1 - clamp(num(biasVector.riskTolerance, 0.5), 0, 1, 0.5), weight: config.personalityInfluence * 0.24 },
+      { value: scale01(emotions.anxious, 0), weight: config.emotionInfluence * 0.16 },
+      { value: clamp(Math.max(0, socialModifier.fearModifier) * 0.62 + Math.max(0, socialModifier.avoidanceModifier) * 0.38, 0, 1, 0), weight: 0.14 }
+    ]),
+    curiosityDrive: weightedInfluence([
+      { value: clamp(num(driveVector.curiosity, 0) / 1.4, 0, 1, 0), weight: 0.32 },
+      { value: clamp(num(driveVector.observe, 0) / 1.4, 0, 1, 0), weight: 0.22 },
+      { value: scale01(agent.cognitiveProfile?.curiosity, 0.5), weight: config.personalityInfluence * 0.22 },
+      { value: scale01(emotions.curious, 0), weight: config.emotionInfluence * 0.16 },
+      { value: clamp(num(perceptionWeights.novelty, 0), 0, 1, 0), weight: 0.18 },
+      { value: clamp((socialModifier.curiosityModifier + 1) / 2, 0, 1, 0.5), weight: 0.12 }
+    ]),
+    responsibilityDrive: weightedInfluence([
+      { value: responsibilityLow, weight: 0.25 },
+      { value: clamp(num(driveVector.duty, 0) / 1.5, 0, 1, 0), weight: 0.25 },
+      { value: goalActivation, weight: config.goalInfluence * 0.28 },
+      { value: clamp(num(biasVector.goalPersistence, 0.5), 0, 1, 0.5), weight: config.personalityInfluence * 0.22 },
+      { value: beliefActivationRaw, weight: config.beliefInfluence * 0.18 },
+      { value: clamp((socialModifier.responsibilityModifier + 1) / 2, 0, 1, 0.5), weight: 0.1 }
+    ]),
+    comfortNeed: weightedInfluence([
+      { value: comfortLow, weight: 0.28 },
+      { value: hungerLow, weight: 0.16 },
+      { value: hygieneLow, weight: 0.12 },
+      { value: healthLow, weight: 0.16 },
+      { value: clamp(num(driveVector.comfort, 0) / 1.5, 0, 1, 0), weight: 0.22 },
+      { value: scale01(emotions.tired, 0), weight: config.emotionInfluence * 0.2 },
+      { value: memoryActivation, weight: config.memoryInfluence * 0.14 }
+    ]),
+    emotionalLoad: emotionLoad,
+    beliefActivation: Number(clamp(beliefActivationRaw, 0, 1, 0).toFixed(3))
+  };
+  const desireCandidates = config.enabled ? desireCandidatesFromState(cognitiveScalars, driveVector, context) : [];
+  const thoughtCandidates = config.enabled ? thoughtCandidatesFromState(cognitiveScalars, activeMemories, activeBeliefs) : [];
+  const thoughtStream = appendThoughtStream(agent, world, thoughtCandidates);
+
   const result = {
     agentId: agent.id || "",
+    timestamp: num(world.clock, 0),
+    version: "3.2",
+    enabled: config.enabled,
     decisionWeights,
+    influenceWeights: config,
+    ...cognitiveScalars,
+    activeGoals,
+    activeMemories,
+    activeBeliefs,
+    desireCandidates,
+    thoughtCandidates,
+    thoughtStream,
     perceptionWeights,
     driveVector,
     biasVector,
     actionModifiers,
+    socialFieldInfluence,
+    socialModifier,
     memoryEvidence: memorySignals.evidence,
     relationshipSignals: rel,
     cognitiveProfile: profileSignals,
     source: "cognitive-state-v3"
   };
   agent.cognitiveState = result;
+  agent.desireCandidates = desireCandidates;
+  agent.activeBeliefs = activeBeliefs;
   return result;
 }
 
@@ -439,7 +842,10 @@ const actionVectorTemplates = {
   return_home: { home: 0.92, safety: 0.68, comfort: 0.52, order: 0.38, risk: 0.08, cost: 0.16, time: 0.22 },
   follow_stranger: { curiosity: 0.86, observe: 0.72, duty: 0.38, novelty: 0.65, risk: 0.75, cost: 0.28, time: 0.38, availability: 0.45 },
   ask_guardian: { support: 1.05, social: 0.72, safety: 0.52, risk: 0.08, cost: 0.06, time: 0.14, availability: 1 },
-  record_observation: { observe: 0.9, novelty: 0.58, curiosity: 0.62, comfort: 0.12, risk: 0.18, cost: 0.12, time: 0.22 }
+  record_observation: { observe: 0.9, novelty: 0.58, curiosity: 0.62, comfort: 0.12, risk: 0.18, cost: 0.12, time: 0.22 },
+  provide_care: { care: 0.82, support: 0.48, duty: 0.7, social: 0.22, risk: 0.22, cost: 0.24, time: 0.38, availability: 0.75 },
+  serve_customers: { duty: 0.76, social: 0.48, order: 0.36, comfort: 0.12, risk: 0.12, cost: 0.18, time: 0.42, availability: 0.72 },
+  check_inventory: { duty: 0.58, order: 0.74, comfort: 0.18, risk: 0.06, cost: 0.16, time: 0.28, availability: 0.75 }
 };
 
 function actionVector(action = {}) {
@@ -505,6 +911,11 @@ function cognitiveTemperature(agent = {}, cognitive = {}) {
 module.exports = {
   ensureDecisionWeights,
   defaultDecisionWeights,
+  cognitiveEngineConfig,
+  weightedInfluence,
+  activateMemories,
+  activeBeliefsFromMemories,
+  desireCandidatesFromState,
   cognitiveState,
   actionVector,
   actionMatch,

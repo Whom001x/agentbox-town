@@ -10,7 +10,9 @@ The goal is not only to generate stories. The project aims to simulate a small s
 
 ## Current Version
 
-**V3.1.5 Character Genesis + V3.1 Identity Evolution Engine + V3.0 Cognitive Decision Engine**
+**V3.3.1 Social Feedback & Stability + V3.3 Social Dynamics + V3.2 Cognitive State + V3.1.5 Character Genesis**
+
+V3.3.1 adds a social feedback stability layer. Events propagate through the information system, change the social field, and then modulate each resident's cognitive state and action scoring through `SocialFeedback`. Social influence does not overwrite personality or factual memory; it is regulated by `socialSensitivity` and `tanh` before affecting caution, curiosity, help-seeking, avoidance, and responsibility.
 
 V3.1.5 upgrades the setup stage. New residents now start with distinct identity foundations, `lifeHistorySeed`, cognitive profiles, behavior tendencies, birth beliefs, habits, preferences, meaningful episodic memory, self model, goal runtime, and relationship intent. These fields are saved and feed into the V3 Cognitive Decision Engine and V3.1 Identity Evolution from day one.
 

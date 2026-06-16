@@ -19,6 +19,8 @@ const {
   realityConstraint,
   cognitiveTemperature
 } = require("./ai-town-cognitive-state");
+const { socialFieldBiasForAction } = require("./ai-town-social-field");
+const { socialFeedbackBiasForAction } = require("./ai-town-social-feedback");
 
 function num(value, fallback = 0) {
   const number = Number(value);
@@ -147,6 +149,210 @@ function legacyCandidateActions(world, agent, extras = {}) {
   return dedupeActions(actions);
 }
 
+function lifeStageOf(agent = {}) {
+  const age = num(agent.ageYears ?? agent.age, 35);
+  const text = `${agent.ageStage || ""} ${agent.job || ""} ${textOf(agent.identityCore)} ${textOf(agent.selfModel)}`.toLowerCase();
+  if (age <= 12 || /child|kid|儿童|孩子|小学生/.test(text)) return "child";
+  if (age <= 18 || /teen|student|少年|中学生|学生/.test(text)) return "teen";
+  if (age >= 65 || /elder|retired|老人|老年|退休/.test(text)) return "elder";
+  return "adult";
+}
+
+function professionKind(agent = {}) {
+  const text = `${agent.job || ""} ${agent.ageStage || ""} ${textOf(agent.identityCore)} ${textOf(agent.selfModel)}`.toLowerCase();
+  if (/doctor|nurse|clinic|medical|physician|医生|护士|医护|诊所|医疗/.test(text)) return "medical";
+  if (/shop|store|merchant|seller|baker|breakfast|cashier|owner|店主|老板|店员|小卖部|早餐|商贩|售货|收银|面包/.test(text)) return "merchant";
+  if (/teacher|school|class|老师|教师|学校/.test(text)) return "teacher";
+  if (/student|pupil|学生|小学生|中学生/.test(text)) return "student";
+  if (/guard|security|police|保安|警察|巡逻/.test(text)) return "security";
+  if (/detective|investigator|侦探|调查/.test(text)) return "investigator";
+  if (/artist|writer|painter|艺术|画家|作家|记录/.test(text)) return "artist";
+  return "resident";
+}
+
+function isDependentAdult(agent = {}) {
+  const stage = lifeStageOf(agent);
+  if (stage !== "adult" && stage !== "elder") return false;
+  const text = `${textOf(agent.identityCore)} ${textOf(agent.selfModel)} ${agent.currentTask || ""}`.toLowerCase();
+  if (/dependent|needs help|requires care|依赖|需要照顾|被照顾|需要帮助|生活不能自理/.test(text)) return true;
+  const rels = Object.values(agent.relationshipMatrix || {});
+  return rels.some(rel => num(rel.dependency, 0) >= 70 && num(rel.trust, 0) >= 60);
+}
+
+function businessPlaceId(place = "") {
+  return /breakfast|shop|store|market|restaurant|bakery|小卖部|早餐|商店|店|市场|餐馆|面包/.test(String(place || "").toLowerCase());
+}
+
+function clinicPlaceId(place = "") {
+  return /clinic|hospital|medical|诊所|医院|卫生/.test(String(place || "").toLowerCase());
+}
+
+function schoolPlaceId(place = "") {
+  return /school|class|campus|学校|教室|课堂/.test(String(place || "").toLowerCase());
+}
+
+function emergencyState(agent = {}, interruption = null) {
+  const needs = agent.needs || {};
+  return {
+    health: interruption?.type === "health" || num(needs.health, 100) <= 30,
+    safety: interruption?.type === "safety" || num(needs.safety, 100) <= 32,
+    hunger: interruption?.type === "hunger" || num(needs.hunger, 100) <= 30,
+    any: Boolean(interruption?.canOverridePlan) || num(needs.health, 100) <= 30 || num(needs.safety, 100) <= 32 || num(needs.hunger, 100) <= 30
+  };
+}
+
+const actionConstraintRegistry = {
+  continue_process: { ageRule: ["child", "teen", "adult", "elder"], identityRule: "has active process", locationRule: "current process location", relationshipRule: "none", emergencyRule: "can be interrupted only by crisis" },
+  seek_care: { ageRule: ["child", "teen", "adult", "elder"], identityRule: "all", locationRule: "clinic reachable", relationshipRule: "none", emergencyRule: "health raises priority" },
+  seek_safety: { ageRule: ["child", "teen", "adult", "elder"], identityRule: "all", locationRule: "safe place reachable", relationshipRule: "none", emergencyRule: "safety raises priority" },
+  eat_or_buy_food: { ageRule: ["child", "teen", "adult", "elder"], identityRule: "all", locationRule: "food reachable or reasonable window", relationshipRule: "none", emergencyRule: "hunger can override routine" },
+  rest: { ageRule: ["child", "teen", "adult", "elder"], identityRule: "all", locationRule: "rest-capable place preferred", relationshipRule: "none", emergencyRule: "fatigue or health raises priority" },
+  tidy_or_clean: { ageRule: ["teen", "adult", "elder"], identityRule: "basic self-care capable", locationRule: "current place allows small tidying", relationshipRule: "none", emergencyRule: "blocked by urgent crisis" },
+  contact_familiar: { ageRule: ["child", "teen", "adult", "elder"], identityRule: "has or can reasonably contact familiar person", locationRule: "communication possible", relationshipRule: "familiar relationship preferred", emergencyRule: "support can respond to crisis" },
+  follow_plan: { ageRule: ["child", "teen", "adult", "elder"], identityRule: "has current plan", locationRule: "plan location", relationshipRule: "none", emergencyRule: "health/safety crisis may override" },
+  observe_environment: { ageRule: ["child", "teen", "adult", "elder"], identityRule: "all", locationRule: "current visible environment", relationshipRule: "none", emergencyRule: "safe fallback action" },
+  think_and_plan: { ageRule: ["child", "teen", "adult", "elder"], identityRule: "all", locationRule: "any", relationshipRule: "none", emergencyRule: "safe fallback action" },
+  walk_nearby: { ageRule: ["teen", "adult", "elder"], identityRule: "can move independently", locationRule: "safe walkable place", relationshipRule: "none", emergencyRule: "blocked by safety crisis" },
+  return_home: { ageRule: ["child", "teen", "adult", "elder"], identityRule: "all", locationRule: "home reachable", relationshipRule: "none", emergencyRule: "safety/comfort action" },
+  follow_stranger: { ageRule: ["adult"], identityRule: "investigator/security/artist adult only", locationRule: "public visible target", relationshipRule: "none", emergencyRule: "blocked by severe safety crisis" },
+  ask_guardian: { ageRule: ["child", "teen", "dependentAdult"], identityRule: "dependent role only", locationRule: "communication possible", relationshipRule: "guardian or high-dependency trusted relation", emergencyRule: "support action" },
+  record_observation: { ageRule: ["teen", "adult", "elder"], identityRule: "observer/artist/investigator or safe observer", locationRule: "visible environment", relationshipRule: "none", emergencyRule: "blocked by severe crisis for dependents" },
+  provide_care: { ageRule: ["adult", "elder"], identityRule: "medical profession only", locationRule: "clinic or medical duty", relationshipRule: "service relation", emergencyRule: "allowed for care duty" },
+  serve_customers: { ageRule: ["adult", "elder"], identityRule: "merchant profession only", locationRule: "business place", relationshipRule: "customer context", emergencyRule: "blocked by personal health/safety crisis" },
+  check_inventory: { ageRule: ["adult", "elder"], identityRule: "merchant profession only", locationRule: "business place", relationshipRule: "none", emergencyRule: "blocked by personal crisis" }
+};
+
+function actionConstraintsFor(actionId = "") {
+  return actionConstraintRegistry[actionId] || { ageRule: ["child", "teen", "adult", "elder"], identityRule: "all", locationRule: "any", relationshipRule: "none", emergencyRule: "none" };
+}
+
+function shouldAskGuardian(agent = {}) {
+  const stage = lifeStageOf(agent);
+  if (stage === "child" || stage === "teen") return true;
+  return isDependentAdult(agent);
+}
+
+function professionEligibilityBias(agent = {}, action = {}, context = {}) {
+  const profession = context.profession || professionKind(agent);
+  const stage = context.stage || lifeStageOf(agent);
+  let bias = 0;
+  if (profession === "medical" && ["seek_care", "provide_care"].includes(action.id)) bias += 6;
+  if (profession === "merchant" && ["serve_customers", "check_inventory"].includes(action.id)) bias += 8;
+  if (profession === "merchant" && action.id === "follow_plan") bias += 3;
+  if (profession === "teacher" && action.id === "follow_plan") bias += 4;
+  if (profession === "security" && ["seek_safety", "observe_environment"].includes(action.id)) bias += 4;
+  if (profession === "investigator" && ["observe_environment", "follow_stranger", "record_observation"].includes(action.id)) bias += 5;
+  if (profession === "artist" && ["record_observation", "observe_environment"].includes(action.id)) bias += 4;
+  if ((stage === "child" || stage === "teen") && ["ask_guardian", "seek_safety", "follow_plan"].includes(action.id)) bias += 4;
+  if (stage === "elder" && ["seek_care", "seek_safety", "rest", "return_home"].includes(action.id)) bias += 4;
+  if (stage === "adult" && ["follow_plan", "contact_familiar"].includes(action.id)) bias += 2;
+  return bias;
+}
+
+function actionEligibility(world = {}, agent = {}, action = {}, extras = {}) {
+  const constraints = action.actionConstraints || actionConstraintsFor(action.id);
+  const stage = lifeStageOf(agent);
+  const profession = professionKind(agent);
+  const currentPlace = agent.position || agent.place || "";
+  const plan = extras.plan || null;
+  const interruption = extras.interruption || null;
+  const emergency = emergencyState(agent, interruption);
+  const reasons = [];
+  const deny = reason => ({ allowed: false, reason, reasons: [reason], constraints, stage, profession, bias: 0 });
+  if (!agent?.id || agent.lifeStatus === "dead" || agent.terminalState?.dead) return deny("dead agent");
+  if (action.id === "continue_process" && !agent.activeProcess) return deny("no active process");
+  if (action.id === "follow_plan" && !plan) return deny("no current plan");
+  if (action.id === "ask_guardian" && !shouldAskGuardianV321(agent)) return deny("not child, teen, or dependent adult");
+  if (action.id === "follow_stranger") {
+    if (stage !== "adult") return deny("only independent adults may consider following a stranger");
+    if (!["investigator", "security", "artist"].includes(profession) && scaleProfile(agent, "curiosity", 0.5) < 0.78) return deny("identity is not investigator/security/observer");
+    if (emergency.safety || num(interruption?.priority, 0) >= 75) return deny("safety crisis blocks following stranger");
+  }
+  if (action.id === "provide_care") {
+    if (profession !== "medical") return deny("not medical profession");
+    if (!clinicPlaceId(currentPlace) && !clinicPlaceId(plan?.place || "") && !/clinic|medical|doctor|诊所|医院|问诊|看诊/.test(String(agent.currentTask || "").toLowerCase())) {
+      return deny("not at clinic or medical duty context");
+    }
+  }
+  if (["serve_customers", "check_inventory"].includes(action.id)) {
+    if (profession !== "merchant") return deny("not merchant profession");
+    if (!businessPlaceId(currentPlace) && !businessPlaceId(plan?.place || "") && !/shop|store|business|customer|店|顾客|补货/.test(String(agent.currentTask || "").toLowerCase())) {
+      return deny("not at business place or business duty context");
+    }
+    if (emergency.health || emergency.safety) return deny("personal health or safety crisis blocks business duty");
+  }
+  if (action.id === "walk_nearby") {
+    if (stage === "child") return deny("child cannot independently wander");
+    if (emergency.safety) return deny("safety crisis blocks walking nearby");
+    if ((stage === "teen" || profession === "student") && plan?.fixed && /study|class|school|上课|学习/.test(String(plan.localAction || plan.title || ""))) {
+      return deny("student fixed class blocks wandering");
+    }
+  }
+  if (action.id === "eat_or_buy_food" && (stage === "child" || stage === "teen" || profession === "student")) {
+    if (plan?.fixed && /study|class|school|上课|学习/.test(String(plan.localAction || plan.title || "")) && !emergency.hunger) {
+      return deny("student fixed class blocks ordinary eating");
+    }
+  }
+  if (action.id === "record_observation") {
+    if (stage === "child") return deny("child observation should use observe_environment or ask_guardian");
+    if (emergency.safety && !["investigator", "security"].includes(profession)) return deny("safety crisis blocks recording observation");
+  }
+  if (action.id === "tidy_or_clean" && stage === "child") return deny("child should not be assigned independent cleaning action");
+  reasons.push("eligible");
+  const bias = professionEligibilityBias(agent, action, { stage, profession });
+  return {
+    allowed: true,
+    reason: reasons.join("; "),
+    reasons,
+    constraints,
+    stage,
+    profession,
+    bias,
+    rule: "Eligibility removes impossible actions before cognitive scoring."
+  };
+}
+
+function scaleProfile(agent = {}, key, fallback = 0.5) {
+  const value = agent.cognitiveProfile?.[key];
+  if (value == null) return fallback;
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return n <= 1 && n >= 0 ? n : clamp(n / 100, 0, 1, fallback);
+}
+
+function filterEligibleActions(world = {}, agent = {}, actions = [], extras = {}) {
+  const allowed = [];
+  const removed = [];
+  actions.forEach(action => {
+    const check = actionEligibility(world, agent, action, extras);
+    if (check.allowed) {
+      allowed.push({
+        ...action,
+        actionConstraints: check.constraints,
+        eligibility: check,
+        eligibilityBias: check.bias
+      });
+    } else {
+      removed.push({
+        id: action.id,
+        label: action.label,
+        reason: check.reason,
+        constraints: check.constraints,
+        stage: check.stage,
+        profession: check.profession
+      });
+    }
+  });
+  return {
+    actions: dedupeActions(allowed),
+    removed,
+    rawCount: actions.length,
+    eligibleCount: allowed.length,
+    invalidActionRate: 0,
+    rule: "Invalid actions are removed before Cognitive Score and Softmax."
+  };
+}
+
 function candidateActions(world, agent, extras = {}) {
   const plan = extras.plan || currentPlanItem(world, agent);
   const interruption = extras.interruption || detectInterruption(world, agent);
@@ -164,7 +370,8 @@ function candidateActions(world, agent, extras = {}) {
       risk: num(action.risk, 0),
       availability: action.availability,
       distance: action.distance,
-      reason: action.reason || ""
+      reason: action.reason || "",
+      actionConstraints: action.actionConstraints || actionConstraintsFor(action.id)
     };
     item.actionVector = action.actionVector || actionVector(item);
     actions.push(item);
@@ -186,9 +393,27 @@ function candidateActions(world, agent, extras = {}) {
   push({ id: "walk_nearby", label: "walk nearby", type: "move", tags: ["walk", "comfort", "explore"], base: 4, cost: 6, risk: 3, reason: "possible_action" });
   push({ id: "return_home", label: "return home", type: "move", targetPlace: "apartment", tags: ["home", "safety", "comfort"], base: 9, cost: 5, risk: 2, reason: "possible_action" });
   push({ id: "follow_stranger", label: "follow and observe from distance", type: "move", tags: ["observe", "novelty", "risk"], base: 3, cost: 9, risk: 16, availability: interruption?.type === "safety" ? 0.55 : 0.45, reason: "possible_action" });
-  push({ id: "ask_guardian", label: "ask a trusted guardian or familiar adult", type: "talk", tags: ["support", "social", "safety"], base: 7, cost: 5, risk: 2, reason: "possible_action" });
+  push({ id: "ask_guardian", label: "ask a trusted guardian or familiar adult", type: "talk", tags: ["support", "social", "safety"], base: 7, cost: 5, risk: 2, reason: "dependent_role" });
   push({ id: "record_observation", label: "record observation", type: "observe", tags: ["observe", "novelty", "art"], base: 4, cost: 3, risk: 4, reason: "possible_action" });
+  push({ id: "provide_care", label: "handle medical or care duty", type: "work", targetPlace: "clinic", tags: ["medical", "care", "work", "profession"], base: 6, cost: 6, risk: 4, availability: clinicPlaceId(agent.position || agent.place || plan?.place || "") ? 0.95 : 0.45, reason: "profession_candidate" });
+  push({ id: "serve_customers", label: "handle shop customers", type: "work", targetPlace: agent.position || agent.place || "", tags: ["business", "customer", "work", "profession"], base: 6, cost: 5, risk: 2, availability: businessPlaceId(agent.position || agent.place || plan?.place || "") ? 0.9 : 0.45, reason: "profession_candidate" });
+  push({ id: "check_inventory", label: "check stock and supplies", type: "react", targetPlace: agent.position || agent.place || "", tags: ["business", "restock", "order", "profession"], base: 5, cost: 4, risk: 1, availability: businessPlaceId(agent.position || agent.place || plan?.place || "") ? 0.9 : 0.45, reason: "profession_candidate" });
   return dedupeActions(actions);
+}
+
+function shouldAskGuardian(agent = {}) {
+  const age = num(agent.ageYears ?? agent.age, 35);
+  const text = `${agent.job || ""} ${agent.ageStage || ""} ${textOf(agent.identityCore)} ${textOf(agent.selfModel)}`.toLowerCase();
+  if (age <= 18) return true;
+  if (/child|kid|teen|student|guardian|dependent|学生|儿童|孩子|少年|监护/.test(text)) return true;
+  const rels = Object.values(agent.relationshipMatrix || {});
+  return rels.some(rel => num(rel.dependency, 0) >= 70 && num(rel.trust, 0) >= 60);
+}
+
+function shouldAskGuardianV321(agent = {}) {
+  const stage = lifeStageOf(agent);
+  if (stage === "child" || stage === "teen") return true;
+  return isDependentAdult(agent);
 }
 
 function dedupeActions(actions = []) {
@@ -311,6 +536,22 @@ function vectorBonus(vectorRecall = [], action) {
     details.push({ scene: String(item.scene || "").slice(0, 80), similarity: item.similarity, bonus: Number(bonus.toFixed(2)) });
   });
   return { raw, details: details.sort((a, b) => b.bonus - a.bonus).slice(0, 3) };
+}
+
+function cognitiveFitForAction(cognitive = {}, action = {}) {
+  const desires = Array.isArray(cognitive.desireCandidates) ? cognitive.desireCandidates : [];
+  if (!desires.length || !action?.id) return 0;
+  let total = 0;
+  let max = 0;
+  desires.forEach(desire => {
+    const hints = Array.isArray(desire.actionHints) ? desire.actionHints : [];
+    const hinted = hints.includes(action.id) ? 0.9 : 0;
+    const semantic = relevance(`${desire.desire || ""} ${desire.id || ""} ${desire.source || ""}`, action) * 0.7;
+    const fit = Math.max(hinted, semantic) * clamp(num(desire.intensity, 0), 0, 1, 0);
+    total += fit;
+    max = Math.max(max, fit);
+  });
+  return Number(clamp(max * 0.68 + (total / Math.max(1, desires.length)) * 0.32, 0, 1, 0).toFixed(3));
 }
 
 function addMemoryBias(memoryBias, action, weight, reason, sourceType = "memory") {
@@ -465,6 +706,7 @@ function scoreAction(world, agent, action, extras = {}) {
   const cognitive = extras.cognitiveState || cognitiveState(world, agent, extras.context || {});
   const aVector = action.actionVector || actionVector(action);
   const match = actionMatch(cognitive, { ...action, actionVector: aVector });
+  const cognitiveFit = cognitiveFitForAction(cognitive, action);
   const constraint = realityConstraint(cognitive, { ...action, actionVector: aVector }, extras.context || {});
   const goal = goalBias(world, agent, action);
   const selfConsistency = selfConsistencyBias(world, agent, action, extras);
@@ -472,16 +714,21 @@ function scoreAction(world, agent, action, extras = {}) {
   const weights = cognitive.decisionWeights || {};
   const emotion = emotionBias(agent, action);
   const social = socialBias(world, agent, action);
+  const socialField = socialFieldBiasForAction(world, agent, action);
+  const socialFeedback = socialFeedbackBiasForAction(world, agent, action);
+  const socialFeedbackWeightedScore = num(socialFeedback.gamma, 0.65) * num(socialFeedback.score, 0);
   const context = contextFit(world, agent, action, extras);
+  const eligibilityBias = num(action.eligibilityBias || action.eligibility?.bias, 0);
   const memoryValue = clamp(0.5 + (memory.score * 2.5 + influence.score * 0.08) / 20, 0, 1, 0.5);
   const personaValue = clamp(0.5 + (personality + selfConsistency.score) / 45, 0, 1, 0.5);
   const emotionValue = clamp(0.5 + emotion / 35, 0, 1, 0.5);
   const goalValue = clamp(0.5 + goal.score / 38, 0, 1, 0.5);
-  const socialValue = clamp(0.5 + social / 35, 0, 1, 0.5);
+  const socialValue = clamp(0.5 + (social + socialField.score) / 35, 0, 1, 0.5);
+  const socialFeedbackValue = clamp(0.5 + socialFeedbackWeightedScore / 35, 0, 1, 0.5);
   const noveltyValue = clamp((aVector.novelty || 0) * 0.55 + (aVector.curiosity || 0) * 0.35 + num(cognitive.biasVector?.noveltySeeking, 0.35) * 0.35, 0, 1, 0.2);
   const vectorCap = 0.2;
   const vectorValue = Math.min(clamp(vector.raw / 8, 0, 1, 0), vectorCap);
-  const contextValue = clamp(0.45 + match / 4 + context / 80 + num(action.base, 0) / 80, 0, 1, 0.5);
+  const contextValue = clamp(0.45 + match / 4 + cognitiveFit * 0.22 + context / 80 + eligibilityBias / 100 + num(action.base, 0) / 80, 0, 1, 0.5);
   const weightTotal = Math.max(0.001,
     num(weights.memory, 0.55)
     + num(weights.persona, 0.55)
@@ -489,6 +736,7 @@ function scoreAction(world, agent, action, extras = {}) {
     + num(weights.goal, 0.55)
     + num(weights.novelty, 0.3)
     + num(weights.social, 0.35)
+    + num(weights.social, 0.35) * 0.35
   );
   const compensatory =
     (num(weights.memory, 0.55) * memoryValue
@@ -496,7 +744,8 @@ function scoreAction(world, agent, action, extras = {}) {
       + num(weights.emotion, 0.45) * emotionValue
       + num(weights.goal, 0.55) * goalValue
       + num(weights.novelty, 0.3) * noveltyValue
-      + num(weights.social, 0.35) * socialValue) / weightTotal;
+      + num(weights.social, 0.35) * socialValue
+      + num(weights.social, 0.35) * 0.35 * socialFeedbackValue) / weightTotal;
   const combinedA = clamp(compensatory * 0.78 + contextValue * 0.22 + vectorValue, 0, 1.2, 0.5);
   const noise = (seededRandom(`${agent.id}:${world?.clock || 0}:${action.id}:v3`) - 0.5) * cognitiveTemperature(agent, cognitive) * 1.2;
   const score = combinedA * constraint.value * 100 + noise;
@@ -507,6 +756,8 @@ function scoreAction(world, agent, action, extras = {}) {
     components: {
       base: action.base,
       cognitiveMatch: Number(match.toFixed(3)),
+      cognitiveFit: Number((cognitiveFit * 10).toFixed(2)),
+      cognitiveFitValue: Number(cognitiveFit.toFixed(3)),
       needDrive: Number((match * 5).toFixed(2)),
       memoryBias: Number((memoryValue * 10).toFixed(2)),
       structuredMemoryBias: Number(memory.score.toFixed(2)),
@@ -516,10 +767,16 @@ function scoreAction(world, agent, action, extras = {}) {
       emotionBias: Number(emotion.toFixed(2)),
       emotionValue: Number(emotionValue.toFixed(3)),
       socialBias: Number(social.toFixed(2)),
+      socialFieldBias: Number(socialField.score.toFixed(2)),
+      socialFeedbackBias: Number(socialFeedback.score.toFixed(2)),
+      socialFeedbackGamma: Number(num(socialFeedback.gamma, 0.65).toFixed(3)),
+      socialFeedbackWeighted: Number(socialFeedbackWeightedScore.toFixed(2)),
+      socialFeedbackValue: Number(socialFeedbackValue.toFixed(3)),
       socialValue: Number(socialValue.toFixed(3)),
       goalBias: Number(goal.score.toFixed(2)),
       goalValue: Number(goalValue.toFixed(3)),
       selfConsistency: Number(selfConsistency.score.toFixed(2)),
+      eligibilityBias: Number(eligibilityBias.toFixed(2)),
       contextFit: Number(context.toFixed(2)),
       contextValue: Number(contextValue.toFixed(3)),
       noveltyValue: Number(noveltyValue.toFixed(3)),
@@ -540,12 +797,31 @@ function scoreAction(world, agent, action, extras = {}) {
     },
     cognitiveState: {
       decisionWeights: cognitive.decisionWeights,
+      timestamp: cognitive.timestamp,
+      version: cognitive.version,
+      enabled: cognitive.enabled,
+      selfPressure: cognitive.selfPressure,
+      socialNeed: cognitive.socialNeed,
+      safetyConcern: cognitive.safetyConcern,
+      curiosityDrive: cognitive.curiosityDrive,
+      responsibilityDrive: cognitive.responsibilityDrive,
+      comfortNeed: cognitive.comfortNeed,
+      emotionalLoad: cognitive.emotionalLoad,
+      beliefActivation: cognitive.beliefActivation,
+      activeGoals: cognitive.activeGoals,
+      activeMemories: cognitive.activeMemories,
+      activeBeliefs: cognitive.activeBeliefs,
+      desireCandidates: cognitive.desireCandidates,
+      thoughtCandidates: cognitive.thoughtCandidates,
       perceptionWeights: cognitive.perceptionWeights,
       driveVector: cognitive.driveVector,
       biasVector: cognitive.biasVector,
       cognitiveProfile: cognitive.cognitiveProfile,
+      socialModifier: cognitive.socialModifier,
       source: cognitive.source
     },
+    socialFieldBias: socialField,
+    socialFeedbackBias: socialFeedback,
     realityConstraint: constraint,
     goalDetails: goal.details,
     selfConsistencyDetails: selfConsistency.details,
@@ -582,7 +858,7 @@ function decisionTraceFor(action = null) {
   if (!action) {
     return {
       chosenAction: "",
-      scoreBreakdown: { need: 0, memory: 0, personality: 0, goal: 0, emotion: 0, social: 0, consistency: 0 }
+      scoreBreakdown: { need: 0, memory: 0, personality: 0, goal: 0, emotion: 0, social: 0, socialField: 0, socialFeedback: 0, consistency: 0, cognitiveFit: 0, eligibility: 0 }
     };
   }
   const components = action.components || {};
@@ -597,8 +873,12 @@ function decisionTraceFor(action = null) {
       goal: Number(components.goalBias || 0),
       emotion: Number(components.emotionBias || 0),
       social: Number(components.socialBias || 0),
+      socialField: Number(components.socialFieldBias || 0),
+      socialFeedback: Number(components.socialFeedbackWeighted || 0),
       consistency: Number(components.selfConsistency || 0),
+      eligibility: Number(components.eligibilityBias || 0),
       context: Number(components.contextFit || 0),
+      cognitiveFit: Number(components.cognitiveFit || 0),
       actionMatch: Number(components.cognitiveMatch || 0),
       vector: Number(components.vectorBonus || 0),
       reality: Number(components.realityB || 0),
@@ -619,8 +899,12 @@ function debugDecisionFor(action = null) {
       goal: trace.scoreBreakdown.goal,
       emotion: trace.scoreBreakdown.emotion,
       social: trace.scoreBreakdown.social,
+      socialField: trace.scoreBreakdown.socialField,
+      socialFeedback: trace.scoreBreakdown.socialFeedback,
       consistency: trace.scoreBreakdown.consistency,
+      eligibility: trace.scoreBreakdown.eligibility,
       context: trace.scoreBreakdown.context,
+      cognitiveFit: trace.scoreBreakdown.cognitiveFit,
       risk: trace.scoreBreakdown.risk
     },
     score: trace.score || 0,
@@ -650,7 +934,9 @@ function utilityDecision(world, agent, extras = {}) {
     emotion: JSON.stringify(agent.emotionVector || agent.emotions || {}),
     queryVector: extras.vectorQueryVector || extras.queryVector || null
   }, vectorLimit) : [];
-  const actions = candidateActions(world, agent, { plan, interruption });
+  const rawActions = candidateActions(world, agent, { plan, interruption });
+  const actionEligibilityResult = filterEligibleActions(world, agent, rawActions, { plan, interruption });
+  const actions = actionEligibilityResult.actions;
   const scored = actions
     .map(action => scoreAction(world, agent, action, { plan, interruption, vectorRecall, memoryInfluence, personalityRuntime: personalityState, cognitiveState: cognitive }))
     .sort((a, b) => b.score - a.score);
@@ -666,9 +952,13 @@ function utilityDecision(world, agent, extras = {}) {
     priorityReason: priority.reason,
     selectedAction: selected,
     candidateActions: scored.slice(0, 12),
+    actionEligibility: actionEligibilityResult,
     vectorRecall,
     structuredMemory: structuredMemoryForAgent(agent, 6),
     cognitiveState: cognitive,
+    desireCandidates: cognitive.desireCandidates || [],
+    activeBeliefs: cognitive.activeBeliefs || [],
+    thoughtStream: cognitive.thoughtStream || [],
     selectionTemperature: temperature,
     personalityRuntime: personalityState,
     memoryInfluence,
@@ -685,6 +975,11 @@ function utilityDecision(world, agent, extras = {}) {
 module.exports = {
   agentPriority,
   candidateActions,
+  actionConstraintsFor,
+  actionEligibility,
+  filterEligibleActions,
+  lifeStageOf,
+  professionKind,
   memoryInfluenceAgent,
   personalityRuntime,
   personalityRuntimeBias,
@@ -695,6 +990,7 @@ module.exports = {
   cognitiveTemperature,
   goalBias,
   selfConsistencyBias,
+  cognitiveFitForAction,
   scoreAction,
   softmaxPick,
   decisionTraceFor,

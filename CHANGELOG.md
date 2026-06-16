@@ -62,3 +62,57 @@
 - 新增 `CognitiveState`，让需求只改变注意力、耐心、风险偏好、社交倾向和目标坚持度，不直接映射成行动。
 - 接入 `Structured Memory`、`Vector Memory`、`SelfModel`、`GoalRuntime` 和 `PersonalityRuntime`。
 - 增加 `decisionTrace` 和 `debugDecision`，便于查看角色为什么选择某个行动。
+# AgentBox Town 更新记录
+
+## 2026-06-16 - V3.3.1 Social Feedback & Stability Layer
+
+- 新增 `ai-town-social-feedback.js`，把社会场、信息流、地点密度和关系网络转换为每个角色自己的 `agentSocialModifiers`。
+- 新增 `SocialModifier`：`fearModifier`、`curiosityModifier`、`trustModifier`、`responsibilityModifier`、`avoidanceModifier`、`socialNeedModifier`、`socialSensitivity`、`sourceEvents`。
+- 新增社会稳定层：社会影响使用 `tanh(sum(weight * modifier)) * socialSensitivity` 进行调制，避免一次事件直接破坏人格连续性。
+- `CognitiveState` 现在接收 `regulatedSocialEffect`，社会反馈只作为心理场调制项，不覆盖记忆、目标、情绪或人格。
+- `Utility Scheduler` 接入 `socialFeedbackBias`，按 `gamma * socialFeedbackBias` 混入补偿评分 A，再继续走 `Score = A * B`，不直接 `score += socialFeedbackBias`。
+- 新增 `socialImpressions`，记录“这个社会给我的感觉”，不写入普通事实记忆；支持指数衰减、同类合并和低强度清理。
+- 服务端保存 `runtime/socialFeedbackState.json`、`runtime/agentSocialModifiers.json` 和 `ag-judgements/social-feedback.json`。
+- AgentAction 提示词增加约束：社会反馈只能影响谨慎、好奇、求助和社交倾向，不能创造事实或绕过 `visibleKnowledge`。
+
+验证：
+- `npm run check:social-feedback`
+- `npm run check:social-field`
+- `npm run check:cognitive-state`
+- `npm run check:utility-scheduler`
+- `npm run check:action-eligibility`
+- `npm run check:all`
+
+## 2026-06-16 - V3.3 Social Dynamics Layer
+
+- 新增 `ai-town-social-field.js`，让社会状态成为全局动态变量，而不是单个 Agent 的私有判断。
+- 新增 `SocialField`：`fearLevel`、`curiosityLevel`、`rumorDensity`、`trustNetworkStrength`、`socialTension`、`informationPressure`。
+- 信息传播升级为概率传播模型，传播概率综合关系强度、空间接近、信任、情绪强度、信息类型和社会压力。
+- 新增 `informationPacket` 字段：`content`、`source`、`confidence`、`distortionLevel`、`emotionalWeight`、`spreadDepth`。
+- 医疗、死亡、灾难等高优先级事件会强传播，但仍保留延迟和信息不完整。
+- 每轮 tick 输出 `socialField snapshot`、`informationFlow graph`、受影响角色和行为变化数据。
+
+验证：
+- `npm run check:social-field`
+
+## 2026-06-16 - V3.2.1 Action Eligibility Layer
+
+- 在 Cognitive Scheduler 前增加行动资格过滤层：`Candidate Actions -> Eligibility Filter -> Cognitive Score -> Softmax Selection`。
+- 每个行动增加年龄、身份、地点、关系和紧急状态约束，不符合条件的行动直接移除，不进入评分。
+- 新增职业约束和人生阶段约束：医生、店主、儿童、老人、成年人会自然拥有不同可选行动范围和权重倾向。
+- 新增 `npm run check:action-eligibility`，随机 1000 次行动选择验证 `invalidActionRate = 0`。
+
+验证：
+- `npm run check:action-eligibility`
+
+## 2026-06-16 - V3.2 Cognitive State Field
+
+- 新增 `ai-town-cognitive-state.js`，把需求、情绪、自我模型、目标、结构化记忆、关系和上下文融合成当前认知状态。
+- 新增 `CognitiveState`：`selfPressure`、`socialNeed`、`safetyConcern`、`curiosityDrive`、`responsibilityDrive`、`comfortNeed`、`emotionalLoad`、`beliefActivation`。
+- 新增 `MemoryActivation`，根据相关度、情绪匹配、目标匹配和近因性激活少量记忆，而不是把全部记忆送入决策。
+- 新增 `Desire Generator`，从认知状态生成 `desireCandidates`；愿望不是行动，仍需经过资格过滤、世界约束和结算。
+- `AgentAction` 输入增加 `cognitiveState`、`desireCandidates` 和 `activeBeliefs`，LLM 只能基于这些表达主观选择。
+- 配置增加 Cognitive Engine 开关和记忆、信念、情绪、目标影响参数。
+
+验证：
+- `npm run check:cognitive-state`

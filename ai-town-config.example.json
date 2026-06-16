@@ -9,5 +9,14 @@
   "virtualMinutesPerPulse": 60,
   "maxConcurrentPerKey": 5,
   "maxActionsPerCycle": 5,
-  "judgementBatchSize": 5
+  "judgementBatchSize": 5,
+  "vectorMemoryEnabled": true,
+  "vectorBaseUrl": "http://localhost:1234/v1",
+  "vectorModel": "",
+  "vectorMaxRecall": 6,
+  "cognitiveEngineEnabled": true,
+  "cognitiveMemoryInfluence": 0.55,
+  "cognitiveBeliefInfluence": 0.6,
+  "cognitiveEmotionInfluence": 0.55,
+  "cognitiveGoalInfluence": 0.6
 }

@@ -2,6 +2,8 @@
 
 const assert = require("assert");
 const {
+  characterSeedForSlot,
+  mergeCharacterSeed,
   buildCharacterSeeds,
   mergeCharacterSeeds,
   applyRelationshipIntents,
@@ -139,5 +141,32 @@ for (const agent of checked.agents) {
   assertNoTemplate(agent.preferenceMemory, `preference ${agent.id}`);
   assertNoTemplate(agent.episodicMemory, `episodic ${agent.id}`);
 }
+
+const broadStudentSeed = characterSeedForSlot(
+  { id: "agent_mismatch", index: 0, roleHint: "老人、青少年、儿童及少量年轻成人", ageYears: 72 },
+  { premise: "普通小镇", places }
+);
+const mismatchedAgent = {
+  id: "agent_mismatch",
+  name: "赵建国",
+  job: "退休老人",
+  ageYears: 72,
+  place: "school",
+  position: "school",
+  goal: "保持身体稳定",
+  relations: {}
+};
+mergeCharacterSeed(mismatchedAgent, broadStudentSeed);
+const repaired = runCharacterConsistencyAgent([mismatchedAgent], { places, premise: "普通小镇" }).agents[0];
+assert.equal(repaired.agentSchemaVersion, "3.1.5");
+assert.equal(repaired.characterGenesis.roleKind, "elder");
+assert.notEqual(repaired.position, "school");
+assert.equal(/课程|作业|同学|学习安排/.test(JSON.stringify({
+  identityCore: repaired.identityCore,
+  selfModel: repaired.selfModel,
+  habitMemory: repaired.habitMemory,
+  preferenceMemory: repaired.preferenceMemory,
+  episodicMemory: repaired.episodicMemory
+})), false);
 
 console.log("PASS check-character-genesis");

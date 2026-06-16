@@ -796,10 +796,45 @@ function updateHabit(agent, event = {}, gate = null) {
   });
 }
 
+function memoryChangesFromEvent(agent, event = {}, gate = {}, meaning = "") {
+  const changes = {
+    beliefChange: null,
+    habitChange: null,
+    selfModelChange: null
+  };
+  if (!gate?.shouldRemember) return changes;
+  if (gate.memoryType === "habit" || event.category === "routine") {
+    changes.habitChange = {
+      trigger: gate.routineKind || routineKind(event),
+      delta: Number(Math.min(0.08, Math.max(0.02, Number(gate.importance || 0.5) * 0.08)).toFixed(3)),
+      reason: "repeated routine became a habit cue"
+    };
+  }
+  if (gate.memoryType === "belief" || gate.personalityImpact || Number(gate.importance || 0) >= 0.8) {
+    const belief = beliefFromEvent(agent, event);
+    if (belief) {
+      changes.beliefChange = {
+        belief,
+        delta: Number(Math.min(0.12, Math.max(0.03, Number(gate.importance || 0.6) * 0.12)).toFixed(3)),
+        reason: meaning || event.summary || event.type || "meaningful event"
+      };
+    }
+  }
+  if (gate.personalityImpact || Number(gate.importance || 0) >= 0.75) {
+    changes.selfModelChange = {
+      field: "currentSelfView",
+      delta: Number(Math.min(0.08, Math.max(0.02, Number(gate.importance || 0.5) * 0.08)).toFixed(3)),
+      reason: meaning || event.summary || event.type || "event may affect self understanding"
+    };
+  }
+  return changes;
+}
+
 function consolidateEvent(world, agent, event = {}) {
   ensureMemory(agent);
   const gate = memoryGate(world, agent, event);
   event.memoryGate = gate;
+  event.memoryChanges = memoryChangesFromEvent(agent, event, gate);
   if (event.category === "routine") {
     return updateHabit(agent, event, gate);
   }
@@ -807,6 +842,7 @@ function consolidateEvent(world, agent, event = {}) {
   const importance = clampNumber(Math.ceil(gate.importance * 5), 1, 5, 3);
   event.memoryImportanceScore = gate.importance;
   const meaning = eventMeaning(agent, event);
+  event.memoryChanges = memoryChangesFromEvent(agent, event, gate, meaning);
   const semanticType = gate.memoryType === "social" ? "relationship" : "experience";
   const experience = appendSemanticMemory(agent, {
     type: semanticType,
