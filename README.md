@@ -2,13 +2,39 @@
 
 **中文** | [English](README.en.md)
 
+更新记录：[CHANGELOG.md](CHANGELOG.md)
+
 AgentBox Town 是一个多 Agent 虚拟小镇模拟器。它把多个 AI 角色放进同一个小镇世界里，每个角色都有位置、日程、关系、记忆、需求、情绪、长期目标、自我模型和行动过程。
 
 当前版本重点不是单纯生成剧情，而是让小镇像一个可持续运转的社会系统：本地规则负责世界约束、知识边界、移动、死亡、存档和越权审查，AI 负责局部判断、角色主观选择和复杂社会事件。
 
 ## 当前版本
 
-**V3.0 Cognitive Decision Engine**
+**V3.0.5 Character Genesis + V3.0 Cognitive Decision Engine**
+
+V3.0.5 升级了建城阶段：新角色出生时会生成独特的人格基础、认知倾向、行为倾向、人生经历、初始信念、习惯、偏好、恐惧、目标和关系动机。这些字段会写入存档，并参与后续 V3 Cognitive Decision Engine。
+
+建城流程现在是：
+
+```text
+用户输入
+↓
+SetupBlueprint
+↓
+CharacterSeedAgent
+↓
+SetupAgentBatch
+↓
+CharacterConsistencyAgent
+↓
+setupMakeAgent
+↓
+Vector 初始化
+↓
+存档
+```
+
+V3.0 运行时决策仍然保持：
 
 角色行动不再是“需求低了就执行某个动作”。现在流程是：
 

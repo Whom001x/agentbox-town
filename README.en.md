@@ -2,13 +2,39 @@
 
 [中文](README.md) | **English**
 
+Changelog: [CHANGELOG.md](CHANGELOG.md)
+
 AgentBox Town is a multi-agent virtual town simulator. It places many AI residents inside one persistent town world. Each resident has a location, schedule, relationships, memory, needs, emotions, long-term goals, self model, and action process.
 
 The goal is not only to generate stories. The project aims to simulate a small social system where local rules handle world constraints, knowledge boundaries, movement, death, saves, and authority checks, while AI handles local judgement, subjective choices, and complex social events.
 
 ## Current Version
 
-**V3.0 Cognitive Decision Engine**
+**V3.0.5 Character Genesis + V3.0 Cognitive Decision Engine**
+
+V3.0.5 upgrades the setup stage. New residents now start with distinct personality foundations, cognitive profiles, behavior tendencies, life history, initial beliefs, habits, preferences, fears, goals, and relationship intent. These fields are saved and later feed into the V3 Cognitive Decision Engine.
+
+Town creation now runs as:
+
+```text
+user input
+↓
+SetupBlueprint
+↓
+CharacterSeedAgent
+↓
+SetupAgentBatch
+↓
+CharacterConsistencyAgent
+↓
+setupMakeAgent
+↓
+Vector initialization
+↓
+save files
+```
+
+The V3.0 runtime decision flow remains:
 
 Residents no longer act by directly mapping low needs to actions. The runtime now uses:
 
