@@ -10,7 +10,23 @@ The goal is not only to generate stories. The project aims to simulate a small s
 
 ## Current Version
 
-**V3.3.2 Context Boundary & Runtime Compression + V3.3.1 Social Feedback & Stability + V3.3 Social Dynamics + V3.2 Cognitive State + V3.1.5 Character Genesis**
+**V3.3.3.1 Memory Importance Calibration + V3.3.3 Memory Gate + V3.3.2.1 Medical Recovery + V3.3.2 Context Boundary + V3.3.1 Social Feedback + V3.3 Social Dynamics**
+
+### V3.3.3.1 Memory Importance Calibration
+
+Calibrates the long-term memory importance layer. `MemoryImportanceGate` now uses calibrated `V_event`, `V_emotion`, `V_relation`, and `V_goal`, with `(V + 1e-6)^w * contextFactor * timeFactor` for long-term write probability. The release adds log scaling / quantile normalization, emotion valence, type-specific temporal decay, and similar-memory compression to keep ordinary events, medical sightings, and system residue out of personality memory.
+
+### V3.3.3 Memory Importance Gate
+
+Long-term memory writes now use a multiplicative gate. Event strength, emotion delta, relationship impact, goal impact, and context must work together before an event can become belief, habit, preference, episodic, or relationship memory. Ordinary daily actions and low-impact medical sightings remain in EventLog only, while real help, conflict, promises, trust changes, and goal impact can enter long-term memory.
+
+### V3.3.2.1 Medical Settlement & Recovery
+
+Fixes the health loop. Health now uses `critical / poor / normal / healthy`, and the clinic performs medical assessment, queueing, treatment, and multi-day recovery. Doctors work day duty and night on-call; sleep provides only small recovery; `afterTreatmentCooldown` prevents residents from being pulled back into `seek_care` immediately after treatment.
+
+### Runtime Reliability & Generation Status
+
+Adds a global AI rate limiter with exponential backoff and jitter so multiple Agent calls do not hit provider limits at the same time. The main UI now shows generation status: red means still generating, green means ready to start.
 
 ### V3.3.2 Context Boundary & Runtime Compression
 
@@ -105,6 +121,9 @@ slow personality and memory update
 ## Capabilities
 
 - Supports 100+ residents in one town simulation.
+- V3.3.3.1 memory importance calibration: distribution normalization, emotion valence, temporal decay, and similar-memory compression keep long-term memory growth stable.
+- V3.3.3 multiplicative MemoryGate: event strength, emotion, relationship, goal, and context jointly decide whether an event enters long-term personality memory.
+- V3.3.2.1 medical recovery loop: clinic capacity, doctor duty, treatment queue, recovery timeline, and after-treatment cooldown close the health loop.
 - V3.3.2 context boundary: World/Social/Scheduler/AgentAction use specialized lightweight views instead of sending full agents, raw memory, vector embeddings, or debug fields into prompts.
 - V3.3.1 social feedback stability: the social field modulates cognition and action scoring through `SocialFeedback` while `socialSensitivity` preserves personality continuity.
 - V3.3 social dynamics: information spreads probabilistically through relationships, space, trust, and emotional intensity, forming fear, curiosity, rumors, trust, and social tension.
@@ -116,6 +135,7 @@ slow personality and memory update
 - V3.0 cognitive decision making: `needs` affect attention, patience, risk tolerance, social tendency, and goal persistence instead of directly selecting actions.
 - Supports Structured Memory, Vector Memory, MemoryGate, daily reflection, and slow personality updates.
 - Supports local embedding models such as LM Studio at `http://127.0.0.1:12346/v1` with `text-embedding-bge-m3@q8_0`.
+- Supports global AI rate limiting, exponential backoff, jitter, key cooldown, and generation status indicators in the main UI.
 - Supports location institutions, location event chains, runtime location states, weather, dates, and daily plans.
 - Supports event propagation, relationship inertia, social processes, obligations, family sync, and professional services.
 - Supports multi-key routing, batched concurrency, retry loops, and per-Agent / per-role model configuration.

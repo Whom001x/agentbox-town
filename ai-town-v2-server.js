@@ -62,6 +62,9 @@ const MAX_REQUEST_BODY_BYTES = Number(process.env.AI_TOWN_MAX_REQUEST_BODY_BYTES
 const DEFAULT_MAX_CONCURRENT_PER_KEY = Number(process.env.AI_TOWN_MAX_CONCURRENT_PER_KEY || 20);
 const MAX_ACTIONS_HARD_LIMIT = 30;
 const AI_RETRY_DELAY_MS = Number(process.env.AI_TOWN_RETRY_DELAY_MS || 1000);
+const DEFAULT_AI_RATE_LIMIT_RPM = Number(process.env.AI_TOWN_RATE_LIMIT_RPM || 60);
+const DEFAULT_AI_RETRY_MAX_DELAY_MS = Number(process.env.AI_TOWN_RETRY_MAX_DELAY_MS || 60000);
+const DEFAULT_AI_RATE_LIMIT_COOLDOWN_MS = Number(process.env.AI_TOWN_RATE_LIMIT_COOLDOWN_MS || 60000);
 
 const aiConfig = {
   apiKeys: (process.env.AI_TOWN_API_KEYS || process.env.AI_TOWN_API_KEY || process.env.OPENAI_API_KEY || "")
@@ -77,6 +80,10 @@ const aiConfig = {
   schedulerIntervalMs: 2500,
   virtualMinutesPerPulse: 30,
   maxActionsPerCycle: 3,
+  aiRateLimitRpm: DEFAULT_AI_RATE_LIMIT_RPM,
+  aiRetryBaseDelayMs: AI_RETRY_DELAY_MS,
+  aiRetryMaxDelayMs: DEFAULT_AI_RETRY_MAX_DELAY_MS,
+  aiRateLimitCooldownMs: DEFAULT_AI_RATE_LIMIT_COOLDOWN_MS,
   vectorMemoryEnabled: true,
   vectorBaseUrl: "http://localhost:1234/v1",
   vectorModel: "",
@@ -99,7 +106,10 @@ const metrics = {
   lastDurationMs: 0,
   lastError: "",
   lastStatus: "idle",
-  continuousErrors: 0
+  continuousErrors: 0,
+  rateLimitWaits: 0,
+  lastRateLimitWaitMs: 0,
+  lastRetryDelayMs: 0
 };
 let keyCursor = 0;
 let keyHealth = [];
@@ -107,6 +117,8 @@ let metricsEpoch = 0;
 let callSeq = 0;
 let aiContinuousErrors = 0;
 let aiRetryEpoch = 0;
+let aiRateLimitQueue = Promise.resolve();
+let aiLastRequestStartedAt = 0;
 const callLogs = [];
 const activeAiControllers = new Set();
 let runtimeProcess = null;
@@ -312,10 +324,69 @@ async function delayUnlessCancelled(ms, retryEpoch) {
   if (retryEpoch !== aiRetryEpoch) throw makeAiRetryCancelledError();
 }
 
+function effectiveAiRateLimitRpm() {
+  const rpm = Number(aiConfig.aiRateLimitRpm);
+  if (!Number.isFinite(rpm) || rpm <= 0) return 0;
+  return Math.max(1, Math.round(rpm));
+}
+
+async function waitForAiRateLimit(retryEpoch) {
+  const rpm = effectiveAiRateLimitRpm();
+  if (!rpm) return;
+  const intervalMs = Math.ceil(60000 / rpm);
+  const queued = aiRateLimitQueue.catch(() => {}).then(async () => {
+    if (retryEpoch !== aiRetryEpoch) throw makeAiRetryCancelledError();
+    const waitMs = Math.max(0, aiLastRequestStartedAt + intervalMs - Date.now());
+    if (waitMs > 0) {
+      metrics.rateLimitWaits += 1;
+      metrics.lastRateLimitWaitMs = waitMs;
+      await delayUnlessCancelled(waitMs, retryEpoch);
+    }
+    aiLastRequestStartedAt = Date.now();
+  });
+  aiRateLimitQueue = queued.catch(() => {});
+  await queued;
+}
+
+function nextKeyAvailableDelayMs() {
+  ensureKeyHealth();
+  if (!aiConfig.apiKeys.length) return 0;
+  const now = Date.now();
+  const maxConcurrent = Math.max(1, Number(aiConfig.maxConcurrentPerKey || 1));
+  const allUnavailable = keyHealth.length > 0 && keyHealth.every(item => item.cooldownUntil > now || item.inFlight >= maxConcurrent);
+  if (!allUnavailable) return 0;
+  const cooldowns = keyHealth
+    .map(item => Number(item.cooldownUntil || 0) - now)
+    .filter(ms => ms > 0);
+  if (cooldowns.length) return Math.min(...cooldowns);
+  return 500;
+}
+
+function retryDelayForAttempt(attempt = 1, error = null) {
+  const base = clampNumber(aiConfig.aiRetryBaseDelayMs, 100, 600000, AI_RETRY_DELAY_MS);
+  const max = clampNumber(aiConfig.aiRetryMaxDelayMs, base, 1800000, DEFAULT_AI_RETRY_MAX_DELAY_MS);
+  const exponent = Math.min(8, Math.max(0, Number(attempt || 1) - 1));
+  const exponential = Math.min(max, Math.round(base * Math.pow(2, exponent)));
+  const low = Math.max(base, Math.floor(exponential * 0.65));
+  const high = Math.max(low, Math.min(max, Math.ceil(exponential * 1.35)));
+  const jittered = Math.round(low + Math.random() * Math.max(1, high - low));
+  const poolWait = error?.type === "key_pool_unavailable" ? nextKeyAvailableDelayMs() : 0;
+  const waitMs = Math.max(jittered, Math.min(max, poolWait + Math.round(Math.random() * 1000)));
+  metrics.lastRetryDelayMs = waitMs;
+  return waitMs;
+}
+
+function isRateLimitAiError(error) {
+  const message = String(error?.message || "");
+  return error?.type === "rate_limit"
+    || error?.status === 429
+    || /too\s*many\s*requests|rate[_\s-]*limit|rate\s*limited|rpm\s*exhausted|tpm\s*exhausted|请求过多|限流|频率/i.test(message);
+}
+
 function isRetryableAiError(error) {
   const message = String(error?.message || "");
   if (isPermanentAiError(error)) return false;
-  return ["upstream_error", "timeout", "key_pool_unavailable"].includes(error?.type)
+  return ["upstream_error", "timeout", "key_pool_unavailable", "rate_limit"].includes(error?.type)
     || error?.status === 429
     || /too\s*many\s*requests|rate[_\s-]*limit|rate\s*limited|请求过多|限流|频率/i.test(message)
     || /fetch failed|econnrefused|econnreset|enotfound|socket hang up|network/i.test(message)
@@ -370,6 +441,9 @@ function resetMetrics() {
   metrics.lastError = "";
   metrics.lastStatus = "idle";
   metrics.continuousErrors = 0;
+  metrics.rateLimitWaits = 0;
+  metrics.lastRateLimitWaitMs = 0;
+  metrics.lastRetryDelayMs = 0;
   aiContinuousErrors = 0;
   keyHealth.forEach(item => {
     item.success = 0;
@@ -429,6 +503,10 @@ function loadConfig() {
     aiConfig.schedulerIntervalMs = clampNumber(saved.schedulerIntervalMs, 0, 600000, aiConfig.schedulerIntervalMs);
     aiConfig.virtualMinutesPerPulse = clampNumber(saved.virtualMinutesPerPulse || saved.tickMinutes, 1, 240, aiConfig.virtualMinutesPerPulse);
     aiConfig.maxActionsPerCycle = clampNumber(saved.maxActionsPerCycle, 1, MAX_ACTIONS_HARD_LIMIT, aiConfig.maxActionsPerCycle);
+    aiConfig.aiRateLimitRpm = clampNumber(saved.aiRateLimitRpm, 0, 100000, aiConfig.aiRateLimitRpm);
+    aiConfig.aiRetryBaseDelayMs = clampNumber(saved.aiRetryBaseDelayMs, 100, 600000, aiConfig.aiRetryBaseDelayMs);
+    aiConfig.aiRetryMaxDelayMs = clampNumber(saved.aiRetryMaxDelayMs, aiConfig.aiRetryBaseDelayMs, 1800000, aiConfig.aiRetryMaxDelayMs);
+    aiConfig.aiRateLimitCooldownMs = clampNumber(saved.aiRateLimitCooldownMs, 1000, 3600000, aiConfig.aiRateLimitCooldownMs);
     if (saved.vectorMemoryEnabled !== undefined) aiConfig.vectorMemoryEnabled = Boolean(saved.vectorMemoryEnabled);
     if (typeof saved.vectorBaseUrl === "string" && saved.vectorBaseUrl.trim()) aiConfig.vectorBaseUrl = saved.vectorBaseUrl.trim().replace(/\/$/, "");
     if (typeof saved.vectorModel === "string") aiConfig.vectorModel = saved.vectorModel.trim();
@@ -462,6 +540,10 @@ function saveConfig() {
     schedulerIntervalMs: aiConfig.schedulerIntervalMs,
     virtualMinutesPerPulse: aiConfig.virtualMinutesPerPulse,
     maxActionsPerCycle: aiConfig.maxActionsPerCycle,
+    aiRateLimitRpm: aiConfig.aiRateLimitRpm,
+    aiRetryBaseDelayMs: aiConfig.aiRetryBaseDelayMs,
+    aiRetryMaxDelayMs: aiConfig.aiRetryMaxDelayMs,
+    aiRateLimitCooldownMs: aiConfig.aiRateLimitCooldownMs,
     vectorMemoryEnabled: aiConfig.vectorMemoryEnabled,
     vectorBaseUrl: aiConfig.vectorBaseUrl,
     vectorModel: aiConfig.vectorModel,
@@ -512,6 +594,10 @@ function savePostedConfigToFile(body) {
   if (body.schedulerIntervalMs !== undefined) next.schedulerIntervalMs = clampNumber(body.schedulerIntervalMs, 0, 600000, existing.schedulerIntervalMs ?? aiConfig.schedulerIntervalMs);
   if (body.virtualMinutesPerPulse !== undefined) next.virtualMinutesPerPulse = clampNumber(body.virtualMinutesPerPulse, 1, 240, existing.virtualMinutesPerPulse ?? aiConfig.virtualMinutesPerPulse);
   if (body.maxActionsPerCycle !== undefined) next.maxActionsPerCycle = clampNumber(body.maxActionsPerCycle, 1, MAX_ACTIONS_HARD_LIMIT, existing.maxActionsPerCycle ?? aiConfig.maxActionsPerCycle);
+  if (body.aiRateLimitRpm !== undefined) next.aiRateLimitRpm = clampNumber(body.aiRateLimitRpm, 0, 100000, existing.aiRateLimitRpm ?? aiConfig.aiRateLimitRpm);
+  if (body.aiRetryBaseDelayMs !== undefined) next.aiRetryBaseDelayMs = clampNumber(body.aiRetryBaseDelayMs, 100, 600000, existing.aiRetryBaseDelayMs ?? aiConfig.aiRetryBaseDelayMs);
+  if (body.aiRetryMaxDelayMs !== undefined) next.aiRetryMaxDelayMs = clampNumber(body.aiRetryMaxDelayMs, 100, 1800000, existing.aiRetryMaxDelayMs ?? aiConfig.aiRetryMaxDelayMs);
+  if (body.aiRateLimitCooldownMs !== undefined) next.aiRateLimitCooldownMs = clampNumber(body.aiRateLimitCooldownMs, 1000, 3600000, existing.aiRateLimitCooldownMs ?? aiConfig.aiRateLimitCooldownMs);
   if (body.vectorMemoryEnabled !== undefined) next.vectorMemoryEnabled = Boolean(body.vectorMemoryEnabled);
   if (typeof body.vectorBaseUrl === "string") next.vectorBaseUrl = body.vectorBaseUrl.trim().replace(/\/$/, "");
   if (typeof body.vectorModel === "string") next.vectorModel = body.vectorModel.trim();
@@ -547,6 +633,10 @@ function publicConfig() {
     effectiveMaxActionsPerCycle,
     maxConcurrentPerKey: aiConfig.maxConcurrentPerKey,
     judgementBatchSize: aiConfig.judgementBatchSize,
+    aiRateLimitRpm: aiConfig.aiRateLimitRpm,
+    aiRetryBaseDelayMs: aiConfig.aiRetryBaseDelayMs,
+    aiRetryMaxDelayMs: aiConfig.aiRetryMaxDelayMs,
+    aiRateLimitCooldownMs: aiConfig.aiRateLimitCooldownMs,
     vectorMemoryEnabled: aiConfig.vectorMemoryEnabled,
     vectorBaseUrl: aiConfig.vectorBaseUrl,
     vectorModel: aiConfig.vectorModel,
@@ -724,6 +814,9 @@ function publicMetrics() {
     localAi,
     keyCount: aiConfig.apiKeys.length,
     effectiveKeyCount,
+    aiRateLimitRpm: aiConfig.aiRateLimitRpm,
+    aiRetryBaseDelayMs: aiConfig.aiRetryBaseDelayMs,
+    aiRetryMaxDelayMs: aiConfig.aiRetryMaxDelayMs,
     keyHealth: publicKeyHealth()
   };
 }
@@ -4272,6 +4365,10 @@ function markKeyFailure(index, error, durationMs) {
     item.cooldownUntil = Date.now() + 60000;
     return;
   }
+  if (isRateLimitAiError(error)) {
+    item.cooldownUntil = Date.now() + clampNumber(aiConfig.aiRateLimitCooldownMs, 1000, 3600000, DEFAULT_AI_RATE_LIMIT_COOLDOWN_MS);
+    return;
+  }
   if (item.consecutiveFailures >= 3) {
     item.cooldownUntil = Date.now() + Math.min(300000, 30000 * item.consecutiveFailures);
   }
@@ -4659,14 +4756,15 @@ function normalizeUpstreamError(text, fallbackStatus) {
     const message = err.message || text || `AI request failed: ${fallbackStatus}`;
     const error = new Error(message);
     error.status = fallbackStatus;
-    error.type = isCredentialError({ message, status: fallbackStatus, type: err.type })
+    const probe = { message, status: fallbackStatus, type: err.type };
+    error.type = isCredentialError(probe)
       ? "credential_error"
-      : isQuotaExhaustedError({ message, type: err.type }) ? "quota_exhausted" : (err.type || "upstream_error");
+      : isQuotaExhaustedError(probe) ? "quota_exhausted" : isRateLimitAiError(probe) ? "rate_limit" : (err.type || "upstream_error");
     return error;
   } catch {
     const error = new Error(text || `AI request failed: ${fallbackStatus}`);
     error.status = fallbackStatus;
-    error.type = isCredentialError(error) ? "credential_error" : isQuotaExhaustedError(error) ? "quota_exhausted" : "upstream_error";
+    error.type = isCredentialError(error) ? "credential_error" : isQuotaExhaustedError(error) ? "quota_exhausted" : isRateLimitAiError(error) ? "rate_limit" : "upstream_error";
     return error;
   }
 }
@@ -5868,6 +5966,8 @@ aiRouter = createAiRouter({
     activeControllers: activeAiControllers,
     timeoutMs: AI_TIMEOUT_MS,
     retryDelayMs: AI_RETRY_DELAY_MS,
+    waitForRateLimit: waitForAiRateLimit,
+    retryDelayForAttempt,
     getRetryEpoch: () => aiRetryEpoch,
     getMetricsEpoch: () => metricsEpoch,
     nextApiKey,

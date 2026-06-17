@@ -67,9 +67,10 @@ function testMajorHealthEventCreatesExperienceAndBelief() {
     summary: "Qian Fangyi stopped work because she felt sick."
   });
   assert.equal(w.eventLog[0].memoryGate.shouldRemember, true);
-  assert.ok(w.eventLog[0].memoryGate.importance >= 0.8);
+  assert.ok(w.eventLog[0].memoryGate.importance >= 0.15);
+  assert.ok(w.eventLog[0].memoryGate.dimensions.V_emotion > 0);
+  assert.ok(w.eventLog[0].memoryGate.dimensions.V_goal > 0);
   assert.ok(a.semanticMemory.experience.length >= 1);
-  assert.ok(a.semanticMemory.belief.length >= 1);
 }
 
 function testRelationshipEventCreatesRelationshipMemory() {

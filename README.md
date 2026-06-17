@@ -10,7 +10,23 @@ AgentBox Town 是一个多 Agent 虚拟小镇模拟器。它把多个 AI 角色�
 
 ## 当前版本
 
-**V3.3.2 Context Boundary & Runtime Compression + V3.3.1 Social Feedback & Stability + V3.3 Social Dynamics + V3.2 Cognitive State + V3.1.5 Character Genesis**
+**V3.3.3.1 Memory Importance Calibration + V3.3.3 Memory Gate + V3.3.2.1 Medical Recovery + V3.3.2 Context Boundary + V3.3.1 Social Feedback + V3.3 Social Dynamics**
+
+### V3.3.3.1 Memory Importance Calibration
+
+升级长期记忆重要性校准层。`MemoryImportanceGate` 现在使用校准后的 `V_event`、`V_emotion`、`V_relation`、`V_goal`，按 `(V + 1e-6)^w * contextFactor * timeFactor` 计算长期写入概率。新增 log scaling / quantile normalization、情绪正负拆分、不同记忆类型时间衰减和相似记忆压缩，避免普通事件、医疗目击和系统残留污染人格记忆。
+
+### V3.3.3 Memory Importance Gate
+
+长期记忆不再由单一高分维度决定。事件强度、情绪变化、关系影响、目标影响必须共同成立，才会进入 belief、habit、preference、episodic 或 relationship。普通日常和旁观陌生人就医只进入 `EventLog`；真正的帮助、冲突、承诺和信任变化才会沉淀进 `relationshipMemory`。
+
+### V3.3.2.1 Medical Settlement & Recovery
+
+修复健康闭环。健康分为 `critical / poor / normal / healthy`，诊所会进行医疗评估、排队、治疗和多日恢复。医生白天值班，夜晚可 on-call；睡眠只提供小幅健康恢复；治疗后有 `afterTreatmentCooldown`，避免角色刚治疗完又被 `seek_care` 吸回诊所。
+
+### Runtime Reliability & Generation Status
+
+新增全局 AI 限速器和指数退避重试，避免多个 Agent 同步触发 provider 限流。主界面增加生成状态显示：红色表示“正在生成”，绿色表示“可以开始”。
 
 ### V3.3.2 Context Boundary & Runtime Compression
 
@@ -105,6 +121,9 @@ DailyReflection / IdentityEvolution
 ## 核心能力
 
 - 支持 100+ 角色的小镇模拟。
+- V3.3.3.1 记忆重要性校准：使用分布归一化、情绪正负、时间衰减和相似记忆压缩，让长期记忆分布更稳定。
+- V3.3.3 乘法 MemoryGate：事件强度、情绪、关系、目标和上下文共同决定是否进入长期人格记忆。
+- V3.3.2.1 医疗恢复闭环：诊所容量、医生值班、治疗队列、恢复时间线和治疗后冷却共同处理健康问题。
 - V3.3.2 上下文边界：World/Social/Scheduler/AgentAction 使用专用轻量视图，避免把完整 Agent、完整记忆、向量 embedding 和调试字段送入 prompt。
 - V3.3.1 社会反馈稳定：社会场通过 `SocialFeedback` 调制角色认知和行动评分，同时用 `socialSensitivity` 保持人格连续性。
 - V3.3 社会动态：信息按关系、空间、信任和情绪强度概率传播，形成恐惧、好奇、流言、信任和社会张力。
@@ -116,6 +135,7 @@ DailyReflection / IdentityEvolution
 - V3.0 认知决策：`needs` 只影响注意力、耐心、风险偏好、社交倾向和目标坚持度，不直接映射为行动。
 - 支持 `Structured Memory`、`Vector Memory`、`MemoryGate`、每日反思和人格慢更新。
 - 支持本地向量模型：例如 LM Studio 的 `http://127.0.0.1:12346/v1` + `text-embedding-bge-m3@q8_0`。
+- 支持全局 AI 限速、指数退避、随机抖动、Key 冷却和主界面生成状态提示。
 - 支持地点制度、地点事件链、地点运行状态、天气、日期、每日计划。
 - 支持事件传播、关系惯性、社交流程、承诺债务、家庭同步和职业服务。
 - 支持多 Key 分流、分批并发、失败重试、每个 Agent / 模块 / 角色独立模型配置。

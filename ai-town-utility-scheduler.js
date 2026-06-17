@@ -519,6 +519,13 @@ function contextFit(world, agent, action, extras = {}) {
   if (action.targetPlace && action.targetPlace === currentPlace) score += 8;
   if (plan && action.id === "follow_plan") score += plan.fixed ? 26 : 14;
   if (agent.activeProcess && action.id === "continue_process") score += 35;
+  if (action.id === "seek_care") {
+    const cooldownUntil = Number(agent.medicalState?.afterTreatmentCooldownUntil || 0);
+    const health = num(agent.needs?.health, 100);
+    if (cooldownUntil > Number(world?.clock || 0) && health > 20) {
+      score -= health >= 40 ? 24 : 10;
+    }
+  }
   const job = `${agent.job || ""} ${agent.ageStage || ""}`;
   if (/学生|小学生|中学生/.test(job) && plan?.localAction === "study" && !["follow_plan", "seek_care", "seek_safety"].includes(action.id)) score -= 12;
   if (agent.isSleeping && !["seek_care", "seek_safety"].includes(action.id)) score -= 40;

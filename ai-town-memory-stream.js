@@ -32,6 +32,53 @@ const routineActions = new Set([
   "plan_homework",
   "plan_maintain"
 ]);
+const MEMORY_IMPORTANCE_EPSILON = 1e-6;
+const defaultMemoryImportanceWeights = {
+  event: 1.0,
+  emotion: 1.5,
+  relation: 1.3,
+  goal: 1.2
+};
+const defaultNormalizationConfig = {
+  method: "log",
+  max: {
+    event: 100,
+    emotion: 50,
+    relation: 50,
+    goal: 100
+  },
+  sampleLimit: 512
+};
+const defaultMemoryDecayLambda = {
+  episodic: 0.0028,
+  belief: 0.00055,
+  habit: 0.0002,
+  relationship: 0.0008,
+  social: 0.0008,
+  preference: 0.00045,
+  goal: 0.00045
+};
+const defaultContextFactors = {
+  self: 1.0,
+  personal: 1.0,
+  direct: 1.0,
+  close_relation: 0.8,
+  family: 0.8,
+  familiar: 0.5,
+  same_place: 0.3,
+  witness: 0.3,
+  hearsay: 0.1,
+  indirect: 0.1
+};
+const blockedMemoryPatterns = [
+  /Followed plan/i,
+  /Followed the plan/i,
+  /Because of/i,
+  /Daily reflection/i,
+  /Received basic care at the clinic/i,
+  /JSON Schema/i,
+  /JSON指令|复杂的JSON|生成符合JSON/i
+];
 
 function clampNumber(value, min, max, fallback) {
   const number = Number(value);
@@ -61,6 +108,340 @@ function normalizeRatio(value, fallback = 0) {
   if (!Number.isFinite(number)) return fallback;
   if (number > 1) return clampNumber(number / (number <= 10 ? 10 : 100), 0, 1, fallback);
   return clampNumber(number, 0, 1, fallback);
+}
+
+function normalizedObjectValue(value, fallback = 0) {
+  if (value == null) return fallback;
+  if (typeof value === "number") return normalizeRatio(Math.abs(value), fallback);
+  if (Array.isArray(value)) return normalizeRatio(value.reduce((sum, item) => sum + Math.abs(Number(item) || 0), 0), fallback);
+  if (typeof value === "object") {
+    const numbers = Object.values(value).map(item => Math.abs(Number(item) || 0)).filter(Number.isFinite);
+    if (!numbers.length) return fallback;
+    return normalizeRatio(Math.max(...numbers), fallback);
+  }
+  return normalizeRatio(value, fallback);
+}
+
+function normalizedDeltaValue(value, fallback = 0) {
+  if (value == null) return fallback;
+  if (typeof value === "number") return clampNumber(Math.abs(value) / 50, 0, 1, fallback);
+  if (Array.isArray(value)) return clampNumber(value.reduce((sum, item) => sum + Math.abs(Number(item) || 0), 0) / 100, 0, 1, fallback);
+  if (typeof value === "object") {
+    const numbers = Object.values(value).map(item => Math.abs(Number(item) || 0)).filter(Number.isFinite);
+    if (!numbers.length) return fallback;
+    return clampNumber(Math.max(...numbers) / 50, 0, 1, fallback);
+  }
+  return normalizeRatio(value, fallback);
+}
+
+function memoryImportanceWeights(world = {}) {
+  const config = world.config?.memoryImportanceWeights || world.memoryImportanceWeights || {};
+  return {
+    event: clampNumber(config.event, 0.1, 5, defaultMemoryImportanceWeights.event),
+    emotion: clampNumber(config.emotion, 0.1, 5, defaultMemoryImportanceWeights.emotion),
+    relation: clampNumber(config.relation, 0.1, 5, defaultMemoryImportanceWeights.relation),
+    goal: clampNumber(config.goal, 0.1, 5, defaultMemoryImportanceWeights.goal)
+  };
+}
+
+function memoryImportanceThreshold(world = {}) {
+  return clampNumber(world.config?.memoryImportanceThreshold ?? world.memoryImportanceThreshold, 0, 1, 0.15);
+}
+
+function memoryNormalizationConfig(world = {}) {
+  const config = world.config?.memoryNormalization || world.memoryNormalization || {};
+  return {
+    method: String(config.method || defaultNormalizationConfig.method).toLowerCase(),
+    max: {
+      ...defaultNormalizationConfig.max,
+      ...(config.max || {})
+    },
+    sampleLimit: clampNumber(config.sampleLimit, 64, 5000, defaultNormalizationConfig.sampleLimit)
+  };
+}
+
+function logScale(value, maxValue = 100) {
+  const safeValue = Math.max(0, Number(value) || 0);
+  const safeMax = Math.max(1, Number(maxValue) || 100);
+  return clampNumber(Math.log1p(safeValue) / Math.log1p(safeMax), 0, 1, 0);
+}
+
+function calibrationState(world = {}) {
+  world.memoryImportanceCalibration ||= {};
+  world.memoryImportanceCalibration.dimensions ||= {};
+  return world.memoryImportanceCalibration;
+}
+
+function quantileNormalize(world = {}, dimension = "event", rawValue = 0, fallback = 0) {
+  const state = calibrationState(world);
+  const values = Array.isArray(state.dimensions[dimension]) ? state.dimensions[dimension] : [];
+  const value = Math.max(0, Number(rawValue) || 0);
+  let rank = fallback;
+  if (values.length >= 12) {
+    const belowOrEqual = values.filter(item => Number(item || 0) <= value).length;
+    rank = belowOrEqual / values.length;
+  }
+  values.push(value);
+  const limit = memoryNormalizationConfig(world).sampleLimit;
+  state.dimensions[dimension] = values.slice(-limit);
+  return clampNumber(rank, 0, 1, fallback);
+}
+
+function distributionNormalize(world = {}, dimension = "event", rawValue = 0, fallback = 0) {
+  const config = memoryNormalizationConfig(world);
+  const value = Math.max(0, Number(rawValue) || 0);
+  if (config.method === "quantile") {
+    return quantileNormalize(world, dimension, value, logScale(value, config.max[dimension]));
+  }
+  return logScale(value, config.max[dimension]);
+}
+
+function rawDeltaMagnitude(value, fallback = 0) {
+  if (value == null) return fallback;
+  if (typeof value === "number") return Math.abs(value);
+  if (Array.isArray(value)) return value.reduce((sum, item) => sum + Math.abs(Number(item) || 0), 0);
+  if (typeof value === "object") {
+    const numbers = Object.values(value).map(item => Math.abs(Number(item) || 0)).filter(Number.isFinite);
+    return numbers.length ? Math.max(...numbers) : fallback;
+  }
+  return Math.abs(Number(value) || fallback);
+}
+
+function emotionValenceFromEvent(event = {}) {
+  const deltas = event.emotionDelta && typeof event.emotionDelta === "object" ? event.emotionDelta : {};
+  const positiveKeys = ["happy", "hopeful", "calm", "curious"];
+  const negativeKeys = ["anxious", "angry", "sad", "tired", "lonely"];
+  const positiveImpact = positiveKeys.reduce((sum, key) => sum + Math.max(0, Number(deltas[key] || 0)), 0);
+  const negativeEmotionRise = negativeKeys.reduce((sum, key) => sum + Math.max(0, Number(deltas[key] || 0)), 0);
+  const positiveEmotionDrop = positiveKeys.reduce((sum, key) => sum + Math.max(0, -Number(deltas[key] || 0)), 0);
+  const negativeImpact = negativeEmotionRise + positiveEmotionDrop;
+  const explicit = event.emotionValence || {};
+  const text = eventTextForGate(event);
+  const successBoost = /success|achievement|bonding|helped|saved|完成|成功|帮助|信任|亲近/.test(text) ? 18 : 0;
+  const fearBoost = /fear|trauma|loss|death|risk|danger|conflict|失败|恐惧|创伤|失去|死亡|风险|冲突/.test(text) ? 22 : 0;
+  const positive = Math.max(positiveImpact + successBoost, rawDeltaMagnitude(explicit.positiveImpact, 0));
+  const negative = Math.max(negativeImpact + fearBoost, rawDeltaMagnitude(explicit.negativeImpact, 0));
+  const intensity = Math.max(rawDeltaMagnitude(event.emotionDelta, 0), rawDeltaMagnitude(explicit.intensity, 0), positive, negative, Number(event.emotionalIntensity || 0));
+  return {
+    positiveImpact: Number(distributionNormalize({}, "emotion", positive, 0).toFixed(3)),
+    negativeImpact: Number(distributionNormalize({}, "emotion", negative, 0).toFixed(3)),
+    intensity: Number(distributionNormalize({}, "emotion", intensity, 0).toFixed(3)),
+    raw: { positive, negative, intensity }
+  };
+}
+
+function emotionMemoryWeight(event = {}, valence = emotionValenceFromEvent(event)) {
+  const text = eventTextForGate(event);
+  const positive = Number(valence.positiveImpact || 0);
+  const negative = Number(valence.negativeImpact || 0);
+  const strongPositive = positive >= 0.62 || /success|bonding|achievement|完成|成功|帮助|信任|亲近/.test(text);
+  const strongNegative = negative >= 0.62 || /fear|trauma|loss|death|risk|danger|conflict|恐惧|创伤|失去|死亡|风险|冲突/.test(text);
+  if (strongPositive && positive >= negative) {
+    return {
+      belief: 1.08,
+      preference: 1.16,
+      safety: 0.96,
+      label: "positive"
+    };
+  }
+  if (strongNegative) {
+    return {
+      belief: 1.12,
+      preference: 0.96,
+      safety: 1.2,
+      label: "negative"
+    };
+  }
+  return {
+    belief: 0.92,
+    preference: 0.9,
+    safety: 0.96,
+    label: "ordinary"
+  };
+}
+
+function memoryTypeForDecay(event = {}) {
+  const hint = structuredTypeOf(event.memoryTypeHint || event.memoryType || "");
+  if (hint === "social") return "relationship";
+  return hint || "episodic";
+}
+
+function timeFactorForEvent(world = {}, event = {}, type = "episodic") {
+  const clock = Number(world.clock || event.clock || 0);
+  const eventClock = Number(event.clock ?? clock);
+  const delta = Math.max(0, clock - eventClock);
+  const config = world.config?.memoryDecayLambda || world.memoryDecayLambda || {};
+  const lambda = clampNumber(config[type], 0, 1, defaultMemoryDecayLambda[type] ?? defaultMemoryDecayLambda.episodic);
+  const factor = Math.exp(-lambda * delta);
+  if (type === "relationship" || type === "social") {
+    return clampNumber(factor * (0.75 + contextFactorForEvent({}, event) * 0.25), 0, 1, factor);
+  }
+  return clampNumber(factor, 0, 1, 1);
+}
+
+function isBlockedMemoryText(text = "") {
+  const value = String(text || "");
+  return blockedMemoryPatterns.some(pattern => pattern.test(value));
+}
+
+function relationStrength(agent = {}, targetAgentId = "") {
+  if (!targetAgentId || targetAgentId === agent.id) return 0.55;
+  const rel = agent.relationshipMatrix?.[targetAgentId] || agent.relations?.[targetAgentId] || agent.relationships?.[targetAgentId] || null;
+  if (!rel) return 0.05;
+  if (typeof rel === "number") return normalizeRatio(rel, 0.05);
+  return normalizeRatio(Math.max(
+    Number(rel.trust || 0),
+    Number(rel.intimacy || 0),
+    Number(rel.familiarity || 0),
+    Number(rel.dependency || 0),
+    Number(rel.respect || 0)
+  ), 0.05);
+}
+
+function contextFactorForEvent(agent = {}, event = {}) {
+  if (Number.isFinite(Number(event.contextFactor))) return clampNumber(event.contextFactor, 0, 1, 0.3);
+  const scope = String(event.contextScope || event.knownByMode || "").trim();
+  if (scope && Object.prototype.hasOwnProperty.call(defaultContextFactors, scope)) return defaultContextFactors[scope];
+  if (!event.targetAgentId || event.targetAgentId === agent.id || event.agentId === agent.id) return 1.0;
+  const relation = relationStrength(agent, event.targetAgentId);
+  if (isDirectSocialEvent(event)) return relation >= 0.35 ? 0.8 : 0.65;
+  if (relation >= 0.7) return 0.8;
+  if (relation >= 0.35) return 0.5;
+  if (event.samePlace || event.place === (agent.position || agent.place || "")) return 0.3;
+  return 0.1;
+}
+
+function eventTextForGate(event = {}) {
+  return String([
+    event.summary,
+    event.type,
+    event.actionType,
+    event.interruption?.type,
+    event.planTitle,
+    event.localAction
+  ].filter(Boolean).join(" ")).toLowerCase();
+}
+
+function isDirectSocialEvent(event = {}, text = eventTextForGate(event)) {
+  return Boolean(event.targetAgentId)
+    && (/social|relationship|trust|helped|saved|betray|conflict|argument|promise|apolog/.test(text)
+      || /邻居|朋友|家人|帮助|信任|冲突|争吵|承诺|道歉/.test(text));
+}
+
+function normalizedMemoryDimensions(world = {}, agent = {}, event = {}) {
+  const routine = event.category === "routine";
+  const text = eventTextForGate(event);
+  const ownEvent = !event.targetAgentId || event.targetAgentId === agent.id || event.agentId === agent.id;
+  const valence = emotionValenceFromEvent(event);
+  const rawEvent = Number.isFinite(Number(event.eventImpact))
+    ? Number(event.eventImpact)
+    : clampNumber(event.abnormality, 0, 100, routine ? 4 : 25);
+  const rawEmotion = Math.max(
+    rawDeltaMagnitude(event.emotionDelta, 0),
+    rawDeltaMagnitude(event.emotionValence?.intensity, 0),
+    Number(event.emotionalIntensity || 0),
+    valence.raw?.intensity || 0,
+    routine ? 5 : 20
+  );
+  const rawRelation = event.relationshipDelta || event.relationDelta
+    ? rawDeltaMagnitude(event.relationshipDelta ?? event.relationDelta, 0)
+    : Number.isFinite(Number(event.relationImpact))
+      ? Number(event.relationImpact)
+      : ownEvent
+        ? 35
+        : relationStrength(agent, event.targetAgentId) * 100;
+  const rawGoal = event.goalDelta
+    ? rawDeltaMagnitude(event.goalDelta, 0)
+    : Number.isFinite(Number(event.goalImpact))
+      ? Number(event.goalImpact)
+      : Number.isFinite(Number(event.futureImpact))
+        ? Number(event.futureImpact) * (ownEvent ? 1 : 0.45)
+        : (ownEvent ? 25 : 8);
+  let V_event = distributionNormalize(world, "event", rawEvent, routine ? 0.04 : 0.25);
+  let V_emotion = distributionNormalize(world, "emotion", rawEmotion, routine ? 0.05 : 0.2);
+  let V_relation = distributionNormalize(world, "relation", rawRelation, ownEvent ? 0.35 : relationStrength(agent, event.targetAgentId));
+  let V_goal = distributionNormalize(world, "goal", rawGoal, ownEvent ? 0.25 : 0.08);
+
+  if (/death|dead|die|fatal/.test(text)) {
+    V_event = Math.max(V_event, 1);
+    V_emotion = Math.max(V_emotion, ownEvent ? 0.95 : 0.65);
+    V_goal = Math.max(V_goal, ownEvent ? 0.9 : 0.35);
+  }
+  if (/crisis|injury|ill|sick|risk|danger/.test(text)) {
+    V_event = Math.max(V_event, 0.75);
+    V_emotion = Math.max(V_emotion, ownEvent ? 0.62 : 0.18);
+    V_goal = Math.max(V_goal, ownEvent ? 0.62 : 0.16);
+  }
+  if (/hospital|clinic|doctor|medical/.test(text) && !ownEvent) {
+    V_event = Math.max(V_event, 0.55);
+    V_emotion = Math.min(Math.max(V_emotion, 0.12), 0.35);
+    V_goal = Math.min(Math.max(V_goal, 0.08), 0.25);
+  }
+  if (/conflict|argument|fight|betray|promise/.test(text)) {
+    V_event = Math.max(V_event, 0.72);
+    V_emotion = Math.max(V_emotion, 0.52);
+    V_relation = Math.max(V_relation, 0.65);
+    V_goal = Math.max(V_goal, 0.38);
+  }
+  if (/helped|help|saved|care/.test(text) && event.targetAgentId) {
+    V_event = Math.max(V_event, 0.72);
+    V_relation = Math.max(V_relation, relationStrength(agent, event.targetAgentId), 0.68);
+    V_emotion = Math.max(V_emotion, 0.52);
+    V_goal = Math.max(V_goal, ownEvent ? 0.62 : 0.45);
+  }
+  if (isDirectSocialEvent(event, text)) {
+    V_event = Math.max(V_event, 0.82);
+    V_relation = Math.max(V_relation, 0.82);
+    V_emotion = Math.max(V_emotion, 0.65);
+    V_goal = Math.max(V_goal, 0.7);
+  }
+  if (event.interruption?.canOverridePlan) {
+    const priority = normalizeRatio(event.interruption.priority, 0.7);
+    V_event = Math.max(V_event, priority);
+    V_emotion = Math.max(V_emotion, ["health", "safety"].includes(event.interruption.type) ? 0.72 : 0.55);
+    V_goal = Math.max(V_goal, ["health", "safety"].includes(event.interruption.type) ? 0.85 : 0.62);
+    V_relation = Math.max(V_relation, 0.55);
+  }
+
+  return {
+    V_event: Number(clampNumber(V_event, 0, 1, 0).toFixed(3)),
+    V_emotion: Number(clampNumber(V_emotion, 0, 1, 0).toFixed(3)),
+    V_relation: Number(clampNumber(V_relation, 0, 1, 0).toFixed(3)),
+    V_goal: Number(clampNumber(V_goal, 0, 1, 0).toFixed(3)),
+    raw: {
+      event: Number(rawEvent.toFixed(3)),
+      emotion: Number(rawEmotion.toFixed(3)),
+      relation: Number(rawRelation.toFixed(3)),
+      goal: Number(rawGoal.toFixed(3))
+    },
+    emotionValence: valence
+  };
+}
+
+function multiplicativeMemoryImportance(world = {}, agent = {}, event = {}) {
+  const weights = memoryImportanceWeights(world);
+  const dimensions = normalizedMemoryDimensions(world, agent, event);
+  const contextFactor = contextFactorForEvent(agent, event);
+  const memoryType = memoryTypeForDecay(event);
+  const timeFactor = timeFactorForEvent(world, event, memoryType);
+  const valence = dimensions.emotionValence || emotionValenceFromEvent(event);
+  const emotionWeight = emotionMemoryWeight(event, valence);
+  const importance = (
+    (dimensions.V_event + MEMORY_IMPORTANCE_EPSILON) ** weights.event
+    * (dimensions.V_emotion + MEMORY_IMPORTANCE_EPSILON) ** weights.emotion
+    * (dimensions.V_relation + MEMORY_IMPORTANCE_EPSILON) ** weights.relation
+    * (dimensions.V_goal + MEMORY_IMPORTANCE_EPSILON) ** weights.goal
+  ) * contextFactor * timeFactor;
+  return {
+    importance: Number(clampNumber(importance, 0, 1, 0).toFixed(3)),
+    dimensions,
+    weights,
+    contextFactor: Number(contextFactor.toFixed(3)),
+    timeFactor: Number(timeFactor.toFixed(3)),
+    memoryTypeForDecay: memoryType,
+    emotionValence: valence,
+    emotionMemoryWeight: emotionWeight
+  };
 }
 
 function ensureSelfModel(agent = {}) {
@@ -356,7 +737,13 @@ function syncStructuredMemory(agent, item = {}) {
     target: item.target || "",
     evidenceIds: Array.isArray(item.evidenceIds) ? item.evidenceIds.slice(0, 8) : [],
     tags: Array.isArray(item.tags) ? item.tags.slice(0, 8) : [],
-    decay: item.decay ?? 0
+    decay: item.decay ?? 0,
+    compressionKey: item.compressionKey || "",
+    count: Number(item.count || 1),
+    firstTime: item.firstTime ?? item.createdAt ?? item.at ?? 0,
+    lastTime: item.lastTime ?? item.lastSeenAt ?? item.at ?? 0,
+    averageImportance: item.averageImportance ?? item.importance ?? 3,
+    summary: item.summary || item.meaning || item.text || ""
   };
   const existingIndex = store.findIndex(entry => entry.id === structured.id || (entry.text && entry.text === structured.text));
   if (existingIndex >= 0) store[existingIndex] = { ...store[existingIndex], ...structured };
@@ -398,6 +785,27 @@ function appendVectorMemory(agent, memory = {}) {
   else agent.vectorMemory.unshift(item);
   agent.vectorMemory = agent.vectorMemory.slice(0, 180);
   return item;
+}
+
+function normalizedMemoryTextKey(text = "") {
+  return String(text || "")
+    .toLowerCase()
+    .replace(/\d+/g, "")
+    .replace(/[，。！？、,.!?:;"'「」『』（）()]/g, " ")
+    .replace(/\b(agent|evt|mem|sem|vec)_[a-z0-9_]+\b/g, "")
+    .replace(/周[一二三四五六日天]\s*\d{1,2}:\d{2}/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 80);
+}
+
+function memoryCompressionKey(memory = {}, type = "experience", text = "") {
+  if (memory.compressionKey) return String(memory.compressionKey).slice(0, 140);
+  const target = memory.target || "";
+  const tags = Array.isArray(memory.tags) ? memory.tags.filter(Boolean).slice(0, 3).join(":") : "";
+  const eventClass = memory.eventClass || memory.trigger || memory.action || "";
+  const normalized = normalizedMemoryTextKey(text || memory.meaning || memory.text || "");
+  return [type, target, tags || eventClass || normalized].filter(Boolean).join(":").slice(0, 160);
 }
 
 function structuredMemoryForAgent(agent = {}, perType = 8) {
@@ -505,7 +913,7 @@ function appendLegacyMemory(agent, memory = {}) {
   ensureMemory(agent);
   const layer = legacyLayers.includes(memory.layer) ? memory.layer : "short";
   const text = String(memory.text || "").trim();
-  if (!text || isRoutineEventLogText(text)) return null;
+  if (!text || isRoutineEventLogText(text) || isBlockedMemoryText(text)) return null;
   const at = Number(memory.at || 0);
   const dedupeKey = memory.dedupeKey || `${layer}:${text}`;
   if (agent.memory[layer].some(item => item?.dedupeKey === dedupeKey || item?.text === text)) return null;
@@ -530,18 +938,28 @@ function appendSemanticMemory(agent, memory = {}) {
   const store = ensureSemanticMemory(agent);
   const type = semanticTypes.includes(memory.type) ? memory.type : "experience";
   const text = String(memory.text || memory.meaning || "").trim();
-  if (!text) return null;
+  if (!text || isBlockedMemoryText(text)) return null;
   const at = Number(memory.at || 0);
   const dedupeKey = memory.dedupeKey || `${type}:${text}`;
-  const existing = store[type].find(item => item?.dedupeKey === dedupeKey || item?.text === text);
+  const compressionKey = memoryCompressionKey(memory, type, text);
+  const existing = store[type].find(item => item?.dedupeKey === dedupeKey || item?.text === text || (compressionKey && item?.compressionKey === compressionKey));
   if (existing) {
-    existing.count = Number(existing.count || 1) + 1;
+    const previousCount = Number(existing.count || 1);
+    const nextCount = previousCount + 1;
+    const incomingImportance = clampNumber(memory.importance, 1, 5, 3);
+    const previousAverage = Number(existing.averageImportance || existing.importance || incomingImportance);
+    existing.count = nextCount;
+    existing.firstTime = Number(existing.firstTime ?? existing.createdAt ?? existing.at ?? at);
+    existing.lastTime = Math.max(Number(existing.lastTime || existing.lastSeenAt || 0), at);
+    existing.averageImportance = Number(((previousAverage * previousCount + incomingImportance) / nextCount).toFixed(3));
     existing.lastSeenAt = Math.max(Number(existing.lastSeenAt || 0), at);
     existing.lastConfirmed = Math.max(Number(existing.lastConfirmed || 0), at);
-    existing.importance = Math.max(Number(existing.importance || 1), clampNumber(memory.importance, 1, 5, 3));
+    existing.importance = Math.max(Number(existing.importance || 1), incomingImportance);
     existing.strength = clampNumber(Number(existing.strength || 45) + clampNumber(memory.strengthDelta, 1, 12, 3), 0, 100, 50);
     existing.confidence = Math.max(normalizeRatio(existing.confidence, 0.5), normalizeRatio(memory.confidence, 0.5));
     existing.sourceEvents = uniqueStrings([existing.sourceEvents, memory.sourceEvents, memory.evidenceIds], 8);
+    existing.summary = existing.summary || existing.meaning || existing.text;
+    existing.compressionKey ||= compressionKey;
     syncStructuredMemory(agent, existing);
     appendVectorMemory(agent, {
       ...existing,
@@ -572,7 +990,13 @@ function appendSemanticMemory(agent, memory = {}) {
     source: memory.source || "memory-consolidator",
     evidenceIds: Array.isArray(memory.evidenceIds) ? memory.evidenceIds.slice(0, 8) : [],
     tags: Array.isArray(memory.tags) ? memory.tags.slice(0, 8) : [],
-    dedupeKey
+    dedupeKey,
+    compressionKey,
+    count: 1,
+    firstTime: at,
+    lastTime: at,
+    averageImportance: clampNumber(memory.importance, 1, 5, 3),
+    summary: String(memory.summary || memory.meaning || text).slice(0, 260)
   };
   store[type].unshift(item);
   store[type] = store[type].slice(0, type === "habit" ? 40 : 60);
@@ -685,16 +1109,14 @@ function beliefFromEvent(agent, event = {}) {
 }
 
 function importanceFromEvent(event = {}) {
-  const abnormality = clampNumber(event.abnormality, 0, 100, 0);
-  const emotionalIntensity = clampNumber(event.emotionalIntensity, 0, 100, 0);
-  const futureImpact = clampNumber(event.futureImpact, 0, 100, 0);
-  const score = (abnormality * emotionalIntensity * futureImpact) / 10000;
+  const result = multiplicativeMemoryImportance({}, {}, event);
+  const score = result.importance * 100;
   let importance = 1;
-  if (score >= 8) importance = 2;
-  if (score >= 18) importance = 3;
-  if (score >= 32) importance = 4;
-  if (score >= 50) importance = 5;
-  return { score, importance };
+  if (result.importance >= 0.15) importance = 2;
+  if (result.importance >= 0.25) importance = 3;
+  if (result.importance >= 0.38) importance = 4;
+  if (result.importance >= 0.55) importance = 5;
+  return { score, importance, ...result };
 }
 
 function estimateEventSignals(detail = {}) {
@@ -724,37 +1146,24 @@ function memoryGate(world = {}, agent = {}, event = {}) {
   const kind = routineKind(event);
   const currentHabit = agent.memoryProfile?.habits?.[`habit:${kind}`] || {};
   const routineCount = routine ? Number(currentHabit.count || 0) + 1 : 0;
-  const text = `${event.summary || ""} ${event.type || ""} ${event.actionType || ""} ${event.interruption?.type || ""}`.toLowerCase();
-  let abnormality = clampNumber(event.abnormality, 0, 100, routine ? 4 : 25);
-  let emotionalIntensity = clampNumber(event.emotionalIntensity, 0, 100, routine ? 5 : 20);
-  let futureImpact = clampNumber(event.futureImpact, 0, 100, routine ? 12 : 25);
-
-  if (/death|dead|die|fatal|crisis|hospital|clinic|doctor|conflict|argument|fight|promise|help|injury|ill|sick|risk|danger/i.test(text)) {
-    abnormality = Math.max(abnormality, 68);
-    emotionalIntensity = Math.max(emotionalIntensity, 55);
-    futureImpact = Math.max(futureImpact, 62);
-  }
-  if (/relationship|trust|betray|neighbor|friend|family|help|conflict|argument/i.test(text)) {
-    futureImpact = Math.max(futureImpact, 58);
-  }
-
-  let importance = (abnormality * emotionalIntensity * futureImpact) / 1000000;
-  if (/death|dead|die|fatal/i.test(text)) importance = Math.max(importance, 0.92);
-  if (/conflict|argument|fight|betray|helped|help|saved|care|promise/i.test(text)) importance = Math.max(importance, 0.55);
-  if (event.interruption?.canOverridePlan && clampNumber(event.interruption?.priority, 0, 100, 0) >= 90) {
-    importance = Math.max(importance, ["health", "safety"].includes(event.interruption.type) ? 0.82 : 0.68);
-  }
+  const text = eventTextForGate(event);
+  const model = multiplicativeMemoryImportance(world, agent, event);
+  const baseThreshold = memoryImportanceThreshold(world);
+  const threshold = !routine && model.emotionMemoryWeight?.label === "ordinary" ? Math.min(0.95, baseThreshold * 1.15) : baseThreshold;
+  let importance = model.importance;
   let memoryType = "episodic";
   if (routine) {
-    importance = routineCount >= 3 ? Math.max(0.5, Math.min(0.72, 0.38 + routineCount * 0.04)) : Math.min(0.29, importance);
+    importance = routineCount >= 3 ? Math.max(threshold, Math.min(0.28, 0.14 + routineCount * 0.035)) : Math.min(threshold * 0.66, importance);
     memoryType = routineCount >= 3 ? "habit" : "";
-  } else if (/relationship|trust|betray|neighbor|friend|family|help|conflict|argument/i.test(text)) {
+  } else if ((isDirectSocialEvent(event, text) || /relationship|trust|betray|neighbor|friend|family|helped|saved|conflict|argument|promise/i.test(text)) && model.dimensions.V_relation >= 0.35) {
     memoryType = "social";
-  } else if (importance >= 0.8 || /belief|value|realize|learned|important/i.test(text)) {
+  } else if (event.interruption?.canOverridePlan && ["health", "safety"].includes(event.interruption.type)) {
+    memoryType = "belief";
+  } else if (importance >= 0.35 || /belief|value|realize|learned|important/i.test(text)) {
     memoryType = "belief";
   }
 
-  const shouldRemember = routine ? routineCount >= 3 : importance >= 0.5;
+  const shouldRemember = routine ? routineCount >= 3 : (!isBlockedMemoryText(event.summary || "") && importance >= threshold);
   return {
     shouldRemember,
     importance: Number(clampNumber(importance, 0, 1, 0).toFixed(3)),
@@ -762,7 +1171,15 @@ function memoryGate(world = {}, agent = {}, event = {}) {
     routine,
     routineKind: kind,
     routineCount,
-    personalityImpact: importance >= 0.8,
+    dimensions: model.dimensions,
+    weights: model.weights,
+    contextFactor: model.contextFactor,
+    timeFactor: model.timeFactor,
+    emotionValence: model.emotionValence,
+    emotionMemoryWeight: model.emotionMemoryWeight,
+    threshold,
+    formula: "((V_event + epsilon)^w_event * (V_emotion + epsilon)^w_emotion * (V_relation + epsilon)^w_relation * (V_goal + epsilon)^w_goal) * contextFactor * timeFactor",
+    personalityImpact: importance >= 0.45,
     reason: shouldRemember
       ? routine ? "repeated routine became habit" : "event has future behavioral impact"
       : "ordinary event stays in EventLog only"
@@ -857,7 +1274,7 @@ function consolidateEvent(world, agent, event = {}) {
     tags: [semanticType, event.interruption?.type, event.actionType].filter(Boolean),
     dedupeKey: `${semanticType}:${agent.id}:${event.interruption?.type || event.actionType || event.type}`
   });
-  const belief = gate.personalityImpact || importance >= 4 ? beliefFromEvent(agent, event) : "";
+  const belief = gate.memoryType === "belief" || gate.personalityImpact || importance >= 4 ? beliefFromEvent(agent, event) : "";
   if (belief) {
     appendSemanticMemory(agent, {
       type: "belief",
@@ -921,6 +1338,14 @@ function recordLifeEvent(world, agent, detail = {}) {
     summary: String(detail.summary || "").slice(0, 240),
     planTitle: detail.plan?.title || "",
     localAction: detail.plan?.localAction || "",
+    targetAgentId: detail.targetAgentId || detail.targetId || "",
+    contextScope: detail.contextScope || detail.knownByMode || "",
+    contextFactor: detail.contextFactor,
+    emotionDelta: detail.emotionDelta || null,
+    relationshipDelta: detail.relationshipDelta || detail.relationDelta || detail.relationshipChange || null,
+    relationImpact: detail.relationImpact ?? detail.relationshipImpact,
+    goalImpact: detail.goalImpact,
+    goalDelta: detail.goalDelta || null,
     interruption: detail.interruption ? {
       type: detail.interruption.type || "",
       priority: detail.interruption.priority || 0,

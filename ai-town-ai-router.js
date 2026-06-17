@@ -9,6 +9,7 @@ function createAiRouter(options = {}) {
   async function runOnce(task, payload = {}, retryEpoch = runtime?.getRetryEpoch?.()) {
     if (callOnce) return callOnce(task, payload, retryEpoch);
     if (!runtime) throw new Error("AI router runtime is not configured");
+    if (runtime.waitForRateLimit) await runtime.waitForRateLimit(retryEpoch, task, payload);
     const selectedKey = runtime.nextApiKey();
     if (!selectedKey) throw runtime.makeNoKeyError();
     const started = Date.now();
@@ -124,6 +125,9 @@ function createAiRouter(options = {}) {
       } catch (error) {
         if (retryEpoch !== runtime.getRetryEpoch() || error?.type === "ai_retry_cancelled") throw runtime.makeCancelledError();
         const continuousErrors = runtime.addContinuousError();
+        const waitMs = runtime.retryDelayForAttempt
+          ? runtime.retryDelayForAttempt(attempt, error)
+          : runtime.retryDelayMs;
         runtime.pushCallLog({
           task,
           model: runtime.modelForTask(task, payload),
@@ -131,11 +135,11 @@ function createAiRouter(options = {}) {
           agentId: payload?.agent?.id || payload?.candidate?.agentId || "",
           agentName: payload?.agent?.name || "",
           status: "retry_wait",
-          durationMs: runtime.retryDelayMs,
-          error: `全局连续错误 ${continuousErrors}；本请求第 ${attempt} 次失败：${String(error.message || error).slice(0, 180)}。将持续重试直到手动停止`
+          durationMs: waitMs,
+          error: `Global consecutive errors ${continuousErrors}; request attempt ${attempt} failed: ${String(error.message || error).slice(0, 180)}. Retry in ${waitMs}ms with backoff/jitter until manually stopped`
         });
         attempt += 1;
-        await runtime.delayUnlessCancelled(runtime.retryDelayMs, retryEpoch);
+        await runtime.delayUnlessCancelled(waitMs, retryEpoch);
       }
     }
   }

@@ -148,7 +148,11 @@ function updateSleepStates(world, minutesPassed) {
     if (agent.isSleeping) {
       agent.energy = clamp(agent.energy + minutesPassed * 0.18, 0, 100);
       agent.sleepQuality = clamp(agent.sleepQuality + minutesPassed * 0.08, 0, 100);
-      adjustNeeds(agent, { stress: minutesPassed * 0.035, comfort: minutesPassed * 0.025, hunger: -minutesPassed * 0.006 });
+      const restQuality = clamp(Number(agent.sleepQuality || 75) / 100, 0.35, 1);
+      const restRecovery = Number(agent.needs?.health ?? 100) < 70
+        ? (minutesPassed / 60) * 0.5 * restQuality * ageRecoveryFactor(agent)
+        : 0;
+      adjustNeeds(agent, { stress: minutesPassed * 0.035, comfort: minutesPassed * 0.025, hunger: -minutesPassed * 0.006, health: restRecovery });
       adjustEmotion(agent, { calm: minutesPassed * 0.025, tired: -minutesPassed * 0.05 });
       agent.currentTask = "睡眠休息";
     } else {
@@ -228,6 +232,15 @@ function applyPassiveNeedRecovery(world, minutesPassed) {
     if (wellFed && stableStress && safeEnough && health > 0 && health < 95) {
       changes.health = Math.max(changes.health || 0, hours * (here === "apartment" ? 0.8 : 0.25));
     }
+    if (here === "clinic" && health > 0 && health < 70) {
+      const assessment = medicalAssessment(agent);
+      const staffAvailable = clinicCareAvailableFor(world, agent) || Number(world.clinicRuntime?.staffAvailable || 0) > 0;
+      const clinicRate = assessment.severity === "critical" ? 2.5 : assessment.severity === "poor" ? 1.6 : 0.6;
+      const waitingRate = staffAvailable ? clinicRate : 0.4;
+      changes.health = Math.max(changes.health || 0, hours * waitingRate * ageRecoveryFactor(agent));
+      changes.safety = Math.max(changes.safety || 0, hours * 2);
+      changes.stress = Math.max(changes.stress || 0, hours * 2);
+    }
     if (Object.keys(changes).length) adjustNeeds(agent, changes);
   });
 }
@@ -270,8 +283,193 @@ function placeName(world, id) {
 }
 
 function isMedicalWorker(agent) {
-  const job = String(agent?.job || "");
-  return /医生|护士|医护|护理|药房|doctor|nurse|clinic|medical|鍖荤敓|鎶ゅ＋|鍖绘姢|鎶ょ悊/i.test(job);
+  const job = `${agent?.job || ""} ${agent?.profession || ""} ${agent?.role || ""}`.toLowerCase();
+  return /doctor|nurse|clinic|medical|pharmacy/.test(job)
+    || job.includes("医生")
+    || job.includes("护士")
+    || job.includes("医护")
+    || job.includes("护理")
+    || job.includes("药房")
+    || job.includes("卫生")
+    || /鍖荤敓|鎶ゅ＋|鍖绘姢|鎶ょ悊/i.test(job);
+}
+
+function agentAgeStage(agent) {
+  const age = Number(agent?.age || agent?.ageYears || 0);
+  if (agent?.ageStage) return agent.ageStage;
+  if (age && age < 13) return "child";
+  if (age && age < 18) return "teen";
+  if (age >= 65) return "elder";
+  return "adult";
+}
+
+function ageRecoveryFactor(agent) {
+  const stage = agentAgeStage(agent);
+  if (stage === "child") return 1.25;
+  if (stage === "teen") return 1.1;
+  if (stage === "elder") return 0.65;
+  return 1;
+}
+
+function healthState(health) {
+  const value = clamp(health, 0, 100);
+  if (value < 20) return "critical";
+  if (value < 40) return "poor";
+  if (value < 70) return "normal";
+  return "healthy";
+}
+
+function medicalAssessment(agent) {
+  const health = Number(agent?.needs?.health ?? 100);
+  const stress = Number(agent?.needs?.stress ?? 70);
+  const severity = healthState(health);
+  const diseaseState = agent?.diseaseState || agent?.medicalState?.diseaseState || "";
+  const recentEvents = Array.isArray(agent?.recentEvents) ? agent.recentEvents.slice(-5) : [];
+  const diseaseFlag = Boolean(diseaseState) && !/none|healthy|clear/i.test(String(diseaseState));
+  const treatmentRequired = severity === "critical"
+    || severity === "poor"
+    || diseaseFlag
+    || (severity === "normal" && stress < 35);
+  const recoveryPlan = severity === "critical"
+    ? "urgent_treatment"
+    : severity === "poor"
+      ? "clinic_treatment"
+      : severity === "normal"
+        ? "rest_and_observe"
+        : "maintain_health";
+  return {
+    severity,
+    treatmentRequired,
+    recoveryPlan,
+    inputs: {
+      health: clamp(health, 0, 100),
+      ageStage: agentAgeStage(agent),
+      stress: clamp(stress, 0, 100),
+      diseaseState,
+      recentEvents
+    }
+  };
+}
+
+function medicalTreatmentEffect(agent, assessment, options = {}) {
+  const health = Number(agent?.needs?.health ?? 100);
+  const severity = assessment?.severity || healthState(health);
+  const ranges = {
+    critical: [15, 25],
+    poor: [5, 15],
+    normal: [1, 3],
+    healthy: [0, 0]
+  };
+  const [min, max] = ranges[severity] || ranges.normal;
+  if (max <= 0) return 0;
+  const deficit = clamp((100 - health) / 100, 0, 1);
+  const staffFactor = clamp(Number(options.staffFactor ?? 1), 0.65, 1.2);
+  const timeFactor = clamp(Number(options.timeFactor ?? 1), 0.25, 1.5);
+  const amount = (min + (max - min) * deficit) * ageRecoveryFactor(agent) * staffFactor * timeFactor;
+  return Number(clamp(amount, min * 0.55, max).toFixed(2));
+}
+
+function ensureClinicRuntime(world) {
+  world.clinicRuntime ||= {};
+  world.clinicRuntime.medicalCapacity = Number(world.clinicRuntime.medicalCapacity || 0);
+  world.clinicRuntime.currentPatients ||= [];
+  world.clinicRuntime.staffAvailable = Number(world.clinicRuntime.staffAvailable || 0);
+  world.clinicRuntime.treatmentQueue ||= [];
+  return world.clinicRuntime;
+}
+
+function updateClinicRuntime(world) {
+  const runtime = ensureClinicRuntime(world);
+  const agents = Array.isArray(world.agents) ? world.agents : [];
+  const patients = agents
+    .filter(agent => !isDead(agent) && placeId(agent) === "clinic" && Number(agent.needs?.health ?? 100) < 70)
+    .sort((a, b) => Number(a.needs?.health ?? 100) - Number(b.needs?.health ?? 100));
+  const staff = agents.filter(agent => !isDead(agent) && placeId(agent) === "clinic" && isMedicalWorker(agent));
+  runtime.currentPatients = patients.map(agent => agent.id);
+  runtime.staffAvailable = staff.length;
+  runtime.medicalCapacity = Math.max(0, staff.length * 6);
+  runtime.treatmentQueue = patients.map(agent => agent.id);
+  runtime.updatedAt = world.clock || 0;
+  return runtime;
+}
+
+function assignMedicalDuty(world, agent, mode) {
+  if (!agent || isDead(agent)) return false;
+  ensureAgentShape(agent);
+  if (Number(agent.needs?.health ?? 100) < 15) return false;
+  agent.movement = null;
+  agent.position = "clinic";
+  agent.place = "clinic";
+  agent.isSleeping = false;
+  agent.currentTask = mode === "on_call" ? "夜间应急值守诊所" : "诊所值班接诊";
+  agent.medicalDutyState = {
+    mode,
+    assignedAt: world.clock || 0,
+    until: (world.clock || 0) + (mode === "on_call" ? 180 : 720)
+  };
+  return true;
+}
+
+function doctorDutySystem(world) {
+  const agents = Array.isArray(world.agents) ? world.agents : [];
+  const staff = agents.filter(agent => !isDead(agent) && isMedicalWorker(agent));
+  if (!staff.length) {
+    updateClinicRuntime(world);
+    return;
+  }
+  const minute = Number(world.clock || 0) % 1440;
+  const hour = Math.floor(minute / 60);
+  const isDayShift = hour >= 7 && hour < 19;
+  const clinicPatients = agents.filter(agent => !isDead(agent) && placeId(agent) === "clinic" && Number(agent.needs?.health ?? 100) < 40);
+  const currentStaff = staff.filter(agent => placeId(agent) === "clinic");
+  const targetStaff = isDayShift ? Math.min(staff.length, Math.max(1, Math.ceil(staff.length / 2))) : (clinicPatients.length ? 1 : 0);
+  let assigned = currentStaff.length;
+  if (assigned < targetStaff) {
+    const candidates = staff
+      .filter(agent => placeId(agent) !== "clinic")
+      .sort((a, b) => Number(b.needs?.health ?? 100) - Number(a.needs?.health ?? 100));
+    for (const candidate of candidates) {
+      if (assigned >= targetStaff) break;
+      if (assignMedicalDuty(world, candidate, isDayShift ? "day_shift" : "on_call")) assigned += 1;
+    }
+  }
+  updateClinicRuntime(world);
+}
+
+function scheduleRecoveryTimeline(world, agent, assessment) {
+  agent.medicalState ||= {};
+  const severity = assessment?.severity || healthState(agent.needs?.health);
+  const base = severity === "critical" ? [10, 8, 5] : severity === "poor" ? [6, 4, 2] : [2, 1];
+  const factor = ageRecoveryFactor(agent);
+  const day = minutesToClock(world.clock || 0).day;
+  agent.medicalState.recoveryTimeline = {
+    startedAt: world.clock || 0,
+    lastAppliedDay: day,
+    steps: base.map(value => Number((value * factor).toFixed(2))),
+    severity
+  };
+}
+
+function applyRecoveryTimeline(world) {
+  const day = minutesToClock(world.clock || 0).day;
+  (world.agents || []).forEach(agent => {
+    if (isDead(agent)) return;
+    const timeline = agent.medicalState?.recoveryTimeline;
+    if (!timeline || !Array.isArray(timeline.steps) || !timeline.steps.length) return;
+    if (Number(timeline.lastAppliedDay || 0) >= day) return;
+    const health = Number(agent.needs?.health ?? 100);
+    if (health >= 70) {
+      delete agent.medicalState.recoveryTimeline;
+      return;
+    }
+    const amount = Number(timeline.steps.shift() || 0);
+    if (amount > 0) {
+      adjustNeeds(agent, { health: amount, comfort: 2, stress: 2 });
+      agent.currentTask = "按医嘱恢复身体";
+    }
+    timeline.lastAppliedDay = day;
+    if (!timeline.steps.length || Number(agent.needs?.health ?? 100) >= 70) delete agent.medicalState.recoveryTimeline;
+  });
 }
 
 function isClinicLinked(world, agent) {
@@ -444,90 +642,130 @@ function applyMedicalEscalation(world, minutesPassed) {
   world.basicLifeDone ||= {};
   const now = minutesToClock(world.clock || 0);
   const slot = `${now.day}-${now.h}`;
+  const runtime = updateClinicRuntime(world);
+  const staff = (world.agents || []).filter(agent => !isDead(agent) && placeId(agent) === "clinic" && isMedicalWorker(agent));
+  const treatmentOrder = new Map((runtime.treatmentQueue || []).map((id, index) => [id, index]));
+  const capacity = Number(runtime.medicalCapacity || 0);
   (world.agents || []).forEach(agent => {
     if (isDead(agent)) return;
     ensureAgentShape(agent);
     const health = Number(agent.needs?.health ?? 100);
     const here = placeId(agent);
+    const assessment = medicalAssessment(agent);
+    const level = assessment.severity;
     agent.terminalState ||= { criticalMinutes: 0, lastReasons: [], since: world.clock || 0 };
     agent.medicalState ||= { knownBy: [], undiscoveredMinutes: 0, lastLevel: "none" };
-    if (health > 30) {
+    agent.medicalState.lastLevel = level;
+    agent.medicalState.lastCheckedAt = world.clock || 0;
+    agent.medicalState.assessment = {
+      severity: level,
+      treatmentRequired: assessment.treatmentRequired,
+      recoveryPlan: assessment.recoveryPlan,
+      checkedAt: world.clock || 0
+    };
+
+    if (level === "healthy") {
       if (agent.lifeStatus === "critical") agent.lifeStatus = "alive";
       agent.terminalState.criticalMinutes = 0;
       agent.terminalState.healthZeroMinutes = 0;
-      agent.medicalState.lastLevel = "none";
       agent.medicalState.undiscoveredMinutes = 0;
       return;
     }
-    const level = health <= 0 ? "critical" : health <= 8 ? "urgent" : health <= 15 ? "alert" : "mild";
-    agent.medicalState.lastLevel = level;
-    agent.medicalState.lastCheckedAt = world.clock || 0;
-    const nearby = notifyNearbyForMedicalHelp(world, agent, level);
+
+    const shouldNotifyMedical = assessment.treatmentRequired || level === "critical" || level === "poor" || here === "clinic";
+    const nearby = shouldNotifyMedical ? notifyNearbyForMedicalHelp(world, agent, level) : [];
     const knownCount = Array.isArray(agent.medicalState.knownBy) ? agent.medicalState.knownBy.length : 0;
     if (!nearby.length && !knownCount && here !== "clinic") {
       agent.medicalState.undiscoveredMinutes = Number(agent.medicalState.undiscoveredMinutes || 0) + Number(minutesPassed || 0);
     } else {
       agent.medicalState.undiscoveredMinutes = 0;
     }
-    if (level === "mild") {
-      if (!agent.currentTask) agent.currentTask = "身体不适，放慢节奏";
-      return;
+
+    if (level === "critical") {
+      agent.lifeStatus = "critical";
+      agent.isSleeping = false;
     }
-    agent.lifeStatus = health <= 8 ? "critical" : agent.lifeStatus;
-    agent.isSleeping = false;
+
     if (here === "clinic") {
-      const staff = nearby.filter(isMedicalWorker);
-      if (staff.length) {
-        const key = `medical-care-${slot}-${agent.id}`;
-        if (!world.basicLifeDone[key]) {
-          adjustNeeds(agent, { health: health <= 0 ? 24 : 18, safety: 12, stress: 12, comfort: 8, hunger: agent.needs.hunger <= 5 ? 12 : 0 });
-          if (agent.needs.health > 15 && agent.lifeStatus === "critical") agent.lifeStatus = "alive";
-          agent.currentTask = "在诊所接受基础救治";
-          agent.medicalState.treatedAt = world.clock || 0;
-          agent.terminalState.healthZeroMinutes = 0;
-          world.basicLifeDone[key] = true;
-          pushRecord(world, "基础救治", `${agent.name}在诊所有医护在场，获得基础救治。`, "medical", [agent.id, ...staff.slice(0, 3).map(item => item.id)]);
+      const key = `medical-care-${slot}-${agent.id}`;
+      const queueIndex = treatmentOrder.has(agent.id) ? treatmentOrder.get(agent.id) : capacity;
+      const canTreat = staff.length > 0 && queueIndex < capacity;
+      const shouldTreat = assessment.treatmentRequired || level === "normal";
+      if (canTreat && shouldTreat && !world.basicLifeDone[key]) {
+        const effect = medicalTreatmentEffect(agent, assessment, {
+          staffFactor: Math.min(1.2, 0.85 + staff.length * 0.08),
+          timeFactor: clamp(Number(minutesPassed || 60) / 60, 0.5, 1.2)
+        });
+        adjustNeeds(agent, {
+          health: effect,
+          safety: level === "critical" ? 12 : 8,
+          stress: level === "critical" ? 12 : 8,
+          comfort: level === "critical" ? 8 : 5,
+          hunger: agent.needs.hunger <= 5 ? 12 : 0
+        });
+        if (agent.needs.health > 20 && agent.lifeStatus === "critical") agent.lifeStatus = "alive";
+        agent.currentTask = "在诊所接受治疗";
+        agent.medicalState.treatedAt = world.clock || 0;
+        agent.medicalState.afterTreatmentCooldownUntil = (world.clock || 0) + (Number(agent.needs.health || 0) >= 40 ? 720 : 360);
+        agent.terminalState.healthZeroMinutes = 0;
+        scheduleRecoveryTimeline(world, agent, assessment);
+        world.basicLifeDone[key] = true;
+        pushRecord(world, "医疗治疗", `${agent.name}在诊所完成${level}级健康处理，健康恢复${effect}。`, "medical", [agent.id, ...staff.slice(0, 3).map(item => item.id)]);
+      } else if (!staff.length) {
+        adjustNeeds(agent, { safety: 2, stress: 2, comfort: 1, health: level === "critical" ? 1.5 : 0.5 });
+        agent.currentTask = "在诊所候诊观察";
+        const waitKey = `medical-wait-${slot}-${agent.id}`;
+        if (!world.basicLifeDone[waitKey]) {
+          pushRecord(world, "候诊等待", `${agent.name}已经到诊所，但暂时没有可见医护，只能等待处理。`, "medical", [agent.id]);
+          world.basicLifeDone[waitKey] = true;
         }
       } else {
-        adjustNeeds(agent, { safety: 2, stress: 2, health: health <= 0 ? 1 : 0 });
-        agent.currentTask = "在诊所等待医护处理";
-        pushRecord(world, "候诊等待", `${agent.name}已经到诊所，但暂时没有可见医护，只能等待处理。`, "medical", [agent.id]);
+        adjustNeeds(agent, { safety: 1, stress: 1, comfort: 1, health: 0.5 });
+        agent.currentTask = "在诊所排队候诊";
       }
       return;
     }
-    if (health <= 8) {
+
+    if (level === "normal" && !assessment.treatmentRequired) {
+      if (!agent.currentTask) agent.currentTask = "身体状态一般，放慢节奏";
+      return;
+    }
+
+    if (level === "critical" || level === "poor") {
       agent.activeProcess ||= {
         goal: "寻求医疗帮助",
         stage: nearby.length ? "ask_nearby_help" : "not_yet_discovered",
         currentStep: nearby.length ? "向附近的人求助，准备前往诊所" : "身体不适但附近无人发现",
-        progress: 10,
+        progress: level === "critical" ? 20 : 10,
         blockedBy: nearby.length ? "waiting_for_escort" : "undiscovered",
         updatedAt: world.clock || 0
       };
-      agent.currentTask = nearby.length ? "请求附近人帮助前往诊所" : "身体严重不适，等待被发现";
-      if (nearby.length && !agent.movement) {
+      agent.currentTask = level === "critical"
+        ? (nearby.length ? "请求附近人帮助前往诊所" : "身体严重不适，等待被发现")
+        : "身体较差，准备就医或休养";
+      if (!agent.movement && (level === "critical" || health < 30 || nearby.length)) {
         const escort = nearby.find(item => isMedicalWorker(item)) || nearby[0];
         agent.movement = {
           from: here,
           to: "clinic",
           departAt: world.clock || 0,
           arriveAt: (world.clock || 0) + (level === "critical" ? 20 : 35),
-          reason: "medical_escort",
+          reason: level === "critical" ? "medical_escort" : "medical_visit",
           escortBy: escort?.id || ""
         };
         agent.activeProcess = {
           ...(agent.activeProcess || {}),
           goal: "寻求医疗帮助",
-          stage: "escort_to_clinic",
-          currentStep: `${escort?.name || "附近的人"}正在协助前往诊所`,
-          progress: Math.max(Number(agent.activeProcess?.progress || 0), 35),
+          stage: "go_to_clinic",
+          currentStep: escort ? `${escort.name}正在协助前往诊所` : "前往诊所检查身体",
+          progress: Math.max(Number(agent.activeProcess?.progress || 0), level === "critical" ? 45 : 30),
           blockedBy: "",
           updatedAt: world.clock || 0
         };
-        if (escort && !isDead(escort)) {
-          escort.currentTask = `协助${agent.name}前往诊所`;
-        }
-        pushRecord(world, "送医协助", `${agent.name}情况危急，${escort?.name || "附近的人"}协助前往诊所。`, "medical", [agent.id, ...nearby.slice(0, 4).map(item => item.id)]);
+        if (escort && !isDead(escort)) escort.currentTask = `协助${agent.name}前往诊所`;
+        pushRecord(world, level === "critical" ? "送医协助" : "就医安排", escort
+          ? `${agent.name}身体不适，${escort.name}协助前往诊所。`
+          : `${agent.name}身体较差，准备前往诊所。`, "medical", [agent.id, ...nearby.slice(0, 4).map(item => item.id)]);
       }
       const key = `medical-alert-${slot}-${agent.id}`;
       if (!world.basicLifeDone[key]) {
@@ -543,12 +781,13 @@ function applyMedicalEscalation(world, minutesPassed) {
         });
         world.medicalEscalations = world.medicalEscalations.slice(0, 200);
         pushRecord(world, "医疗求助", nearby.length
-          ? `${agent.name}身体严重不适，附近的${nearby.map(item => item.name).slice(0, 4).join("、")}已经注意到。`
-          : `${agent.name}身体严重不适，但附近暂时无人发现。`, "medical", [agent.id, ...nearby.slice(0, 6).map(item => item.id)]);
+          ? `${agent.name}身体不适，附近的${nearby.map(item => item.name).slice(0, 4).join("、")}已经注意到。`
+          : `${agent.name}身体不适，但附近暂时无人发现。`, "medical", [agent.id, ...nearby.slice(0, 6).map(item => item.id)]);
         world.basicLifeDone[key] = true;
       }
     }
   });
+  updateClinicRuntime(world);
 }
 
 function applyBasicLifeMaintenance(world) {
@@ -759,11 +998,13 @@ function nodeStepPayload(payload, options = {}) {
     agent.previousEmotionVector = { ...(agent.emotionVector || {}) };
   });
   updateSleepStates(world, minutes);
+  doctorDutySystem(world);
+  advanceMovement(world);
   applyTimeDecay(world, minutes);
   applyPassiveNeedRecovery(world, minutes);
+  applyRecoveryTimeline(world);
   applyBasicLifeMaintenance(world);
   applyMedicalEscalation(world, minutes);
-  advanceMovement(world);
   evaluateMortalityByCause(world);
   pushLog(world, "Node Core Tick", `纯 Node 核心推进 ${minutes} 分钟：睡眠、生理、基础维护、移动和死亡检查已结算。`);
   next.world = world;

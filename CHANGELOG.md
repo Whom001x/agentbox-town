@@ -1,5 +1,69 @@
 # 更新记录
 
+## 2026-06-17 - V3.3.3.1 Memory Importance Calibration Layer
+
+- 升级 `MemoryImportanceGate` 数值校准层，不改变已有 Memory Routing 结构。
+- importance 公式改为 `Π((V_i + ε)^w_i) * contextFactor * timeFactor`，其中 `ε = 1e-6`，避免严格零值让记忆完全无法形成。
+- 新增 `Normalization Pipeline`，每个维度先经过分布归一化再进入乘法模型；默认使用 log scaling，并保留 quantile normalization 支持。
+- 情绪维度拆成 `emotionValence`：`positiveImpact`、`negativeImpact`、`intensity`，避免只靠情绪强度判断。
+- 新增 `emotionMemoryWeight`：强正面事件更偏 belief/preference，强负面事件更偏 avoidance/safety belief，普通情绪降低长期写入概率。
+- 新增 `timeFactor` 和不同记忆类型衰减：episodic 较快、belief 较慢、habit 最慢、relationship 按关系上下文修正。
+- 新增相似长期记忆压缩：合并同类记忆并保留 `count`、`firstTime`、`lastTime`、`averageImportance`，避免无限增长。
+- 新增 `npm run check:memory-calibration`，运行 10000 事件验证写入率、分布、极端情绪、时间衰减和压缩。
+
+验证：
+- `npm run check:memory-importance`
+- `npm run check:memory-calibration`
+- `npm run check:memory-filter`
+- `npm run check:memory-gate`
+- `npm run check:memory-consolidator`
+- `npm run check:all`
+
+## 2026-06-17 - V3.3.3 Memory Importance Multiplicative Gate
+
+- 将长期记忆写入判断从线性加权升级为四维乘法模型：`V_event`、`V_emotion`、`V_relation`、`V_goal`。
+- 新增 `contextFactor`：本人经历、亲密关系、熟人、同地点目击、间接听闻使用不同权重。
+- 普通事件、医疗目击、低情绪/低关系/低目标影响事件只进入 `EventLog`，不再轻易污染长期人格记忆。
+- 直接帮助、冲突、承诺、信任变化才进入 `relationshipMemory`，旁观陌生人去诊所不会直接形成人格关系记忆。
+- 阻断系统/英文残留进入记忆：`Followed plan`、`Because of`、`Daily reflection`、`Received basic care at the clinic`、`JSON Schema`。
+- 新增 `npm run check:memory-importance` 和 `npm run check:memory-filter`。
+
+验证：
+- `npm run check:memory-importance`
+- `npm run check:memory-filter`
+- `npm run check:memory-gate`
+- `npm run check:memory-consolidator`
+- `npm run check:all`
+
+## 2026-06-17 - V3.3.2.1 Medical Settlement & Recovery Loop
+
+- 重做健康闭环：`health` 分为 `critical`、`poor`、`normal`、`healthy`，不再让 `mild/poor` 状态无处理。
+- 新增 `MedicalAssessment`，根据健康、年龄、压力、疾病状态和近期事件判断严重度、是否需要治疗和恢复计划。
+- 新增 `medicalTreatmentEffect()`：critical 恢复 15-25，poor 恢复 5-15，normal 恢复 1-3，并按年龄修正。
+- 新增医生值班机制：白天诊所值班，夜晚有患者时 on-call，避免所有医护同时睡觉导致诊所无人处理。
+- 新增 `clinicRuntime`：`medicalCapacity`、`currentPatients`、`staffAvailable`、`treatmentQueue`。
+- 新增 `recoveryTimeline`，治疗后按多日逐步恢复，不再依赖一次性瞬间恢复。
+- 睡眠增加小幅 `restRecovery`，但不会大量恢复健康。
+- 新增 `afterTreatmentCooldown`，治疗后一段时间降低 `seek_care` 权重，避免医疗吸附。
+- 新增 `npm run check:medical-loop`，验证 100 tick 后低健康、诊所人口、治疗记录和 `treatedAt`。
+
+验证：
+- `npm run check:medical-loop`
+- `npm run check:life-engine`
+- `npm run check:action-eligibility`
+- `npm run check:all`
+
+## 2026-06-17 - Runtime Reliability & Generation Status
+
+- 新增全局 AI 限速器，按 RPM/QPS 排队，避免多个 Agent 同步撞到 provider 限流。
+- 重试策略改为指数退避 + 随机抖动，失败后持续重试但不再固定 1000ms 同步冲击。
+- 新增配置项：`aiRateLimitRpm`、`aiRetryBaseDelayMs`、`aiRetryMaxDelayMs`、`aiRateLimitCooldownMs`。
+- AI metrics 增加 `rateLimitWaits`、`lastRateLimitWaitMs`、`lastRetryDelayMs`。
+- 主界面新增生成状态显示：红色表示“正在生成”，绿色表示“可以开始”；runtime tick 失败不再误判为 setup 生成失败。
+
+验证：
+- `npm run check:all`
+
 ## 2026-06-16 - V3.3.2 Context Boundary & Runtime Compression Layer
 
 - 新增 `ai-town-context-builder.js`，把完整世界状态转换成 AgentAction、World Agent、Social Agent、Scheduler 各自需要的轻量上下文视图。
