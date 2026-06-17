@@ -10,7 +10,15 @@ AgentBox Town 是一个多 Agent 虚拟小镇模拟器。它把多个 AI 角色�
 
 ## 当前版本
 
-**V3.3.3.1 Memory Importance Calibration + V3.3.3 Memory Gate + V3.3.2.1 Medical Recovery + V3.3.2 Context Boundary + V3.3.1 Social Feedback + V3.3 Social Dynamics**
+**V3.3.5 Relationship Memory Formation + V3.3.4 Temporal Causal Graph + V3.3.3.1 Memory Importance Calibration + V3.3.3 Memory Gate + V3.3.2.1 Medical Recovery + V3.3.2 Context Boundary + V3.3.1 Social Feedback**
+
+### V3.3.5 Relationship Memory Formation
+
+新增长期关系记忆形成层。`relationshipMatrix` 仍然保存关系数值，但重要互动现在会通过 `MemoryImportanceGate` 沉淀为 `relationshipMemory`，记录对象、关系类型、信任、熟悉度、情绪标签、互动次数、最后互动时间和来源事件。普通打招呼、闲聊、路过不会进入长期关系记忆；帮助、冲突、共同完成目标、承诺、关系修复和危险事件会形成可追溯的 `relationshipCause`，并影响后续 `contact_familiar`、`ask_help`、`avoid_person`、`cooperate` 等行为倾向。
+
+### V3.3.4 Temporal Causal Graph
+
+新增时序因果图层。世界现在不只保存 `EventLog`，还会在高强度事件后写入 `causalGraph`，记录 `event -> action -> stateChange -> belief/goal/relationship` 的因果链。普通低强度事件不会生成因果边；所有边都保证原因时间早于结果时间；重复出现的相似链路会强化 `patterns`。每日 Reflection 会读取因果链生成 `lessonLearned` 和 `counterfactual`，长期记忆也会保存 `sourceCausalChain` 方便追溯。
 
 ### V3.3.3.1 Memory Importance Calibration
 
@@ -121,6 +129,7 @@ DailyReflection / IdentityEvolution
 ## 核心能力
 
 - 支持 100+ 角色的小镇模拟。
+- V3.3.4 时序因果图：高强度事件会形成 `causalGraph`，Reflection 和长期记忆可追溯事件为什么产生影响。
 - V3.3.3.1 记忆重要性校准：使用分布归一化、情绪正负、时间衰减和相似记忆压缩，让长期记忆分布更稳定。
 - V3.3.3 乘法 MemoryGate：事件强度、情绪、关系、目标和上下文共同决定是否进入长期人格记忆。
 - V3.3.2.1 医疗恢复闭环：诊所容量、医生值班、治疗队列、恢复时间线和治疗后冷却共同处理健康问题。

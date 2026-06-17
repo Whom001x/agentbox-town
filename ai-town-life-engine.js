@@ -4,6 +4,7 @@ const { currentPlanItem, ensureDailyPlans, findPlace } = require("./ai-town-plan
 const { detectInterruption } = require("./ai-town-interruptions");
 const { recordLifeEvent } = require("./ai-town-memory-stream");
 const { clamp, placeId, isAlive } = require("./ai-town-sim-utils");
+const { applyNeedActivity } = require("./ai-town-need-dynamics");
 
 function adjustNeeds(agent, delta = {}) {
   agent.needs ||= {};
@@ -73,7 +74,7 @@ function executeInterruption(world, agent, interruption) {
       agent.currentTask = "去吃点东西";
       action = { type: "move_for_food", summary: localSummary(agent, `去${placeName(world, food)}吃点东西`) };
     } else {
-      adjustNeeds(agent, { hunger: 32, comfort: 3, stress: 2 });
+      applyNeedActivity(agent, "eat");
       adjustEmotion(agent, { angry: -2, tired: -1, calm: 1 });
       agent.currentTask = "简单吃点东西";
       action = { type: "eat", summary: localSummary(agent, "简单吃点东西") };
@@ -84,7 +85,7 @@ function executeInterruption(world, agent, interruption) {
       agent.currentTask = "去诊所看看";
       action = { type: "move_for_health", summary: localSummary(agent, `去${placeName(world, clinic)}看看身体状况`) };
     } else {
-      adjustNeeds(agent, { health: 4, safety: 4, comfort: 2, stress: 2 });
+      applyNeedActivity(agent, "health_rest");
       agent.currentTask = "休息观察身体";
       action = { type: "health_rest", summary: localSummary(agent, "停下来休息，观察身体状况") };
     }
@@ -94,7 +95,7 @@ function executeInterruption(world, agent, interruption) {
       agent.currentTask = "去更安全的地方";
       action = { type: "move_for_safety", summary: localSummary(agent, `去${placeName(world, safePlace)}避开风险`) };
     } else {
-      adjustNeeds(agent, { safety: 8, comfort: 2, stress: 2 });
+      applyNeedActivity(agent, "safety");
       agent.currentTask = "留在原地避开风险";
       action = { type: "stay_safe", summary: localSummary(agent, "留在原地，避开明显风险") };
     }
@@ -105,7 +106,7 @@ function executeInterruption(world, agent, interruption) {
       action = { type: "move_for_rest", summary: localSummary(agent, "回家休息") };
     } else {
       agent.energy = clamp(Number(agent.energy ?? 50) + 10, 0, 100, 50);
-      adjustNeeds(agent, { comfort: 5, stress: 4 });
+      applyNeedActivity(agent, "rest");
       adjustEmotion(agent, { tired: -4, calm: 2 });
       agent.currentTask = "短暂休息";
       action = { type: "rest", summary: localSummary(agent, "短暂休息一下") };
@@ -116,7 +117,7 @@ function executeInterruption(world, agent, interruption) {
       agent.currentTask = "回家收拾一下";
       action = { type: "move_for_hygiene", summary: localSummary(agent, "回家洗漱整理") };
     } else {
-      adjustNeeds(agent, { hygiene: 28, comfort: 4, social: 1 });
+      applyNeedActivity(agent, "clean");
       agent.currentTask = "洗漱整理";
       action = { type: "clean_up", summary: localSummary(agent, "简单洗漱整理") };
     }
@@ -152,16 +153,18 @@ function executePlan(world, agent, plan) {
 
   const localAction = String(plan.localAction || "maintain");
   if (localAction === "meal" && canEatAt(world, agent)) {
-    adjustNeeds(agent, { hunger: 22, comfort: 3, stress: 1 });
+    applyNeedActivity(agent, "meal");
   } else if (localAction === "sleep") {
     agent.isSleeping = true;
     agent.energy = clamp(Number(agent.energy ?? 60) + 8, 0, 100, 60);
-    adjustNeeds(agent, { stress: 3, comfort: 2, hunger: -1 });
+    applyNeedActivity(agent, "sleep");
   } else if (localAction === "rest") {
     agent.energy = clamp(Number(agent.energy ?? 60) + 5, 0, 100, 60);
-    adjustNeeds(agent, { stress: 2, comfort: 3 });
+    applyNeedActivity(agent, "rest");
   } else if (["work", "study", "homework", "maintain"].includes(localAction)) {
-    adjustNeeds(agent, { responsibility: plan.fixed ? 2 : 1, stress: -0.5, hunger: -0.5 });
+    applyNeedActivity(agent, localAction === "study" || localAction === "homework" ? "study" : "work", {
+      minimum: { responsibility: plan.fixed ? 2 : 1 }
+    });
   }
   agent.currentTask = plan.title;
   const action = { type: `plan_${localAction}`, summary: localSummary(agent, `按计划进行「${plan.title}」`), plan };

@@ -1,5 +1,42 @@
 # 更新记录
 
+## 2026-06-17 - V3.3.5 Relationship Memory Formation
+
+- 新增长期关系记忆形成层，`relationshipMatrix` 继续保存数值关系，`relationshipMemory` 保存会影响未来行为的关系经验。
+- 关系记忆结构包含 `targetAgentId`、`relationshipType`、`trust`、`familiarity`、`emotionalTag`、`interactionCount`、`lastInteractionTime`、`sourceEvents` 和 `relationshipCause`。
+- 普通互动过滤：打招呼、普通聊天、路过不会进入长期关系记忆。
+- 重要互动沉淀：帮助、冲突、共同完成目标、承诺、关系修复、危险/医疗事件会经过 `MemoryImportanceGate` 后写入关系记忆。
+- `StateSettlement` 的 `relationImpacts` 现在会转换为可追溯关系事件，再由 `recordLifeEvent()` 和 `MemoryImportanceGate` 统一处理。
+- 重复同类关系事件不会无限新增记忆，而是合并强化 `interactionCount`、`sourceEvents` 和 `relationshipCauses`。
+- `Utility Scheduler` 增加 `relationshipMemoryBias`，让关系经验影响 `contact_familiar`、`ask_help`、`avoid_person`、`cooperate` 等行为倾向。
+- 新增 `npm run check:relationship-memory`，覆盖单次关系事件、重复强化、普通聊天过滤、关系记忆影响行动评分，以及 50 人/100 tick 形成率检查。
+
+验证：
+- `npm run check:relationship-memory`
+- `npm run check:memory-gate`
+- `npm run check:memory-filter`
+- `npm run check:utility-scheduler`
+- `npm run check:all`
+
+## 2026-06-17 - V3.3.4 Temporal Causal Graph Layer
+
+- 新增 `ai-town-causal-graph.js`，为世界增加 `causalGraph: { nodes, edges, patterns }`。
+- 新增因果节点类型：`event`、`stateChange`、`action`、`belief`、`goal`、`relationship`。
+- 新增因果边：`{ from, to, relation, strength, confidence, timestamp }`，relation 支持 `caused`、`reinforced`、`weakened`、`triggered`、`prevented`。
+- `recordLifeEvent()` 现在会先计算 `causalStrength`，超过阈值才写入因果图，普通低强度事件仍只进入 `EventLog`。
+- 因果边强制满足 `cause.timestamp < effect.timestamp`，禁止未来影响过去。
+- 相似因果链会写入 `causalGraph.patterns` 并强化同类 edge strength，用于学习重复模式。
+- `runDailyReflection()` 增加 `causalAnchors`、`lessonLearned`、`counterfactual`，Reflection 可读取因果链而不是只总结事件。
+- 长期记忆条目增加 `sourceCausalChain`，belief / experience 可以追溯到来源因果链。
+- 拆文件存档新增 `events/causalGraph.json`，避免保存后丢失因果图。
+- 新增 `npm run check:causal-graph` 和 `npm run check:reflection`。
+
+验证：
+- `npm run check:causal-graph`
+- `npm run check:reflection`
+- `npm run check:memory-consolidator`
+- `npm run check:all`
+
 ## 2026-06-17 - V3.3.3.1 Memory Importance Calibration Layer
 
 - 升级 `MemoryImportanceGate` 数值校准层，不改变已有 Memory Routing 结构。

@@ -10,6 +10,7 @@
   "maxConcurrentPerKey": 5,
   "maxActionsPerCycle": 5,
   "judgementBatchSize": 5,
+  "setupAgentBatchSize": 5,
   "vectorMemoryEnabled": true,
   "vectorBaseUrl": "http://localhost:1234/v1",
   "vectorModel": "",

@@ -18,8 +18,10 @@ const {
   ensureSelfModel,
   normalizeGoalRuntime,
   syncLongTermMemoryViews,
+  recordLifeEvent,
   recordEmotionCause,
-  buildMemorySummary
+  buildMemorySummary,
+  migrateMemoryPerspectiveForAgent
 } = require("./ai-town-memory-stream");
 const { runIdentityEvolution } = require("./ai-town-identity-evolution");
 const { aggregateDecision } = require("./ai-town-decision-aggregator");
@@ -77,6 +79,7 @@ const aiConfig = {
   agentModels: {},
   maxConcurrentPerKey: DEFAULT_MAX_CONCURRENT_PER_KEY,
   judgementBatchSize: 5,
+  setupAgentBatchSize: 5,
   schedulerIntervalMs: 2500,
   virtualMinutesPerPulse: 30,
   maxActionsPerCycle: 3,
@@ -500,6 +503,7 @@ function loadConfig() {
     }
     aiConfig.maxConcurrentPerKey = clampNumber(saved.maxConcurrentPerKey, 1, 200, aiConfig.maxConcurrentPerKey);
     aiConfig.judgementBatchSize = clampNumber(saved.judgementBatchSize, 1, 50, aiConfig.judgementBatchSize);
+    aiConfig.setupAgentBatchSize = clampNumber(saved.setupAgentBatchSize, 1, 20, aiConfig.setupAgentBatchSize);
     aiConfig.schedulerIntervalMs = clampNumber(saved.schedulerIntervalMs, 0, 600000, aiConfig.schedulerIntervalMs);
     aiConfig.virtualMinutesPerPulse = clampNumber(saved.virtualMinutesPerPulse || saved.tickMinutes, 1, 240, aiConfig.virtualMinutesPerPulse);
     aiConfig.maxActionsPerCycle = clampNumber(saved.maxActionsPerCycle, 1, MAX_ACTIONS_HARD_LIMIT, aiConfig.maxActionsPerCycle);
@@ -537,6 +541,7 @@ function saveConfig() {
     agentModels: aiConfig.agentModels,
     maxConcurrentPerKey: aiConfig.maxConcurrentPerKey,
     judgementBatchSize: aiConfig.judgementBatchSize,
+    setupAgentBatchSize: aiConfig.setupAgentBatchSize,
     schedulerIntervalMs: aiConfig.schedulerIntervalMs,
     virtualMinutesPerPulse: aiConfig.virtualMinutesPerPulse,
     maxActionsPerCycle: aiConfig.maxActionsPerCycle,
@@ -573,6 +578,7 @@ function savePostedConfigToFile(body) {
   if (body.agentModels !== undefined) next.agentModels = parseModelMap(body.agentModels);
   if (body.maxConcurrentPerKey !== undefined) next.maxConcurrentPerKey = clampNumber(body.maxConcurrentPerKey, 1, 200, existing.maxConcurrentPerKey ?? aiConfig.maxConcurrentPerKey);
   if (body.judgementBatchSize !== undefined) next.judgementBatchSize = clampNumber(body.judgementBatchSize, 1, 50, existing.judgementBatchSize ?? aiConfig.judgementBatchSize);
+  if (body.setupAgentBatchSize !== undefined) next.setupAgentBatchSize = clampNumber(body.setupAgentBatchSize, 1, 20, existing.setupAgentBatchSize ?? aiConfig.setupAgentBatchSize);
   const keys = parseApiKeys(body.apiKeys ?? body.apiKey);
   if (keys.length) {
     next.apiKeys = keys;
@@ -633,6 +639,7 @@ function publicConfig() {
     effectiveMaxActionsPerCycle,
     maxConcurrentPerKey: aiConfig.maxConcurrentPerKey,
     judgementBatchSize: aiConfig.judgementBatchSize,
+    setupAgentBatchSize: aiConfig.setupAgentBatchSize,
     aiRateLimitRpm: aiConfig.aiRateLimitRpm,
     aiRetryBaseDelayMs: aiConfig.aiRetryBaseDelayMs,
     aiRetryMaxDelayMs: aiConfig.aiRetryMaxDelayMs,
@@ -1208,11 +1215,13 @@ function writeWorldTables(saveFolder, world = {}) {
     ["places", Array.isArray(world.places) ? world.places : []],
     ["events", {
       records: Array.isArray(world.records) ? world.records.slice(0, 500) : [],
+      logs: Array.isArray(world.logs) ? world.logs.slice(0, 500) : [],
       eventLog: Array.isArray(world.eventLog) ? world.eventLog.slice(0, 2000) : [],
       eventImpacts: Array.isArray(world.eventImpacts) ? world.eventImpacts : [],
       informationFlows: Array.isArray(world.informationFlows) ? world.informationFlows : [],
       socialProcesses: Array.isArray(world.socialProcesses) ? world.socialProcesses : [],
-      informationFlowGraph: world.informationFlowGraph || { nodes: [], edges: [] }
+      informationFlowGraph: world.informationFlowGraph || { nodes: [], edges: [] },
+      causalGraph: world.causalGraph || { nodes: [], edges: [], patterns: [], version: "3.3.4" }
     }],
     ["relations", {
       relationshipDynamics: Array.isArray(world.relationshipDynamics) ? world.relationshipDynamics : [],
@@ -1227,6 +1236,8 @@ function writeWorldTables(saveFolder, world = {}) {
       socialField: world.socialField || null,
       socialDynamicsState: world.socialDynamicsState || null,
       socialFeedbackState: world.socialFeedbackState || null,
+      needDynamicsState: world.needDynamicsState || null,
+      needHomeostasisState: world.needHomeostasisState || null,
       agentSocialModifiers: world.agentSocialModifiers || [],
       socialFieldHistory: world.socialFieldHistory || [],
       dailyAgentState: world.dailyAgentState || null,
@@ -1286,6 +1297,7 @@ function writeJudgementFiles(saveFolder, world = {}) {
   writeJsonFile(path.join(agDir, "social-field.json"), world.socialField || {});
   writeJsonFile(path.join(agDir, "social-feedback.json"), world.socialFeedbackState || { modifiers: [], impressionCount: 0 });
   writeJsonFile(path.join(agDir, "information-flow-graph.json"), world.informationFlowGraph || { nodes: [], edges: [] });
+  writeJsonFile(path.join(agDir, "causal-graph.json"), world.causalGraph || { nodes: [], edges: [], patterns: [], version: "3.3.4" });
   writeJsonFile(path.join(agDir, "relationship-dynamics.json"), world.relationshipDynamics || { pairs: [], notes: [], updatedAt: 0 });
   writeJsonFile(path.join(agDir, "social-processes.json"), world.socialProcesses || []);
   writeJsonFile(path.join(agDir, "personality-profiles.json"), agents.map(agent => ({ id: agent.id, name: agent.name, personalityProfile: agent.personalityProfile || null, identityCore: agent.identityCore || null, identityStability: agent.identityStability || null })));
@@ -1376,9 +1388,11 @@ function readSplitSavePayload(slot) {
     agents,
     places: Array.isArray(places) ? places : worldState.places || [],
     records: events.records || worldState.records || [],
+    logs: events.logs || worldState.logs || [],
     eventImpacts: events.eventImpacts || worldState.eventImpacts || [],
     informationFlows: events.informationFlows || worldState.informationFlows || worldState.informationFlow || [],
     informationFlowGraph: events.informationFlowGraph || worldState.informationFlowGraph || { nodes: [], edges: [] },
+    causalGraph: events.causalGraph || worldState.causalGraph || { nodes: [], edges: [], patterns: [], version: "3.3.4" },
     socialProcesses: events.socialProcesses || worldState.socialProcesses || [],
     relationshipDynamics: relations.relationshipDynamics || worldState.relationshipDynamics || [],
     households: relations.households || worldState.households || [],
@@ -1390,6 +1404,8 @@ function readSplitSavePayload(slot) {
     socialField: runtime.socialField || worldState.socialField || null,
     socialDynamicsState: runtime.socialDynamicsState || worldState.socialDynamicsState || null,
     socialFeedbackState: runtime.socialFeedbackState || worldState.socialFeedbackState || null,
+    needDynamicsState: runtime.needDynamicsState || worldState.needDynamicsState || null,
+    needHomeostasisState: runtime.needHomeostasisState || worldState.needHomeostasisState || null,
     agentSocialModifiers: runtime.agentSocialModifiers || worldState.agentSocialModifiers || [],
     socialFieldHistory: runtime.socialFieldHistory || worldState.socialFieldHistory || [],
     dailyAgentState: runtime.dailyAgentState || worldState.dailyAgentState || null,
@@ -1436,6 +1452,53 @@ function readSavePayload(slot) {
     return payload;
   }
   return null;
+}
+
+function readSaveLogPayload(slot, options = {}) {
+  const safeSlot = safeSaveName(slot);
+  const limit = Math.max(1, Math.min(500, Number(options.limit || 120)));
+  const folderPath = saveFolderFor(safeSlot);
+  const jsonPath = savePathFor(safeSlot);
+  if (!fs.existsSync(folderPath) && !fs.existsSync(jsonPath)) return null;
+
+  const metaPath = path.join(folderPath, "meta.json");
+  const worldStatePath = path.join(folderPath, "world-state.json");
+  const eventsDir = path.join(folderPath, "events");
+  const meta = fs.existsSync(metaPath) ? readJsonIfExists(metaPath, { name: safeSlot }) : {};
+  const worldState = fs.existsSync(worldStatePath) ? readJsonIfExists(worldStatePath, {}) : {};
+  const events = fs.existsSync(eventsDir) ? readWorldTableFolder(folderPath, "events", {}) : {};
+
+  let logs = Array.isArray(events.logs) ? events.logs : (Array.isArray(worldState.logs) ? worldState.logs : null);
+  let records = Array.isArray(events.records) ? events.records : (Array.isArray(worldState.records) ? worldState.records : null);
+  let clock = Number.isFinite(Number(worldState.clock)) ? Number(worldState.clock) : 0;
+  let clockText = meta.clockText || "";
+
+  if ((!Array.isArray(logs) || !Array.isArray(records) || !clockText) && (fs.existsSync(path.join(folderPath, "world.json")) || fs.existsSync(jsonPath))) {
+    const fullPayload = readJsonIfExists(path.join(folderPath, "world.json"), readJsonIfExists(jsonPath, null));
+    const world = fullPayload?.world || fullPayload || {};
+    if (!Array.isArray(logs)) logs = Array.isArray(world.logs) ? world.logs : [];
+    if (!Array.isArray(records)) records = Array.isArray(world.records) ? world.records : [];
+    if (!clock) clock = Number(world.clock || 0);
+    if (!clockText) clockText = fullPayload?.meta?.clockText || minutesToClock(clock).text;
+    Object.assign(meta, fullPayload?.meta || {});
+  }
+
+  const statPath = fs.existsSync(folderPath) ? folderPath : jsonPath;
+  const updatedAt = meta.updatedAt || (fs.existsSync(statPath) ? fs.statSync(statPath).mtime.toISOString() : new Date().toISOString());
+  return {
+    slot: safeSlot,
+    meta: {
+      name: meta.name || safeSlot,
+      clockText: clockText || meta.clockText || minutesToClock(clock).text,
+      day: meta.day || Math.floor(clock / 1440) + 1,
+      agentCount: meta.agentCount || 0,
+      updatedAt
+    },
+    clock,
+    logs: (Array.isArray(logs) ? logs : []).slice(0, limit),
+    records: (Array.isArray(records) ? records : []).slice(0, limit),
+    updatedAt
+  };
 }
 
 function compactText(value, fallback = "", limit = 180) {
@@ -1821,6 +1884,13 @@ function worldHasSemanticMemory(agent = {}) {
 function roleHabitText(agent = {}) {
   const job = String(agent.job || agent.role || "");
   const age = Number(agent.ageYears || agent.age || ((agent.ageDays || 0) / 365) || 30);
+  if (/student|学生|上学|school/i.test(job)) return "我习惯围绕学习和课堂安排保持生活节奏。";
+  if (/doctor|nurse|medical|医生|护士|医疗|诊所/i.test(job)) return "我习惯关注健康责任和诊所服务时段。";
+  if (/teacher|school|教师|老师|学校/i.test(job)) return "我习惯把教学责任和学生照看放进稳定安排里。";
+  if (/shop|store|vendor|restaurant|店|商贩|餐馆|老板/i.test(job)) return "我习惯围绕营业时间、熟客和备货维持节奏。";
+  if (/elder|retired|老人|退休/i.test(job) || age >= 65) return "我习惯更谨慎地移动，也更重视熟悉地点、休息和安全。";
+  if (/commuter|work|worker|office|工人|上班|办公室|职员/i.test(job)) return "我习惯按工作日节奏平衡职责和恢复。";
+  return "我习惯保持稳定的普通小镇生活节奏。";
   if (/student|瀛︾敓|灏忓|涓/.test(job)) return "Keeps a school-centered daily rhythm and usually respects class arrangements.";
   if (/doctor|nurse|medical|鍖荤敓|鎶ゅ＋|鍖绘姢/.test(job)) return "Pays attention to health-related responsibilities and clinic service windows.";
   if (/teacher|school|鑰佸笀|鏁欏笀/.test(job)) return "Tries to keep teaching duties and student care stable.";
@@ -1838,8 +1908,8 @@ function addInitialSemanticMemory(agent, world = {}) {
   if (firstGoal) {
     appendMemory(agent, {
       type: "goal",
-      text: `Long-term direction: ${firstGoal}`,
-      meaning: `This person uses "${firstGoal}" as a stable long-term direction.`,
+      text: `我把“${firstGoal}”作为长期方向。`,
+      meaning: `我把“${firstGoal}”作为长期方向，并用它稳定自己的日常选择。`,
       at: clock,
       importance: 3,
       strength: 58,
@@ -1852,8 +1922,8 @@ function addInitialSemanticMemory(agent, world = {}) {
   if (habit) {
     appendMemory(agent, {
       type: "habit",
-      text: `Stable habit: ${habit}`,
-      meaning: habit,
+      text: /^我/.test(String(habit)) ? habit : `我习惯${habit}`,
+      meaning: /^我/.test(String(habit)) ? habit : `我习惯${habit}`,
       at: clock,
       importance: 2,
       strength: 52,
@@ -1866,8 +1936,8 @@ function addInitialSemanticMemory(agent, world = {}) {
   if (value) {
     appendMemory(agent, {
       type: "belief",
-      text: `Self value: ${value}`,
-      meaning: `This person tends to judge choices through the value "${value}".`,
+      text: `我重视“${value}”。`,
+      meaning: `我会用“${value}”来判断自己的选择。`,
       at: clock,
       importance: 2,
       strength: 50,
@@ -1936,7 +2006,8 @@ function migrateAgentPersonalityRuntime(agent = {}, world = {}) {
   if (!worldHasSemanticMemory(agent)) addInitialSemanticMemory(agent, world);
   if (!Array.isArray(agent.emotionCause) || !agent.emotionCause.length) migrateEmotionCauses(agent, world);
   syncLongTermMemoryViews(agent);
-  agent.memorySummary = agent.memorySummary || buildMemorySummary(agent, world);
+  const memoryPerspectiveChanged = migrateMemoryPerspectiveForAgent(agent, world);
+  agent.memorySummary = buildMemorySummary(agent, world);
   const after = {
     selfModel: Boolean(agent.selfModel),
     goalRuntime: Boolean(agent.goalRuntime),
@@ -1946,7 +2017,7 @@ function migrateAgentPersonalityRuntime(agent = {}, world = {}) {
     relationshipMemory: Array.isArray(agent.relationshipMemory),
     semantic: worldHasSemanticMemory(agent)
   };
-  return Object.keys(before).some(key => before[key] !== after[key]);
+  return memoryPerspectiveChanged || Object.keys(before).some(key => before[key] !== after[key]);
 }
 
 function migrateWorldPersonalityRuntime(payloadOrWorld = {}, options = {}) {
@@ -3847,6 +3918,52 @@ function nodeRuntimeWorldMasterPatch(world, item) {
   return patch;
 }
 
+function nodeRuntimeRelationshipEventType(impact = {}, reason = "") {
+  const text = `${reason} ${impact.reason || ""}`.toLowerCase();
+  if (/conflict|argue|fight|betray|冲突|争吵|背叛/.test(text) || Number(impact.resentment || 0) > 0 || Number(impact.trust || 0) < 0) return "relationship_conflict";
+  if (/help|assist|support|save|rescue|care|帮助|协助|求助|救助|照顾/.test(text)) return "relationship_help";
+  if (/cooperate|together|共同|合作|协作/.test(text)) return "relationship_cooperation";
+  if (/promise|承诺|兑现/.test(text) || Number(impact.debt || 0) !== 0) return "relationship_promise";
+  if (/apolog|forgive|道歉|和解/.test(text)) return "relationship_repair";
+  if (/danger|risk|clinic|medical|危险|诊所|医疗/.test(text)) return "relationship_crisis";
+  return "relationship_impact";
+}
+
+function nodeRuntimeRelationshipEventSummary(world, agent, targetId, impact = {}, reason = "") {
+  const target = (world.agents || []).find(item => item.id === targetId);
+  const targetName = target?.name || targetId;
+  const base = String(impact.reason || reason || "关系结算产生了可追踪影响").slice(0, 140);
+  const type = nodeRuntimeRelationshipEventType(impact, base);
+  if (type === "relationship_conflict") return `${agent.name || agent.id}和${targetName}之间出现关系摩擦：${base}`;
+  if (type === "relationship_help") return `${targetName}与${agent.name || agent.id}之间发生帮助或支持：${base}`;
+  if (type === "relationship_cooperation") return `${agent.name || agent.id}和${targetName}共同推进了一件事：${base}`;
+  if (type === "relationship_promise") return `${agent.name || agent.id}和${targetName}之间出现承诺或亏欠变化：${base}`;
+  if (type === "relationship_repair") return `${agent.name || agent.id}和${targetName}之间出现关系修复：${base}`;
+  if (type === "relationship_crisis") return `${agent.name || agent.id}在风险事件中注意到${targetName}：${base}`;
+  return `${agent.name || agent.id}和${targetName}之间出现重要关系变化：${base}`;
+}
+
+function nodeRuntimeRecordRelationshipMemoryFromImpact(world, agent, targetId, appliedDelta = {}, impact = {}, reason = "") {
+  if (!agent?.id || !targetId || targetId === agent.id) return null;
+  const target = (world.agents || []).find(item => item.id === targetId);
+  if (!target) return null;
+  const summary = nodeRuntimeRelationshipEventSummary(world, agent, targetId, impact, reason);
+  return recordLifeEvent(world, agent, {
+    type: nodeRuntimeRelationshipEventType(impact, summary),
+    summary,
+    targetAgentId: targetId,
+    targetAgentName: target.name || targetId,
+    relationshipDelta: appliedDelta,
+    relationImpact: Math.max(...Object.values(appliedDelta).map(value => Math.abs(Number(value) || 0)), 0) * 10,
+    emotionalIntensity: Math.max(22, Math.max(...Object.values(appliedDelta).map(value => Math.abs(Number(value) || 0)), 0) * 12),
+    futureImpact: Math.max(28, Math.max(...Object.values(appliedDelta).map(value => Math.abs(Number(value) || 0)), 0) * 10),
+    contextScope: "direct",
+    source: "relationship-settlement",
+    relationshipReason: impact.reason || reason || "",
+    relationshipType: nodeRuntimeRelationshipEventType(impact, summary).replace(/^relationship_/, "")
+  });
+}
+
 function nodeRuntimeApplySettlementPatch(world, agent, patch) {
   if (freezeDeadAgent(agent, world)) return;
   if (!patch || typeof patch !== "object") return;
@@ -3873,11 +3990,18 @@ function nodeRuntimeApplySettlementPatch(world, agent, patch) {
       const targetId = String(impact.to || "");
       if (!targetId || !(world.agents || []).some(item => item.id === targetId)) return;
       agent.relationshipMatrix[targetId] ||= {};
+      const appliedDelta = {};
       ["trust", "intimacy", "respect", "debt", "resentment", "dependency", "rivalry"].forEach(key => {
         const before = Number(agent.relationshipMatrix[targetId][key] ?? 0);
-        agent.relationshipMatrix[targetId][key] = Math.max(0, Math.min(100, before + nodeRuntimeClampDelta(impact[key], -4, 4)));
+        const delta = nodeRuntimeClampDelta(impact[key], -4, 4);
+        if (delta) appliedDelta[key] = delta;
+        agent.relationshipMatrix[targetId][key] = Math.max(0, Math.min(100, before + delta));
       });
       agent.relationshipMatrix[targetId].lastReason = String(impact.reason || patch.explanation || "node settlement").slice(0, 80);
+      agent.relationshipMatrix[targetId].lastInteractionTime = world.clock || 0;
+      if (Object.keys(appliedDelta).length) {
+        nodeRuntimeRecordRelationshipMemoryFromImpact(world, agent, targetId, appliedDelta, impact, patch.explanation || patch.reason || "node settlement");
+      }
     });
   }
   agent.stateSettlementNotes ||= [];
@@ -6867,15 +6991,16 @@ async function runNodeSetupCreate(body = {}) {
   const aiSetupEnabled = body.useAi !== false && publicConfig().aiEnabled;
   if (aiSetupEnabled) {
     updateRuntimeProgress("setup-blueprint", { phaseIndex: 2, currentTask: "AI blueprint" });
+    const setupAgentBatchSize = clampNumber(aiConfig.setupAgentBatchSize, 1, 20, 5);
     try {
-      blueprint = await aiRouter.run("setupBlueprintAgent", { premise: prompt, targetAgentCount, targetLocationCount, existingPlaces: places, existingAgents: sourceSeeds, requestedBatchSize: 10 });
+      blueprint = await aiRouter.run("setupBlueprintAgent", { premise: prompt, targetAgentCount, targetLocationCount, existingPlaces: places, existingAgents: sourceSeeds, requestedBatchSize: setupAgentBatchSize });
       if (Array.isArray(blueprint.places) && blueprint.places.length) places = setupNormalizePlaces(blueprint.places, targetLocationCount);
     } catch (error) {
       failRuntimeProgress(error);
       throw error;
     }
     updateRuntimeProgress("setup-character-seeds", { phaseIndex: 3, currentTask: "character genesis seeds" });
-    const batchSize = 10;
+    const batchSize = setupAgentBatchSize;
     const batches = [];
     const slots = setupBuildSlotsFromBlueprint(blueprint, seeds, sourceSeeds, targetAgentCount, places);
     characterSeedResult = await setupRunCharacterSeedAgent(slots, { premise: prompt, blueprint, places, targetAgentCount, aiSetupEnabled });
@@ -7289,6 +7414,22 @@ async function handleApi(req, res) {
       send(res, 200, { ok: true, slot, meta: payload.meta, saves: listSaves(), directory: SAVE_DIR });
     } catch (error) {
       send(res, 400, { error: { message: error.message, type: "repair_save_error" } });
+    }
+    return;
+  }
+  if (apiPath.startsWith("/api/saves/") && apiPath.endsWith("/logs") && req.method === "GET") {
+    try {
+      const slotPart = apiPath.slice("/api/saves/".length, -"/logs".length);
+      const slot = safeSaveName(decodeURIComponent(slotPart));
+      const query = new URL(req.url, "http://localhost").searchParams;
+      const payload = readSaveLogPayload(slot, { limit: query.get("limit") || 120 });
+      if (!payload) {
+        send(res, 404, { error: { message: "Save not found", type: "not_found" } });
+        return;
+      }
+      send(res, 200, payload);
+    } catch (error) {
+      send(res, 400, { error: { message: error.message, type: "load_save_logs_error" } });
     }
     return;
   }

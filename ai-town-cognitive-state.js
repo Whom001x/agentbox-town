@@ -570,6 +570,12 @@ function cognitiveState(world = {}, agent = {}, context = {}) {
   const responsibilityLow = clamp((100 - num(needs.responsibility, 70)) / 100, 0, 1, 0);
   const stressLow = clamp((100 - num(needs.stress, 70)) / 100, 0, 1, 0);
   const hygieneLow = clamp((100 - num(needs.hygiene, 75)) / 100, 0, 1, 0);
+  const needEmergencyFlag = agent.needEmergencyFlag || {
+    health: num(needs.health, 80) < 20,
+    hunger: num(needs.hunger, 75) < 10,
+    safety: num(needs.safety, 82) < 20
+  };
+  const needDynamicsState = agent.needDynamicsState || null;
 
   add(perceptionWeights, "body", healthLow * 0.9 + hungerLow * 0.35 + comfortLow * 0.25);
   add(perceptionWeights, "food", hungerLow);
@@ -587,6 +593,15 @@ function cognitiveState(world = {}, agent = {}, context = {}) {
   add(driveVector, "support", socialLow * 0.22 + safetyLow * 0.2 + healthLow * 0.16);
   add(driveVector, "duty", responsibilityLow * 0.45);
   add(driveVector, "order", responsibilityLow * 0.25 + hygieneLow * 0.2);
+  if (needEmergencyFlag.hunger) add(driveVector, "food", 0.45);
+  if (needEmergencyFlag.health) {
+    add(driveVector, "care", 0.5);
+    add(driveVector, "support", 0.2);
+  }
+  if (needEmergencyFlag.safety) {
+    add(driveVector, "safety", 0.55);
+    add(driveVector, "support", 0.18);
+  }
 
   biasVector.patience = Number((-hungerLow * 0.32 - stressLow * 0.2 - healthLow * 0.12).toFixed(3));
   biasVector.foodAttention = Number((hungerLow * 0.72).toFixed(3));
@@ -814,6 +829,8 @@ function cognitiveState(world = {}, agent = {}, context = {}) {
     driveVector,
     biasVector,
     actionModifiers,
+    needDynamicsState,
+    needEmergencyFlag,
     socialFieldInfluence,
     socialModifier,
     memoryEvidence: memorySignals.evidence,

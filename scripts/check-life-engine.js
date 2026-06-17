@@ -55,14 +55,14 @@ function testDailyPlanGenerated() {
 }
 
 function testHungerInterruptionHandledLocally() {
-  const a = agent({ position: "square", needs: { hunger: 20, health: 80, safety: 80 } });
+  const a = agent({ position: "square", needs: { hunger: 8, health: 80, safety: 80 } });
   const world = worldWith(a, 10 * 60);
   const interruption = detectInterruption(world, a);
   assert.equal(interruption.type, "hunger");
   assert.equal(interruption.canOverridePlan, true);
   const result = runLifeEngine(world);
   assert.equal(result.handledIds.includes("agent_1"), true);
-  assert.ok(a.movement || a.needs.hunger > 20);
+  assert.ok(a.movement || a.needs.hunger > 8);
 }
 
 function testModerateSafetyDoesNotOverridePlan() {

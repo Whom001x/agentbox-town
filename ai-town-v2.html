@@ -503,6 +503,11 @@
     .agent-row:hover, .agent-row.selected { background: #f3f7f1; }
     .agent-row.critical { background: #fff7e8; }
     .agent-row.dead { opacity: .62; background: #eeeeea; }
+    .queue-row.live { border-left: 4px solid #b9c4af; background: #fffdfa; }
+    .queue-row.live.success { border-left-color: #5c8f62; background: #f3f8f0; }
+    .queue-row.live.failed, .queue-row.live.cancelled { border-left-color: #b65b50; background: #fff4f1; }
+    .queue-row.live.retry_wait, .queue-row.live.router_error, .queue-row.live.local_fallback { border-left-color: #c99031; background: #fff8ea; }
+    .queue-row.live.running { border-left-color: #4d7f9f; background: #eef7fb; }
     .agent-row strong, .record strong, .queue-row strong { display: block; font-size: 13px; }
     .agent-row span, .record span, .queue-row span { display: block; color: var(--muted); font-size: 12px; margin-top: 4px; line-height: 1.45; }
     .detail { padding: 13px; display: grid; gap: 10px; }
@@ -1381,6 +1386,7 @@
         <label><span>每次脉冲虚拟分钟</span><input id="virtualMinutesInput" type="number" min="1" max="240" step="1"></label>
         <label><span>每 Key 并发上限</span><input id="maxConcurrentPerKeyInput" type="number" min="1" max="200" step="1"></label>
         <label><span>大请求每批角色数</span><input id="judgementBatchSizeInput" type="number" min="1" max="50" step="1"></label>
+        <label><span>建镇人物每批人数</span><input id="setupAgentBatchSizeInput" type="number" min="1" max="20" step="1"></label>
         <label><span>每轮最多执行 Action（按 Key 数 × 每 Key 并发封顶）</span><input id="maxActionsInput" type="number" min="1" max="200" step="1"></label>
         <label><span>AI 全局 RPM 限速（0=关闭）</span><input id="aiRateLimitRpmInput" type="number" min="0" max="100000" step="1"></label>
         <label><span>AI 重试基础等待毫秒</span><input id="aiRetryBaseDelayInput" type="number" min="100" max="600000" step="100"></label>
@@ -4818,6 +4824,7 @@
       effectiveKeyCount: 0,
       maxConcurrentPerKey: 20,
       judgementBatchSize: 5,
+      setupAgentBatchSize: 5,
       effectiveMaxActionsPerCycle: 3,
       schedulerIntervalMs: 2500,
       virtualMinutesPerPulse: 5,
@@ -4902,6 +4909,10 @@
     let currentSaveSlot = "";
     let saveListCache = [];
     let runtimeStatusCache = { running: false, slot: "", pid: 0 };
+    let liveCallCache = [];
+    let liveCallError = "";
+    let liveWorldLogError = "";
+    let liveWorldLogUpdatedAt = "";
     let townEntered = false;
     let setupCreateInProgress = false;
     let setupBootstrapInProgress = false;
@@ -5729,7 +5740,7 @@
     let latestSetupTables = null;
 
     function setupAgentBatchSize(targetAgentCount = 0) {
-      return targetAgentCount >= 60 ? 10 : clamp(Math.max(6, judgementBatchSize()), 6, 12);
+      return clamp(Number(world.config.setupAgentBatchSize || defaultConfig.setupAgentBatchSize || 5), 1, 20);
     }
 
     function setupRoleMixForCount(count) {
@@ -11481,6 +11492,7 @@
           effectiveKeyCount: Number(config.effectiveKeyCount || config.keyCount || 0),
           maxConcurrentPerKey: Number(config.maxConcurrentPerKey || 20),
           judgementBatchSize: Number(config.judgementBatchSize || 5),
+          setupAgentBatchSize: Number(config.setupAgentBatchSize || 5),
           effectiveMaxActionsPerCycle: Number(config.effectiveMaxActionsPerCycle || config.maxActionsPerCycle || 3),
           schedulerIntervalMs: Number(config.schedulerIntervalMs || 2500),
           virtualMinutesPerPulse: Number(config.virtualMinutesPerPulse || 5),
@@ -11551,9 +11563,11 @@
           }
         }
         updateGenerationStatusFromProgress(runtimeStatusCache.progress);
+        renderLogs();
       } catch {
         byId("runtimeState").textContent = "未知";
         updateGenerationStatusFromProgress(null);
+        renderLogs();
       }
     }
 
@@ -11942,7 +11956,10 @@
 
     function renderQueue() {
       if (!world.actionQueue.length) {
-        byId("queueList").innerHTML = `<div class="queue-row"><strong>队列为空</strong><span>Scheduler 会按需把角色行动放进来。</span></div>`;
+        const liveRows = renderLiveCallQueueRows();
+        byId("queueList").innerHTML = liveRows.length
+          ? liveRows.join("")
+          : `<div class="queue-row"><strong>队列为空</strong><span>Scheduler 会按需把角色行动放进来。</span></div>`;
         return;
       }
       byId("queueList").innerHTML = world.actionQueue.map(item => `
@@ -11950,10 +11967,35 @@
       `).join("");
     }
 
+    function runtimeStatusLogRow() {
+      const progress = runtimeStatusCache?.progress || {};
+      const phase = progress.phase || runtimeStatusCache.state || "";
+      if (!phase || phase === "idle") return null;
+      const progressText = runtimeProgressText(progress);
+      const body = [
+        runtimeStatusCache.slot ? `slot=${runtimeStatusCache.slot}` : "",
+        progressText,
+        progress.lastError || runtimeStatusCache.message || ""
+      ].filter(Boolean).join("｜");
+      return {
+        time: progress.updatedAt ? formatCallTime(progress.updatedAt) : currentTime().text,
+        title: `后台状态：${callStatusLabel(phase)}`,
+        body: body || phase,
+        type: "runtime_status"
+      };
+    }
+
     function renderLogs() {
-      const rows = world.logs.length ? world.logs : world.records;
+      const baseRows = world.logs.length ? world.logs : world.records;
+      const syncErrorRow = liveWorldLogError ? {
+        time: currentTime().text,
+        title: "日志同步失败",
+        body: liveWorldLogError,
+        type: "runtime_status"
+      } : null;
+      const rows = [runtimeStatusLogRow(), syncErrorRow, ...baseRows].filter(Boolean);
       byId("logList").innerHTML = rows.length ? rows.map(log => `
-        <div class="record"><strong>${log.time}｜${log.title}</strong><span>${log.body}</span></div>
+        <div class="record"><strong>${escapeAttr(log.time || "")}｜${escapeAttr(log.title || "")}</strong><span>${escapeAttr(log.body || "")}</span></div>
       `).join("") : `<div class="record"><strong>尚无记录</strong><span>启动后 Scheduler 会决定谁该行动。</span></div>`;
     }
 
@@ -12415,23 +12457,112 @@
       return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}:${String(date.getSeconds()).padStart(2, "0")}`;
     }
 
+    function callStatusLabel(status = "") {
+      const labels = {
+        success: "成功",
+        failed: "失败",
+        cancelled: "已停止",
+        retry_wait: "等待重试",
+        router_error: "路由错误",
+        local_fallback: "本地兜底",
+        json_fallback: "JSON修复",
+        running: "进行中"
+      };
+      return labels[status] || status || "未知";
+    }
+
+    function callStatusClass(status = "") {
+      return String(status || "unknown").replace(/[^a-z0-9_-]/gi, "_");
+    }
+
+    function renderCallLogRows(calls = [], error = "") {
+      if (error) {
+        return `<div class="call-row failed"><strong>失败</strong><span>${escapeAttr(error)}</span><span>-</span><span>-</span></div>`;
+      }
+      return calls.length ? calls.map(call => `
+        <div class="call-row ${callStatusClass(call.status)}">
+          <strong>${callStatusLabel(call.status)}</strong>
+          <span>${formatCallTime(call.at)}｜${escapeAttr(call.task)}${call.agentName ? `｜${escapeAttr(call.agentName)}` : call.agentId ? `｜${escapeAttr(call.agentId)}` : ""}<br>${escapeAttr(call.model)}｜Key ${escapeAttr(call.keyIndex)}${call.error ? `<br>${escapeAttr(call.error)}` : ""}</span>
+          <span>${call.durationMs || 0}ms</span>
+          <span>#${call.id}</span>
+        </div>
+      `).join("") : `<div class="call-row"><strong>暂无</strong><span>还没有调用记录。</span><span>-</span><span>-</span></div>`;
+    }
+
+    function renderCallLogList(calls = liveCallCache, error = liveCallError) {
+      byId("callsLogList").innerHTML = renderCallLogRows(calls, error);
+    }
+
+    function renderLiveCallQueueRows() {
+      const rows = [];
+      const progress = runtimeStatusCache?.progress || {};
+      const progressText = runtimeProgressText(progress);
+      if (progressText || liveCallError) {
+        const status = liveCallError ? "failed" : (progress.phase || runtimeStatusCache.state || "running");
+        const detail = liveCallError || progress.lastError || progress.currentTask || progressText || runtimeStatusCache.slot || "";
+        rows.push(`
+          <div class="queue-row live ${callStatusClass(status)}">
+            <strong>后台状态｜${callStatusLabel(status)}</strong>
+            <span>${escapeAttr(progressText || runtimeStatusCache.slot || "等待后台状态")} ${detail ? `｜${escapeAttr(detail)}` : ""}</span>
+          </div>
+        `);
+      }
+      liveCallCache.slice(0, 8).forEach(call => {
+        const detail = [
+          formatCallTime(call.at),
+          call.model ? `${call.model}` : "",
+          call.keyIndex !== undefined ? `Key ${call.keyIndex}` : "",
+          call.durationMs ? `${call.durationMs}ms` : ""
+        ].filter(Boolean).join("｜");
+        rows.push(`
+          <div class="queue-row live ${callStatusClass(call.status)}">
+            <strong>${escapeAttr(call.task || "AI调用")}｜${callStatusLabel(call.status)}</strong>
+            <span>${escapeAttr(detail)}${call.error ? `｜${escapeAttr(call.error)}` : ""}</span>
+          </div>
+        `);
+      });
+      return rows;
+    }
+
+    async function refreshLiveCalls() {
+      try {
+        const data = await api("/api/calls", {}, CONFIG_TIMEOUT_MS);
+        liveCallCache = Array.isArray(data.calls) ? data.calls : [];
+        liveCallError = "";
+      } catch (error) {
+        liveCallError = error.message || String(error);
+      }
+      if (!byId("callsBackdrop").hidden) renderCallLogList();
+      renderQueue();
+    }
+
+    async function refreshWorldLogsFromSave() {
+      const slot = currentSaveSlot || runtimeStatusCache.slot || "";
+      if (!slot) {
+        renderLogs();
+        return;
+      }
+      try {
+        const data = await api(`/api/saves/${encodeURIComponent(slot)}/logs?limit=120&ts=${Date.now()}`, {}, CONFIG_TIMEOUT_MS);
+        if (!currentSaveSlot && data.slot) currentSaveSlot = data.slot;
+        if (Array.isArray(data.logs)) world.logs = data.logs;
+        if (Array.isArray(data.records)) world.records = data.records;
+        if (Number.isFinite(Number(data.clock))) {
+          world.clock = Number(data.clock);
+          byId("clockText").textContent = currentTime().text;
+        }
+        liveWorldLogUpdatedAt = data.updatedAt || "";
+        liveWorldLogError = "";
+      } catch (error) {
+        liveWorldLogError = error.message || String(error);
+      }
+      renderLogs();
+    }
+
     async function openCallLogs() {
       byId("callsBackdrop").hidden = false;
       byId("callsLogList").innerHTML = `<div class="call-row"><strong>读取中</strong><span>正在读取最近调用。</span><span>-</span><span>-</span></div>`;
-      try {
-        const data = await api("/api/calls", {}, CONFIG_TIMEOUT_MS);
-        const calls = Array.isArray(data.calls) ? data.calls : [];
-        byId("callsLogList").innerHTML = calls.length ? calls.map(call => `
-          <div class="call-row ${call.status}">
-            <strong>${call.status}</strong>
-            <span>${formatCallTime(call.at)}｜${call.task}${call.agentName ? `｜${call.agentName}` : call.agentId ? `｜${call.agentId}` : ""}<br>${call.model}｜Key ${call.keyIndex}${call.error ? `<br>${call.error}` : ""}</span>
-            <span>${call.durationMs || 0}ms</span>
-            <span>#${call.id}</span>
-          </div>
-        `).join("") : `<div class="call-row"><strong>暂无</strong><span>还没有调用记录。</span><span>-</span><span>-</span></div>`;
-      } catch (error) {
-        byId("callsLogList").innerHTML = `<div class="call-row failed"><strong>失败</strong><span>${error.message}</span><span>-</span><span>-</span></div>`;
-      }
+      await refreshLiveCalls();
     }
 
     function setCycleFlowVisible(visible) {
@@ -12458,7 +12589,7 @@
       } else {
         byId("loopState").textContent = world.running ? "运行中" : "暂停";
       }
-      byId("queueCount").textContent = world.actionQueue.length;
+      byId("queueCount").textContent = world.actionQueue.length || Math.min(liveCallCache.length, 8);
       byId("runningCount").textContent = world.cycleInProgress ? (byId("metricInFlight").textContent || "1") : "0";
       byId("runBtn").textContent = allAgentsDead() ? "已停止" : (runtimeStatusCache.state === "running" ? "暂停后台" : "启动后台");
       byId("weatherBtn").textContent = byId("weatherPanel").hidden ? "天气" : "关闭天气";
@@ -12491,6 +12622,7 @@
       byId("virtualMinutesInput").value = world.config.virtualMinutesPerPulse ?? 30;
       byId("maxConcurrentPerKeyInput").value = world.config.maxConcurrentPerKey ?? 20;
       byId("judgementBatchSizeInput").value = world.config.judgementBatchSize ?? 5;
+      byId("setupAgentBatchSizeInput").value = world.config.setupAgentBatchSize ?? 5;
       byId("maxActionsInput").value = world.config.maxActionsPerCycle ?? 20;
       byId("aiRateLimitRpmInput").value = world.config.aiRateLimitRpm ?? 60;
       byId("aiRetryBaseDelayInput").value = world.config.aiRetryBaseDelayMs ?? 1000;
@@ -12515,6 +12647,7 @@
         byId("virtualMinutesInput").value = config.virtualMinutesPerPulse ?? 5;
         byId("maxConcurrentPerKeyInput").value = config.maxConcurrentPerKey ?? 20;
         byId("judgementBatchSizeInput").value = config.judgementBatchSize ?? 5;
+        byId("setupAgentBatchSizeInput").value = config.setupAgentBatchSize ?? 5;
         byId("maxActionsInput").value = config.maxActionsPerCycle ?? 3;
         byId("aiRateLimitRpmInput").value = config.aiRateLimitRpm ?? 60;
         byId("aiRetryBaseDelayInput").value = config.aiRetryBaseDelayMs ?? 1000;
@@ -12550,6 +12683,7 @@
         virtualMinutesPerPulse: byId("virtualMinutesInput").value,
         maxConcurrentPerKey: byId("maxConcurrentPerKeyInput").value,
         judgementBatchSize: byId("judgementBatchSizeInput").value,
+        setupAgentBatchSize: byId("setupAgentBatchSizeInput").value,
         maxActionsPerCycle: byId("maxActionsInput").value,
         aiRateLimitRpm: byId("aiRateLimitRpmInput").value,
         aiRetryBaseDelayMs: byId("aiRetryBaseDelayInput").value,
@@ -12803,9 +12937,13 @@
       }
       await refreshMetrics();
       await refreshRuntimeStatus();
+      await refreshLiveCalls();
+      await refreshWorldLogsFromSave();
       await refreshWhenSourceChanged();
       render();
       setInterval(refreshMetrics, 1000);
+      setInterval(refreshLiveCalls, 1500);
+      setInterval(refreshWorldLogsFromSave, 2000);
       setInterval(() => {
         refreshRuntimeStatus().then(renderSaveList).catch(() => {});
       }, 3000);

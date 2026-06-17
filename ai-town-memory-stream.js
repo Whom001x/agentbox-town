@@ -1,5 +1,11 @@
 "use strict";
 
+const {
+  analyzeEventImpact,
+  connectMemoryCause,
+  causalReflectionAnchors
+} = require("./ai-town-causal-graph");
+
 const legacyLayers = ["short", "long", "emotional", "secret", "rumor"];
 const semanticTypes = ["habit", "experience", "episodic", "belief", "relationship", "social", "preference", "goal"];
 const structuredTypes = ["habit", "belief", "preference", "episodic", "social", "goal"];
@@ -76,9 +82,119 @@ const blockedMemoryPatterns = [
   /Because of/i,
   /Daily reflection/i,
   /Received basic care at the clinic/i,
+  /This person tends/i,
+  /Agent tends/i,
+  /Stable habit/i,
+  /Based on/i,
   /JSON Schema/i,
   /JSON指令|复杂的JSON|生成符合JSON/i
 ];
+
+const firstPersonMemoryPattern = /^(我|我会|我习惯|我相信|我觉得|我发现|我记得|我喜欢|我不喜欢|那次|这次)/;
+const systemMemoryLanguagePattern = /(This person|Agent tends|Stable habit|Based on|Received|Followed plan|Followed the plan|Daily reflection|Because of|该角色|该居民|这个人)/i;
+
+function stripSystemMemoryText(text = "") {
+  let value = String(text || "").replace(/\s+/g, " ").trim();
+  if (!value) return "";
+  value = value
+    .replace(/^Stable habit:\s*/i, "")
+    .replace(/^Long-term direction:\s*/i, "我把")
+    .replace(/^Self value:\s*/i, "我重视")
+    .replace(/^(Daily reflection:\s*)+/i, "")
+    .replace(/^Based on\s*/i, "")
+    .replace(/^Received\s+/i, "我经历过")
+    .replace(/^Followed the plan\s+"([^"]+)":\s*/i, "我按计划处理过$1：")
+    .replace(/^Followed plan\s+/i, "我按计划处理过")
+    .replace(/^Because of\s+health,\s*interrupted the plan:\s*/i, "我因为身体不适调整过安排：")
+    .replace(/^Because of\s+hunger,\s*interrupted the plan:\s*/i, "我因为饱腹不足调整过安排：")
+    .replace(/^Because of\s+safety,\s*interrupted the plan:\s*/i, "我因为安全感不足调整过安排：");
+  value = value.replace(/^This person uses "([^"]+)" as a stable long-term direction\.?$/i, "我把“$1”作为长期方向。");
+  value = value.replace(/^This person tends to judge choices through the value "([^"]+)"\.?$/i, "我会用“$1”来判断自己的选择。");
+  value = value.replace(/^This person tends to\s*/i, "我倾向于");
+  value = value.replace(/^Agent tends to\s*/i, "我倾向于");
+  value = value.replace(/^(这个人|该角色|该居民|角色)\s*/i, "我");
+  return value.trim();
+}
+
+function stripAgentNamePrefix(agent = {}, text = "") {
+  let value = String(text || "").trim();
+  const name = String(agent.name || "").trim();
+  if (name && value.startsWith(name)) {
+    value = `我${value.slice(name.length)}`;
+  }
+  return value
+    .replace(/^我我/, "我")
+    .replace(/^我会我/, "我会")
+    .replace(/^我习惯我/, "我习惯")
+    .replace(/^我相信我/, "我相信")
+    .replace(/^我觉得我/, "我觉得")
+    .trim();
+}
+
+function textCoreForPerspective(text = "") {
+  return String(text || "")
+    .replace(/^[：:，,。\s]+/, "")
+    .replace(/^(会|习惯|相信|觉得|发现|记得|喜欢|不喜欢)\s*/, "")
+    .trim();
+}
+
+function ensureFirstPersonText(agent = {}, text = "", type = "episodic") {
+  let value = stripAgentNamePrefix(agent, stripSystemMemoryText(text));
+  if (!value) return "";
+  if (firstPersonMemoryPattern.test(value)) return value;
+  const core = textCoreForPerspective(value);
+  const lower = value.toLowerCase();
+  const memoryType = structuredAliases[type] || type || "episodic";
+  if (memoryType === "belief") return `我相信${core}`;
+  if (memoryType === "habit") return `我习惯${core}`;
+  if (memoryType === "preference") {
+    if (/dislike|avoid|不喜欢|讨厌|回避|避免/.test(lower)) return core.startsWith("不") ? `我${core}` : `我不喜欢${core}`;
+    return `我喜欢${core}`;
+  }
+  if (memoryType === "social" || type === "relationship") return `我觉得${core}`;
+  if (memoryType === "goal") return `我想继续${core}`;
+  return `我记得${core}`;
+}
+
+function memoryPerspectiveLayer(agent = {}, memory = {}, type = "") {
+  if (!memory || typeof memory !== "object") return memory;
+  const output = { ...memory };
+  const memoryType = type || output.type || structuredTypeOf(output.type || "");
+  const viewType = structuredAliases[memoryType] || memoryType || "episodic";
+  const baseText = output.text || output.meaning || output.belief || output.habit || output.preference || output.event || output.myExperience || "";
+  if (baseText || output.text != null) output.text = ensureFirstPersonText(agent, baseText, memoryType);
+  if (output.meaning != null || output.text) output.meaning = ensureFirstPersonText(agent, output.meaning || output.text, memoryType);
+  if (output.summary != null) output.summary = ensureFirstPersonText(agent, output.summary, memoryType);
+  if (viewType === "belief") {
+    output.belief = ensureFirstPersonText(agent, output.belief || output.meaning || output.text, "belief");
+  }
+  if (viewType === "habit") {
+    output.habit = ensureFirstPersonText(agent, output.habit || output.meaning || output.text || output.action, "habit");
+    if (output.action) output.action = ensureFirstPersonText(agent, output.action, "habit");
+  }
+  if (viewType === "preference") {
+    output.preference = ensureFirstPersonText(agent, output.preference || output.meaning || output.text, "preference");
+    if (Array.isArray(output.like)) output.like = output.like.map(item => ensureFirstPersonText(agent, item, "preference")).filter(Boolean);
+    if (Array.isArray(output.dislike)) output.dislike = output.dislike.map(item => ensureFirstPersonText(agent, item, "preference")).filter(Boolean);
+  }
+  if (viewType === "episodic") {
+    output.event = ensureFirstPersonText(agent, output.event || output.text || output.meaning, "episodic");
+    output.myExperience = ensureFirstPersonText(agent, output.myExperience || output.event || output.text || output.meaning, "episodic");
+    output.meaning = ensureFirstPersonText(agent, output.meaning || output.lesson || output.event || output.text, "episodic");
+  }
+  if (viewType === "social" || memoryType === "relationship") {
+    output.myView = ensureFirstPersonText(agent, output.myView || output.meaning || output.text || output.relation || output.event, "relationship");
+    output.relation = ensureFirstPersonText(agent, output.relation || output.myView || output.meaning || output.text, "relationship");
+    output.event = ensureFirstPersonText(agent, output.event || output.text || output.meaning || output.myView, "relationship");
+    output.relationship = output.relationship || output.relationshipType || "familiar";
+  }
+  return output;
+}
+
+function isFirstPersonMemoryText(text = "") {
+  const value = String(text || "").trim();
+  return !value || (firstPersonMemoryPattern.test(value) && !systemMemoryLanguagePattern.test(value));
+}
 
 function clampNumber(value, min, max, fallback) {
   const number = Number(value);
@@ -99,6 +215,23 @@ function uniqueStrings(values = [], limit = 8) {
     if (!text || seen.has(text)) return;
     seen.add(text);
     output.push(text);
+  });
+  return output.slice(0, limit);
+}
+
+function uniqueRelationshipCauses(values = [], limit = 8) {
+  const seen = new Set();
+  const output = [];
+  values.flat().filter(Boolean).forEach(value => {
+    const item = typeof value === "object" ? value : { causeEvent: String(value), effect: "", strength: 0 };
+    const key = `${item.causeEvent || ""}:${item.effect || ""}:${item.strength || ""}`;
+    if (!key.replace(/:/g, "") || seen.has(key)) return;
+    seen.add(key);
+    output.push({
+      causeEvent: compactString(item.causeEvent || "", "", 180),
+      effect: compactString(item.effect || "", "", 120),
+      strength: normalizeRatio(item.strength, 0.3)
+    });
   });
   return output.slice(0, limit);
 }
@@ -328,6 +461,30 @@ function isDirectSocialEvent(event = {}, text = eventTextForGate(event)) {
       || /邻居|朋友|家人|帮助|信任|冲突|争吵|承诺|道歉/.test(text));
 }
 
+function relationshipDeltaMagnitude(delta = {}) {
+  if (!delta || typeof delta !== "object") return 0;
+  return Math.max(
+    Math.abs(Number(delta.trust || 0)),
+    Math.abs(Number(delta.affinity || 0)),
+    Math.abs(Number(delta.intimacy || 0)),
+    Math.abs(Number(delta.respect || 0)),
+    Math.abs(Number(delta.debt || 0)),
+    Math.abs(Number(delta.resentment || 0)),
+    Math.abs(Number(delta.dependency || 0)),
+    Math.abs(Number(delta.rivalry || 0))
+  );
+}
+
+function isMeaningfulRelationshipEvent(event = {}) {
+  if (!event?.targetAgentId) return false;
+  const text = eventTextForGate(event);
+  if (/greet|small_talk|ordinary_chat|chat_only|pass_by|walk_by|路过|打招呼|寒暄|闲聊|普通聊天/.test(text)) return false;
+  if (/help|assist|care|save|rescue|support|cooperate|together|promise|apolog|forgive|conflict|argue|fight|betray|danger|risk|clinic|medical|trust|帮助|协助|照顾|救助|求助|共同|合作|承诺|道歉|和解|冲突|争吵|背叛|危险|诊所|医疗|信任/.test(text)) return true;
+  const relationDelta = relationshipDeltaMagnitude(event.relationshipDelta || event.relationDelta || {});
+  const emotionDelta = rawDeltaMagnitude(event.emotionDelta || {}, 0);
+  return relationDelta > 0.1 || emotionDelta >= 18 || Number(event.relationshipImpact || event.relationImpact || 0) >= 18;
+}
+
 function normalizedMemoryDimensions(world = {}, agent = {}, event = {}) {
   const routine = event.category === "routine";
   const text = eventTextForGate(event);
@@ -382,6 +539,12 @@ function normalizedMemoryDimensions(world = {}, agent = {}, event = {}) {
     V_emotion = Math.max(V_emotion, 0.52);
     V_relation = Math.max(V_relation, 0.65);
     V_goal = Math.max(V_goal, 0.38);
+  }
+  if (/help|assist|care|save|rescue|support|cooperate|together|apolog|forgive|trust|帮助|协助|照顾|救助|求助|共同|合作|道歉|和解|信任/.test(text)) {
+    V_event = Math.max(V_event, 0.58);
+    V_emotion = Math.max(V_emotion, 0.42);
+    V_relation = Math.max(V_relation, 0.62);
+    V_goal = Math.max(V_goal, 0.32);
   }
   if (/helped|help|saved|care/.test(text) && event.targetAgentId) {
     V_event = Math.max(V_event, 0.72);
@@ -574,18 +737,26 @@ function syncLongTermMemoryViews(agent = {}) {
     if (valence > 10) return "positive";
     return "mixed";
   };
-  agent.episodicMemory = (structured.episodic || []).map(item => ({
+  agent.episodicMemory = (structured.episodic || []).map(raw => {
+    const item = memoryPerspectiveLayer(agent, raw, "episodic");
+    return ({
     id: item.id || "",
     event: compactString(item.text || item.meaning, "", 180),
+    time: item.time || item.at || 0,
+    myExperience: compactString(item.myExperience || item.event || item.text || item.meaning, "", 220),
+    emotion: item.emotion || item.emotionalImpact || emotionalImpact(item),
     meaning: compactString(item.meaning || item.text, "", 220),
     emotionalImpact: item.emotionalImpact || emotionalImpact(item),
     importance: normalizeRatio(item.importance, 0.4),
     at: item.at || 0,
     evidenceIds: Array.isArray(item.evidenceIds) ? item.evidenceIds.slice(0, 8) : []
-  })).filter(item => item.event || item.meaning).slice(0, 30);
-  agent.beliefMemory = (structured.belief || []).map(item => ({
+  });
+  }).filter(item => item.event || item.meaning).slice(0, 30);
+  agent.beliefMemory = (structured.belief || []).map(raw => {
+    const item = memoryPerspectiveLayer(agent, raw, "belief");
+    return ({
     id: item.id || "",
-    belief: compactString(item.meaning || item.text, "", 180),
+    belief: compactString(item.belief || item.meaning || item.text, "", 180),
     strength: normalizeRatio(item.strength, 0.5),
     confidence: normalizeRatio(item.confidence, Math.min(0.9, 0.35 + normalizeRatio(item.importance, 0.4) * 0.45)),
     sourceEvents: Array.isArray(item.sourceEvents) ? item.sourceEvents.slice(0, 8) : (Array.isArray(item.evidenceIds) ? item.evidenceIds.slice(0, 8) : []),
@@ -593,10 +764,13 @@ function syncLongTermMemoryViews(agent = {}) {
     lastConfirmed: item.lastConfirmed || item.lastSeenAt || item.at || 0,
     importance: normalizeRatio(item.importance, 0.4),
     at: item.at || 0
-  })).filter(item => item.belief).slice(0, 30);
-  agent.habitMemory = (structured.habit || []).map(item => ({
+  });
+  }).filter(item => item.belief).slice(0, 30);
+  agent.habitMemory = (structured.habit || []).map(raw => {
+    const item = memoryPerspectiveLayer(agent, raw, "habit");
+    return ({
     id: item.id || "",
-    habit: compactString(item.meaning || item.text, "", 180),
+    habit: compactString(item.habit || item.meaning || item.text, "", 180),
     trigger: compactString(item.trigger || item.tags?.[1] || "相关情境", "相关情境", 80),
     action: compactString(item.action || item.meaning || item.text, "", 120),
     probability: normalizeRatio(item.probability, normalizeRatio(item.strength, 0.45)),
@@ -606,8 +780,10 @@ function syncLongTermMemoryViews(agent = {}) {
     strength: normalizeRatio(item.strength, 0.45),
     importance: normalizeRatio(item.importance, 0.3),
     at: item.at || 0
-  })).filter(item => item.habit).slice(0, 30);
-  agent.preferenceMemory = (structured.preference || []).map(item => {
+  });
+  }).filter(item => item.habit).slice(0, 30);
+  agent.preferenceMemory = (structured.preference || []).map(raw => {
+    const item = memoryPerspectiveLayer(agent, raw, "preference");
     const text = compactString(item.meaning || item.text, "", 160);
     const negative = Number(item.valence || 0) < -5 || /不喜欢|讨厌|回避|避免|dislike|avoid/i.test(text);
     return {
@@ -622,16 +798,33 @@ function syncLongTermMemoryViews(agent = {}) {
       at: item.at || 0
     };
   }).filter(item => item.like.length || item.dislike.length).slice(0, 30);
-  agent.relationshipMemory = (structured.social || []).map(item => ({
+  agent.relationshipMemory = (structured.social || []).map(raw => {
+    const item = memoryPerspectiveLayer(agent, raw, "relationship");
+    return ({
     id: item.id || "",
-    target: item.target || "",
-    relation: compactString(item.meaning || item.text, "", 180),
-    event: compactString(item.text || item.meaning, "", 180),
+    targetAgentId: item.targetAgentId || item.target || "",
+    relationshipType: compactString(item.relationshipType || item.relationship || item.tags?.[1] || "familiar", "familiar", 60),
+    trust: normalizeRatio(item.trust, normalizeRatio(item.strength, 0.45)),
+    familiarity: normalizeRatio(item.familiarity, 0.4),
+    emotionalTag: item.emotionalTag || (Number(item.valence || 0) > 5 ? "positive" : Number(item.valence || 0) < -5 ? "negative" : "mixed"),
+    interactionCount: Number(item.interactionCount || item.count || 1),
+    lastInteractionTime: Number(item.lastInteractionTime || item.lastSeenAt || item.at || 0),
+    sourceEvents: Array.isArray(item.sourceEvents) ? item.sourceEvents.slice(0, 8) : (Array.isArray(item.evidenceIds) ? item.evidenceIds.slice(0, 8) : []),
+    relationshipCause: item.relationshipCause || null,
+    relationshipCauses: Array.isArray(item.relationshipCauses) ? item.relationshipCauses.slice(0, 8) : [],
+    causeEvent: item.relationshipCause?.causeEvent || compactString(item.text || item.meaning, "", 180),
+    effect: item.relationshipCause?.effect || compactString(item.meaning || item.text, "", 160),
+    strength: normalizeRatio(item.importance, 0.4),
+    myView: compactString(item.myView || item.relation || item.meaning || item.text, "", 180),
+    relationship: compactString(item.relationship || item.relationshipType || item.tags?.[1] || "familiar", "familiar", 60),
+    relation: compactString(item.relation || item.meaning || item.text, "", 180),
+    event: compactString(item.event || item.text || item.meaning, "", 180),
     impact: Number(item.valence || 0) > 5 ? "positive" : Number(item.valence || 0) < -5 ? "negative" : "mixed",
     importance: normalizeRatio(item.importance, 0.4),
     at: item.at || 0,
     evidenceIds: Array.isArray(item.evidenceIds) ? item.evidenceIds.slice(0, 8) : []
-  })).filter(item => item.relation || item.event).slice(0, 40);
+  });
+  }).filter(item => item.targetAgentId && (item.relation || item.event || item.myView)).slice(0, 40);
   return {
     episodicMemory: agent.episodicMemory,
     beliefMemory: agent.beliefMemory,
@@ -714,6 +907,7 @@ function syncStructuredMemory(agent, item = {}) {
   if (!agent?.id || !item?.id) return null;
   ensureMemory(agent);
   const type = structuredTypeOf(item.type);
+  item = memoryPerspectiveLayer(agent, item, item.type || type);
   const store = agent.structuredMemory[type];
   const structured = {
     id: item.id,
@@ -735,6 +929,15 @@ function syncStructuredMemory(agent, item = {}) {
     preference: compactString(item.preference || "", "", 160),
     valence: item.valence || 0,
     target: item.target || "",
+    targetAgentId: item.targetAgentId || item.target || "",
+    relationshipType: item.relationshipType || "",
+    trust: item.trust == null ? undefined : normalizeRatio(item.trust, 0),
+    familiarity: item.familiarity == null ? undefined : normalizeRatio(item.familiarity, 0),
+    emotionalTag: item.emotionalTag || "",
+    interactionCount: Number(item.interactionCount || item.count || 1),
+    lastInteractionTime: Number(item.lastInteractionTime || item.lastSeenAt || item.at || 0),
+    relationshipCause: item.relationshipCause || null,
+    relationshipCauses: Array.isArray(item.relationshipCauses) ? item.relationshipCauses.slice(0, 8) : [],
     evidenceIds: Array.isArray(item.evidenceIds) ? item.evidenceIds.slice(0, 8) : [],
     tags: Array.isArray(item.tags) ? item.tags.slice(0, 8) : [],
     decay: item.decay ?? 0,
@@ -838,6 +1041,15 @@ function structuredMemoryForAgent(agent = {}, perType = 8) {
         preference: item.preference || "",
         valence: item.valence || 0,
         target: item.target || "",
+        targetAgentId: item.targetAgentId || item.target || "",
+        relationshipType: item.relationshipType || "",
+        trust: item.trust == null ? undefined : normalizeRatio(item.trust, 0),
+        familiarity: item.familiarity == null ? undefined : normalizeRatio(item.familiarity, 0),
+        emotionalTag: item.emotionalTag || "",
+        interactionCount: Number(item.interactionCount || item.count || 1),
+        lastInteractionTime: Number(item.lastInteractionTime || item.lastSeenAt || item.at || 0),
+        relationshipCause: item.relationshipCause || null,
+        relationshipCauses: Array.isArray(item.relationshipCauses) ? item.relationshipCauses.slice(0, 8) : [],
         evidenceIds: Array.isArray(item.evidenceIds) ? item.evidenceIds.slice(0, 8) : [],
         tags: Array.isArray(item.tags) ? item.tags.slice(0, 8) : []
       });
@@ -937,6 +1149,7 @@ function appendSemanticMemory(agent, memory = {}) {
   if (!agent?.id) return null;
   const store = ensureSemanticMemory(agent);
   const type = semanticTypes.includes(memory.type) ? memory.type : "experience";
+  memory = memoryPerspectiveLayer(agent, memory, type);
   const text = String(memory.text || memory.meaning || "").trim();
   if (!text || isBlockedMemoryText(text)) return null;
   const at = Number(memory.at || 0);
@@ -948,6 +1161,8 @@ function appendSemanticMemory(agent, memory = {}) {
     const nextCount = previousCount + 1;
     const incomingImportance = clampNumber(memory.importance, 1, 5, 3);
     const previousAverage = Number(existing.averageImportance || existing.importance || incomingImportance);
+    existing.text = ensureFirstPersonText(agent, memory.text || existing.text || existing.meaning || "", type);
+    existing.meaning = ensureFirstPersonText(agent, memory.meaning || existing.meaning || existing.text || "", type);
     existing.count = nextCount;
     existing.firstTime = Number(existing.firstTime ?? existing.createdAt ?? existing.at ?? at);
     existing.lastTime = Math.max(Number(existing.lastTime || existing.lastSeenAt || 0), at);
@@ -958,6 +1173,24 @@ function appendSemanticMemory(agent, memory = {}) {
     existing.strength = clampNumber(Number(existing.strength || 45) + clampNumber(memory.strengthDelta, 1, 12, 3), 0, 100, 50);
     existing.confidence = Math.max(normalizeRatio(existing.confidence, 0.5), normalizeRatio(memory.confidence, 0.5));
     existing.sourceEvents = uniqueStrings([existing.sourceEvents, memory.sourceEvents, memory.evidenceIds], 8);
+    existing.sourceCausalChain ||= memory.sourceCausalChain || memory.causalChainId || "";
+    const hasRelationshipPayload = type === "relationship" || memory.targetAgentId || memory.relationshipType || memory.relationshipCause;
+    if (hasRelationshipPayload) {
+      existing.targetAgentId ||= memory.targetAgentId || memory.target || "";
+      existing.target ||= memory.target || memory.targetAgentId || "";
+      existing.relationshipType = memory.relationshipType || existing.relationshipType || "";
+      if (memory.trust != null) existing.trust = normalizeRatio(memory.trust, normalizeRatio(existing.trust, 0));
+      if (memory.familiarity != null) existing.familiarity = normalizeRatio(memory.familiarity, normalizeRatio(existing.familiarity, 0));
+      existing.emotionalTag = memory.emotionalTag || existing.emotionalTag || "";
+      existing.interactionCount = Number(existing.interactionCount || existing.count || 1) + Number(memory.interactionCountDelta || 1);
+      existing.lastInteractionTime = Math.max(Number(existing.lastInteractionTime || 0), Number(memory.lastInteractionTime || at));
+      if (memory.relationshipCause) existing.relationshipCause = memory.relationshipCause;
+      existing.relationshipCauses = uniqueRelationshipCauses([
+        existing.relationshipCauses,
+        memory.relationshipCause || null,
+        Array.isArray(memory.relationshipCauses) ? memory.relationshipCauses : []
+      ], 8);
+    }
     existing.summary = existing.summary || existing.meaning || existing.text;
     existing.compressionKey ||= compressionKey;
     syncStructuredMemory(agent, existing);
@@ -987,7 +1220,17 @@ function appendSemanticMemory(agent, memory = {}) {
     preference: compactString(memory.preference || "", "", 160),
     valence: clampNumber(memory.valence, -100, 100, 0),
     target: memory.target || "",
+    targetAgentId: memory.targetAgentId || memory.target || "",
+    relationshipType: memory.relationshipType || "",
+    trust: memory.trust == null ? undefined : normalizeRatio(memory.trust, 0),
+    familiarity: memory.familiarity == null ? undefined : normalizeRatio(memory.familiarity, 0),
+    emotionalTag: memory.emotionalTag || "",
+    interactionCount: Number(memory.interactionCount || 1),
+    lastInteractionTime: Number(memory.lastInteractionTime || at),
+    relationshipCause: memory.relationshipCause || null,
+    relationshipCauses: uniqueRelationshipCauses([memory.relationshipCause || null, memory.relationshipCauses || []], 8),
     source: memory.source || "memory-consolidator",
+    sourceCausalChain: memory.sourceCausalChain || memory.causalChainId || "",
     evidenceIds: Array.isArray(memory.evidenceIds) ? memory.evidenceIds.slice(0, 8) : [],
     tags: Array.isArray(memory.tags) ? memory.tags.slice(0, 8) : [],
     dedupeKey,
@@ -1059,6 +1302,16 @@ function routineKind(detail = {}) {
 }
 
 function habitText(agent, kind) {
+  const firstPerson = {
+    sleep: "我习惯保持规律休息，让身体和节奏稳定下来。",
+    meal: "我习惯在固定时间补充体力，避免饱腹不足打乱安排。",
+    commute: "我习惯按日程在住处、工作或学习地点之间移动。",
+    work: "我习惯按时处理职责，不把承诺拖到失控。",
+    study: "我习惯按时学习，让每天的安排保持稳定。",
+    rest: "我习惯用短暂休息恢复状态，再继续处理事情。",
+    routine: "我习惯保持稳定的日常节奏。"
+  };
+  return firstPerson[kind] || firstPerson.routine;
   const name = agent?.name || "这个人";
   return {
     sleep: `${name}保持相对规律的休息习惯。`,
@@ -1072,6 +1325,30 @@ function habitText(agent, kind) {
 }
 
 function eventMeaning(agent, event = {}) {
+  const eventType = event.interruption?.type || event.type || "";
+  const eventText = eventTextForGate(event);
+  if (eventType === "health" || /health|clinic|medical/.test(event.actionType || eventText)) {
+    return "我记得身体状态影响过当天安排，这让我更注意健康信号。";
+  }
+  if (eventType === "hunger" || /hunger|food|eat|meal/.test(event.actionType || eventText)) {
+    return "我发现饱腹不足会打断后续安排，所以能处理时会先补充体力。";
+  }
+  if (eventType === "safety" || /safety|risk|danger/.test(event.actionType || eventText)) {
+    return "我记得安全感不足时很难安心行动，所以遇到风险会先确认环境。";
+  }
+  if (eventType === "fatigue" || /fatigue|rest|tired/.test(event.actionType || eventText)) {
+    return "我发现疲惫会拖慢判断和行动，因此需要适时休息。";
+  }
+  if (eventType === "hygiene") {
+    return "我发现清洁状态会影响舒适感和社交意愿。";
+  }
+  if (/conflict|argue|misunderstand|fight|betray|冲突|争吵|误会/.test(eventText)) {
+    return "我记得这次人际摩擦，它让我之后更谨慎地处理相关关系。";
+  }
+  if (/help|assist|support|care|save|rescue|cooperate|帮助|协助|照顾|求助|合作/.test(eventText)) {
+    return "我记得这次互相支持的经历，它让我更愿意相信可靠的人。";
+  }
+  return "我记得这次不太寻常的经历，并把它作为之后判断的参考。";
   const name = agent?.name || "这个人";
   const type = event.interruption?.type || event.type || "";
   if (type === "health" || /health|clinic|medical/.test(event.actionType || "")) {
@@ -1099,6 +1376,14 @@ function eventMeaning(agent, event = {}) {
 }
 
 function beliefFromEvent(agent, event = {}) {
+  const eventType = event.interruption?.type || event.type || "";
+  const eventText = eventTextForGate(event);
+  if (eventType === "health" || /health|clinic|medical/.test(eventText)) return "我相信健康比硬撑日程更重要。";
+  if (eventType === "safety" || /safety|risk|danger/.test(eventText)) return "我相信安全风险出现时应该先确认环境。";
+  if (eventType === "hunger" || /hunger|food|eat|meal/.test(eventText)) return "我相信长期忽视饱腹状态会影响后续安排。";
+  if (/help|assist|support|care|save|rescue|cooperate|帮助|协助|照顾|求助|合作/.test(eventText)) return "我相信遇到困难时可以向可靠的人寻求支持。";
+  if (/conflict|argue|misunderstand|fight|betray|冲突|争吵|误会/.test(eventText)) return "我相信关系紧张时需要先放慢判断。";
+  return "";
   const name = agent?.name || "这个人";
   const type = event.interruption?.type || event.type || "";
   if (type === "health") return `${name}逐渐形成判断：健康比硬撑日程更重要。`;
@@ -1140,6 +1425,46 @@ function isRoutineLifeDetail(detail = {}) {
   return routineActions.has(type) || routineActions.has(localAction) || type.startsWith("plan_");
 }
 
+function eventSignificanceSignals(event = {}) {
+  const text = eventTextForGate(event);
+  const novelty = event.category === "routine" ? 0 : normalizeRatio(event.abnormality, 0.25);
+  const emotionChange = Math.max(
+    normalizedDeltaValue(event.emotionDelta, 0),
+    normalizeRatio(event.emotionalIntensity, 0)
+  );
+  const relationshipChange = Math.max(
+    normalizedDeltaValue(event.relationshipDelta || event.relationDelta || {}, 0),
+    normalizeRatio(event.relationshipImpact || event.relationImpact, 0)
+  );
+  const goalChange = Math.max(
+    normalizedDeltaValue(event.goalDelta || {}, 0),
+    normalizeRatio(event.goalImpact || event.futureImpact, 0)
+  );
+  const explicitHealthDelta = Math.abs(Number(event.needDelta?.health ?? event.healthChange ?? 0));
+  const healthChange = Math.max(
+    normalizeRatio(explicitHealthDelta, 0),
+    event.interruption?.type === "health" || /health|clinic|medical|ill|sick/.test(text) ? 0.55 : 0
+  );
+  const score = clampNumber(
+    novelty * 0.22
+      + emotionChange * 0.24
+      + relationshipChange * 0.22
+      + goalChange * 0.18
+      + healthChange * 0.14,
+    0,
+    1,
+    0
+  );
+  return {
+    novelty: Number(novelty.toFixed(3)),
+    emotionChange: Number(emotionChange.toFixed(3)),
+    relationshipChange: Number(relationshipChange.toFixed(3)),
+    goalChange: Number(goalChange.toFixed(3)),
+    healthChange: Number(healthChange.toFixed(3)),
+    score: Number(score.toFixed(3))
+  };
+}
+
 function memoryGate(world = {}, agent = {}, event = {}) {
   ensureMemory(agent);
   const routine = event.category === "routine";
@@ -1150,12 +1475,14 @@ function memoryGate(world = {}, agent = {}, event = {}) {
   const model = multiplicativeMemoryImportance(world, agent, event);
   const baseThreshold = memoryImportanceThreshold(world);
   const threshold = !routine && model.emotionMemoryWeight?.label === "ordinary" ? Math.min(0.95, baseThreshold * 1.15) : baseThreshold;
+  const eventSignificance = eventSignificanceSignals(event);
+  const significanceMinimum = normalizeRatio(world.config?.memoryEventSignificanceMinimum ?? world.memoryEventSignificanceMinimum, 0.45);
   let importance = model.importance;
   let memoryType = "episodic";
   if (routine) {
     importance = routineCount >= 3 ? Math.max(threshold, Math.min(0.28, 0.14 + routineCount * 0.035)) : Math.min(threshold * 0.66, importance);
     memoryType = routineCount >= 3 ? "habit" : "";
-  } else if ((isDirectSocialEvent(event, text) || /relationship|trust|betray|neighbor|friend|family|helped|saved|conflict|argument|promise/i.test(text)) && model.dimensions.V_relation >= 0.35) {
+  } else if (isMeaningfulRelationshipEvent(event) && (model.dimensions.V_relation >= 0.35 || eventSignificance.relationshipChange >= 0.1 || eventSignificance.emotionChange >= 0.3)) {
     memoryType = "social";
   } else if (event.interruption?.canOverridePlan && ["health", "safety"].includes(event.interruption.type)) {
     memoryType = "belief";
@@ -1163,11 +1490,15 @@ function memoryGate(world = {}, agent = {}, event = {}) {
     memoryType = "belief";
   }
 
-  const shouldRemember = routine ? routineCount >= 3 : (!isBlockedMemoryText(event.summary || "") && importance >= threshold);
+  const shouldRemember = routine
+    ? routineCount >= 3
+    : (!isBlockedMemoryText(event.summary || "") && (importance >= threshold || eventSignificance.score >= significanceMinimum));
   return {
     shouldRemember,
     importance: Number(clampNumber(importance, 0, 1, 0).toFixed(3)),
     memoryType,
+    eventSignificance,
+    significanceMinimum,
     routine,
     routineKind: kind,
     routineCount,
@@ -1206,7 +1537,8 @@ function updateHabit(agent, event = {}, gate = null) {
     at: event.clock || 0,
     importance: current.count >= 4 ? 3 : 2,
     strength: clampNumber(35 + current.count * 5, 35, 85, 45),
-    source: "memory-consolidator",
+    source: event.causalGraph?.chainId ? "causal-graph" : "memory-consolidator",
+    sourceCausalChain: event.causalGraph?.chainId || "",
     evidenceIds: [event.id],
     tags: ["habit", kind],
     dedupeKey: key
@@ -1247,6 +1579,119 @@ function memoryChangesFromEvent(agent, event = {}, gate = {}, meaning = "") {
   return changes;
 }
 
+function relationshipTypeFromEvent(event = {}) {
+  const text = eventTextForGate(event);
+  if (/conflict|argue|fight|betray|冲突|争吵|背叛/.test(text)) return "conflict";
+  if (/help|assist|support|save|rescue|care|帮助|协助|求助|救助|照顾/.test(text)) return "help";
+  if (/cooperate|together|共同|合作|协作/.test(text)) return "cooperation";
+  if (/promise|承诺|兑现/.test(text)) return "promise";
+  if (/apolog|forgive|道歉|和解/.test(text)) return "repair";
+  if (/danger|risk|clinic|medical|危险|诊所|医疗/.test(text)) return "crisis";
+  return "important_exchange";
+}
+
+function relationshipEmotionalTag(event = {}) {
+  const text = eventTextForGate(event);
+  const delta = event.relationshipDelta || event.relationDelta || {};
+  const negativeDelta = Number(delta.resentment || 0) > 0 || Number(delta.trust || 0) < 0 || Number(delta.intimacy || 0) < 0;
+  const positiveDelta = Number(delta.trust || 0) > 0 || Number(delta.intimacy || 0) > 0 || Number(delta.respect || 0) > 0;
+  if (/conflict|argue|fight|betray|冲突|争吵|背叛/.test(text) || negativeDelta) return "negative";
+  if (/help|assist|support|save|rescue|care|cooperate|promise|apolog|forgive|帮助|协助|求助|救助|照顾|共同|合作|承诺|道歉|和解/.test(text) || positiveDelta) return "positive";
+  return "mixed";
+}
+
+function relationshipEffectFromEvent(event = {}) {
+  const delta = event.relationshipDelta || event.relationDelta || {};
+  const parts = [];
+  ["trust", "affinity", "intimacy", "respect", "debt", "resentment", "dependency", "rivalry"].forEach(key => {
+    const value = Number(delta[key] || 0);
+    if (!value) return;
+    const normalized = Number((value / (Math.abs(value) <= 1 ? 1 : 100)).toFixed(3));
+    parts.push(`${key}${normalized >= 0 ? "+" : ""}${normalized}`);
+  });
+  if (parts.length) return parts.join(", ");
+  const tag = relationshipEmotionalTag(event);
+  if (tag === "positive") return "trust+0.1";
+  if (tag === "negative") return "trust-0.1";
+  return "relationship impression changed";
+}
+
+function relationshipMemoryText(agent = {}, event = {}, target = {}, type = "important_exchange") {
+  const fpTargetName = target.name || event.targetAgentName || event.targetAgentId || "对方";
+  const fpReason = compactString(event.relationshipReason || event.reason || event.summary || "", "", 120);
+  const fpLabels = {
+    help: `我觉得${fpTargetName}更可靠，因为对方曾在重要时刻帮助或支持过我。`,
+    conflict: `我和${fpTargetName}发生过让关系紧张的事情，所以我会更谨慎。`,
+    cooperation: `我和${fpTargetName}一起完成过事情，所以我觉得彼此更熟悉。`,
+    promise: `我和${fpTargetName}之间有过承诺或兑现的经历，这会影响我怎么看待对方。`,
+    repair: `我和${fpTargetName}有过修复关系的经历，所以这段关系没有完全停在冲突里。`,
+    crisis: `我在风险或医疗相关事件里注意到${fpTargetName}，这改变了我对对方的印象。`,
+    important_exchange: `我和${fpTargetName}有过一次重要交流，这让我重新判断彼此关系。`
+  };
+  const fpBase = fpLabels[type] || fpLabels.important_exchange;
+  return fpReason ? `${fpBase} 具体原因：${fpReason}` : fpBase;
+  const actor = agent.name || agent.id || "角色";
+  const targetName = target.name || event.targetAgentName || event.targetAgentId || "对方";
+  const reason = compactString(event.relationshipReason || event.reason || event.summary || "", "", 120);
+  const labels = {
+    help: `${targetName}曾在重要时刻帮助或支持${actor}`,
+    conflict: `${actor}和${targetName}之间发生过让关系紧张的事件`,
+    cooperation: `${actor}和${targetName}曾共同完成一件事`,
+    promise: `${actor}和${targetName}之间有过承诺或兑现经历`,
+    repair: `${actor}和${targetName}之间有过修复关系的经历`,
+    crisis: `${actor}在风险或医疗相关事件中注意到${targetName}`,
+    important_exchange: `${actor}和${targetName}有过一次重要交流`
+  };
+  return reason ? `${labels[type] || labels.important_exchange}：${reason}` : (labels[type] || labels.important_exchange);
+}
+
+function relationshipMemoryFromEvent(world = {}, agent = {}, event = {}, gate = {}, meaning = "") {
+  if (!gate?.shouldRemember || gate.memoryType !== "social" || !isMeaningfulRelationshipEvent(event)) return null;
+  const targetAgentId = String(event.targetAgentId || "");
+  if (!targetAgentId || targetAgentId === agent.id) return null;
+  const target = (world.agents || []).find(item => item.id === targetAgentId) || {};
+  const rel = agent.relationshipMatrix?.[targetAgentId] || {};
+  const relationshipType = event.relationshipType || relationshipTypeFromEvent(event);
+  const emotionalTag = relationshipEmotionalTag(event);
+  const valence = emotionalTag === "negative" ? -45 : emotionalTag === "positive" ? 45 : 0;
+  const text = relationshipMemoryText(agent, event, target, relationshipType);
+  const cause = {
+    causeEvent: compactString(event.summary || meaning || event.type || "relationship event", "", 180),
+    effect: relationshipEffectFromEvent(event),
+    strength: gate.importance
+  };
+  const importance = clampNumber(Math.ceil(Number(gate.importance || 0.2) * 5), 1, 5, 3);
+  const memory = appendSemanticMemory(agent, {
+    type: "relationship",
+    text,
+    meaning: meaning || text,
+    at: event.clock || 0,
+    importance,
+    strength: clampNumber(45 + importance * 8 + relationshipDeltaMagnitude(event.relationshipDelta || event.relationDelta || {}) * 3, 35, 95, 58),
+    confidence: Math.min(0.95, 0.45 + Number(gate.importance || 0) * 0.45),
+    valence,
+    target: targetAgentId,
+    targetAgentId,
+    relationshipType,
+    trust: rel.trust ?? rel.affinity ?? 50,
+    familiarity: rel.familiarity ?? rel.intimacy ?? 40,
+    emotionalTag,
+    interactionCount: 1,
+    lastInteractionTime: event.clock || 0,
+    relationshipCause: cause,
+    relationshipCauses: [cause],
+    source: event.causalGraph?.chainId ? "causal-graph" : "relationship-memory-formation",
+    sourceCausalChain: event.causalGraph?.chainId || "",
+    sourceEvents: [event.id],
+    evidenceIds: [event.id],
+    tags: ["relationship", relationshipType, emotionalTag],
+    dedupeKey: `relationship:${agent.id}:${targetAgentId}:${relationshipType}`,
+    compressionKey: `relationship:${targetAgentId}:${relationshipType}`
+  });
+  syncLongTermMemoryViews(agent);
+  return memory;
+}
+
 function consolidateEvent(world, agent, event = {}) {
   ensureMemory(agent);
   const gate = memoryGate(world, agent, event);
@@ -1261,6 +1706,9 @@ function consolidateEvent(world, agent, event = {}) {
   const meaning = eventMeaning(agent, event);
   event.memoryChanges = memoryChangesFromEvent(agent, event, gate, meaning);
   const semanticType = gate.memoryType === "social" ? "relationship" : "experience";
+  if (semanticType === "relationship") {
+    return relationshipMemoryFromEvent(world, agent, event, gate, meaning);
+  }
   const experience = appendSemanticMemory(agent, {
     type: semanticType,
     text: meaning,
@@ -1269,7 +1717,8 @@ function consolidateEvent(world, agent, event = {}) {
     importance,
     strength: clampNumber(45 + importance * 8, 40, 95, 60),
     valence: /健康|安全|不足|摩擦|风险|疲惫|打断/.test(meaning) ? -40 : 20,
-    source: "memory-consolidator",
+    source: event.causalGraph?.chainId ? "causal-graph" : "memory-consolidator",
+    sourceCausalChain: event.causalGraph?.chainId || "",
     evidenceIds: [event.id],
     tags: [semanticType, event.interruption?.type, event.actionType].filter(Boolean),
     dedupeKey: `${semanticType}:${agent.id}:${event.interruption?.type || event.actionType || event.type}`
@@ -1283,25 +1732,12 @@ function consolidateEvent(world, agent, event = {}) {
       at: event.clock || 0,
       importance: Math.max(3, importance),
       strength: clampNumber(50 + importance * 8, 45, 95, 65),
-      source: "memory-consolidator",
+      source: event.causalGraph?.chainId ? "causal-graph" : "memory-consolidator",
+      sourceCausalChain: event.causalGraph?.chainId || "",
       evidenceIds: [event.id],
       tags: ["belief", event.interruption?.type].filter(Boolean),
       dedupeKey: `belief:${agent.id}:${event.interruption?.type || event.actionType || event.type}`
     });
-  }
-  if (semanticType === "relationship") {
-    agent.relationshipMemory ||= [];
-    agent.relationshipMemory.unshift({
-      id: `rel_${event.id}`,
-      target: event.targetAgentId || "",
-      relation: meaning,
-      event: event.summary || meaning,
-      impact: /conflict|argument|fight|betray/i.test(event.summary || "") ? "negative" : "positive",
-      importance: gate.importance,
-      at: event.clock || 0,
-      evidenceIds: [event.id]
-    });
-    agent.relationshipMemory = agent.relationshipMemory.slice(0, 40);
   }
   return experience;
 }
@@ -1341,6 +1777,8 @@ function recordLifeEvent(world, agent, detail = {}) {
     targetAgentId: detail.targetAgentId || detail.targetId || "",
     contextScope: detail.contextScope || detail.knownByMode || "",
     contextFactor: detail.contextFactor,
+    needDelta: detail.needDelta || null,
+    healthChange: detail.healthChange,
     emotionDelta: detail.emotionDelta || null,
     relationshipDelta: detail.relationshipDelta || detail.relationDelta || detail.relationshipChange || null,
     relationImpact: detail.relationImpact ?? detail.relationshipImpact,
@@ -1361,7 +1799,9 @@ function recordLifeEvent(world, agent, detail = {}) {
   world.eventLog = world.eventLog.slice(0, 2000);
   agent.eventLog.unshift(event);
   agent.eventLog = agent.eventLog.slice(0, 120);
+  const causalGraph = analyzeEventImpact(world, agent, event);
   const memory = consolidateEvent(world, agent, event);
+  const memoryCausalGraph = connectMemoryCause(world, agent, event, memory);
   const cause = emotionCauseFromEvent(event);
   if (cause) {
     recordEmotionCause(agent, {
@@ -1376,7 +1816,7 @@ function recordLifeEvent(world, agent, detail = {}) {
   normalizeGoalRuntime(agent, world);
   agent.memoryProfile.lastConsolidatedAt = clock;
   agent.memorySummary = buildMemorySummary(agent, world);
-  return { event, memory };
+  return { event, memory, causalGraph: memoryCausalGraph || causalGraph || null };
 }
 
 function recordPlanMemory(world, agent, detail = {}) {
@@ -1456,6 +1896,32 @@ function recentMeaningfulEvents(world, agent, limit = 4) {
 
 function buildMemorySummary(agent, world = {}) {
   ensureMemory(agent);
+  const fpStore = agent.semanticMemory || {};
+  const pickTexts = (items = [], type = "episodic", limit = 2) => (Array.isArray(items) ? items : [])
+    .slice(0, limit)
+    .map(item => ensureFirstPersonText(agent, item.text || item.meaning || item.belief || item.habit || item.preference || item.event || "", type))
+    .filter(Boolean);
+  const summaryParts = [];
+  const fpHabits = pickTexts(fpStore.habit, "habit", 2);
+  const fpExperiences = pickTexts([...(fpStore.experience || []), ...(fpStore.episodic || [])], "episodic", 2);
+  const fpPreferences = pickTexts(fpStore.preference, "preference", 1);
+  const fpRelationships = pickTexts([...(fpStore.relationship || []), ...(fpStore.social || [])], "relationship", 1);
+  const fpBeliefs = pickTexts(fpStore.belief, "belief", 2);
+  const fpGoals = pickTexts(fpStore.goal, "goal", 1);
+  if (fpHabits.length) summaryParts.push(`习惯：${fpHabits.join("；")}`);
+  if (fpExperiences.length) summaryParts.push(`经历：${fpExperiences.join("；")}`);
+  if (fpPreferences.length) summaryParts.push(`偏好：${fpPreferences.join("；")}`);
+  if (fpRelationships.length) summaryParts.push(`关系：${fpRelationships.join("；")}`);
+  if (fpBeliefs.length) summaryParts.push(`信念：${fpBeliefs.join("；")}`);
+  if (fpGoals.length) summaryParts.push(`目标：${fpGoals.join("；")}`);
+  const fpEvents = recentMeaningfulEvents(world, agent, 2);
+  if (!fpExperiences.length && fpEvents.length) {
+    summaryParts.push(`近期经历：${fpEvents.map(event => eventMeaning(agent, event)).join("；")}`);
+  }
+  return summaryParts.length
+    ? `角色近期记忆：${summaryParts.join(" / ")}`.slice(0, 500)
+    : "角色近期记忆：我目前生活节奏相对稳定，还没有形成新的明确经验。";
+  ensureMemory(agent);
   const store = agent.semanticMemory || {};
   const parts = [];
   const habits = (store.habit || []).slice(0, 2).map(item => item.text);
@@ -1475,6 +1941,12 @@ function buildMemorySummary(agent, world = {}) {
   return parts.length ? `角色近期状态：${parts.join(" / ")}`.slice(0, 500) : "角色近期状态：生活节奏暂时稳定，尚未形成明显的新经验。";
 }
 
+function reflectionSelfViewText(agent = {}, learnedBeliefs = [], meaningfulEvents = []) {
+  if (learnedBeliefs[0]) return `我最近更容易用“${learnedBeliefs[0]}”来理解自己的选择。`;
+  if (meaningfulEvents[0]) return `我最近被“${eventMeaning(agent, meaningfulEvents[0])}”影响了自我判断。`;
+  return "我最近的自我判断保持稳定，没有明显人格转向。";
+}
+
 function runDailyReflection(world, options = {}) {
   const clock = Number(world?.clock || 0);
   const day = Math.floor(clock / 1440);
@@ -1489,6 +1961,7 @@ function runDailyReflection(world, options = {}) {
     if (!options.force && agent.reflection.day === day) return;
     const meaningfulEvents = recentMeaningfulEvents(world, agent, 6);
     const memories = summarizeTopMemories(agent, clock, 8).filter(item => item.source !== "local-reflection");
+    const causalAnchors = causalReflectionAnchors(world, agent, 3);
     const mainTheme = memories[0]?.text || (meaningfulEvents[0] ? eventMeaning(agent, meaningfulEvents[0]) : "生活节奏暂时稳定");
     const learnedBeliefs = (agent.beliefMemory || []).slice(0, 3).map(item => item.belief).filter(Boolean);
     const newHabits = (agent.habitMemory || []).slice(0, 3).map(item => item.habit).filter(Boolean);
@@ -1521,6 +1994,9 @@ function runDailyReflection(world, options = {}) {
       mainTheme: String(mainTheme).slice(0, 180),
       anchors: memories.slice(0, 3).map(item => String(item.text).slice(0, 140)),
       eventAnchors: meaningfulEvents.slice(0, 4).map(event => String(event.summary || eventMeaning(agent, event)).slice(0, 140)),
+      causalAnchors,
+      lessonLearned: causalAnchors[0]?.lessonLearned || "",
+      counterfactual: causalAnchors[0]?.counterfactual || "",
       learnedBeliefs,
       habitsUpdated: newHabits,
       newHabits,
@@ -1530,6 +2006,12 @@ function runDailyReflection(world, options = {}) {
       source: "local-reflection"
     };
     agent.selfModel.currentSelfView = selfViewUpdate;
+    const cleanSelfViewUpdate = compactString(reflectionSelfViewText(agent, learnedBeliefs, meaningfulEvents), "", 220);
+    agent.reflection.mainTheme = compactString(ensureFirstPersonText(agent, agent.reflection.mainTheme || "我今天没有形成新的强烈经验。", "episodic"), "", 180);
+    agent.reflection.anchors = (agent.reflection.anchors || []).map(text => compactString(ensureFirstPersonText(agent, text, "episodic"), "", 140));
+    agent.reflection.eventAnchors = (agent.reflection.eventAnchors || []).map(text => compactString(ensureFirstPersonText(agent, text, "episodic"), "", 140));
+    agent.reflection.selfViewUpdate = cleanSelfViewUpdate;
+    agent.selfModel.currentSelfView = cleanSelfViewUpdate;
     agent.selfModel.selfBeliefs = uniqueStrings([agent.selfModel.selfBeliefs, learnedBeliefs.slice(0, 2)], 10);
     agent.memorySummary = buildMemorySummary(agent, world);
     updated.push(agent.id);
@@ -1538,6 +2020,173 @@ function runDailyReflection(world, options = {}) {
   world.memoryReflectionState.lastRunClock = clock;
   world.memoryReflectionState.updatedAgents = updated.slice(0, 200);
   return updated;
+}
+
+function shouldDropSystemLongTermMemory(memory = {}) {
+  const raw = String([
+    memory.text,
+    memory.meaning,
+    memory.summary,
+    memory.belief,
+    memory.habit,
+    memory.preference,
+    memory.event
+  ].filter(Boolean).join(" "));
+  if (/^Followed (the )?plan/i.test(raw)) return true;
+  if (/^Daily reflection/i.test(raw)) return true;
+  if (/^Because of .*interrupted the plan/i.test(raw)) return true;
+  return false;
+}
+
+function normalizePerspectiveArray(agent = {}, items = [], type = "episodic", limit = 80) {
+  const seen = new Set();
+  return (Array.isArray(items) ? items : [])
+    .filter(item => item && typeof item === "object" && !shouldDropSystemLongTermMemory(item))
+    .map(item => memoryPerspectiveLayer(agent, item, type))
+    .filter(item => {
+      const text = String(item.text || item.meaning || item.belief || item.habit || item.preference || item.event || item.myView || "");
+      if (!text || systemMemoryLanguagePattern.test(text)) return false;
+      const key = item.id || `${type}:${normalizedMemoryTextKey(text)}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .slice(0, limit);
+}
+
+function backfillEpisodicMemoryFromEvents(agent = {}) {
+  const existingCount = (agent.semanticMemory?.episodic || []).length
+    + (agent.semanticMemory?.experience || []).length
+    + (agent.structuredMemory?.episodic || []).length
+    + (Array.isArray(agent.episodicMemory) ? agent.episodicMemory.length : 0);
+  if (existingCount > 0) return 0;
+  const events = (Array.isArray(agent.eventLog) ? agent.eventLog : [])
+    .filter(event => event && event.category !== "routine")
+    .filter(event => !isBlockedMemoryText(event.summary || ""))
+    .map(event => ({ event, significance: eventSignificanceSignals(event) }))
+    .filter(({ event, significance }) => event.interruption || significance.score >= 0.22 || Number(event.futureImpact || 0) >= 35)
+    .sort((a, b) => Number(b.significance.score || 0) - Number(a.significance.score || 0))
+    .slice(0, 3);
+  events.forEach(({ event, significance }, index) => {
+    const meaning = eventMeaning(agent, event);
+    appendSemanticMemory(agent, {
+      type: "episodic",
+      text: meaning,
+      meaning,
+      myExperience: meaning,
+      at: Number(event.clock || event.at || 0),
+      importance: clampNumber(Math.ceil(Math.max(0.3, significance.score) * 5), 2, 5, 3),
+      strength: clampNumber(48 + Math.round(Math.max(0.3, significance.score) * 35), 45, 90, 60),
+      emotionalImpact: significance.emotionChange >= 0.45 ? "strong" : "mixed",
+      source: "memory-perspective-migration",
+      sourceEvents: [event.id].filter(Boolean),
+      evidenceIds: [event.id].filter(Boolean),
+      tags: ["episodic", "migration", event.interruption?.type || event.actionType || event.type].filter(Boolean),
+      dedupeKey: `memory-perspective-migration:episodic:${agent.id}:${event.id || index}`
+    });
+  });
+  if (events.length) return events.length;
+
+  const lifeSeed = agent.lifeHistorySeed && typeof agent.lifeHistorySeed === "object" ? agent.lifeHistorySeed : {};
+  const lifeEvents = ["childhood", "youth", "adulthood", "recent"]
+    .flatMap(section => Array.isArray(lifeSeed[section]) ? lifeSeed[section].map(item => ({ ...item, section })) : [])
+    .filter(item => item.event || item.impact);
+  const fallbackEvents = lifeEvents.length
+    ? lifeEvents.slice(0, 3)
+    : (Array.isArray(agent.lifeHistory?.episodes) ? agent.lifeHistory.episodes.slice(0, 2).map(event => ({ event, impact: agent.lifeHistory?.summary || "" })) : []);
+  if (!fallbackEvents.length) {
+    const values = uniqueStrings([agent.selfModel?.values, agent.identityCore?.values, agent.personalityProfile?.values], 3);
+    const habits = uniqueStrings([agent.identityCore?.habits, agent.personalityProfile?.habits, agent.selfModel?.selfBeliefs], 3);
+    const goal = compactString(agent.goalRuntime?.goals?.[0]?.name || agent.longTermGoal || agent.goal || "", "", 80);
+    const anchor = values[0] || goal || habits[0] || "稳定生活";
+    fallbackEvents.push({
+      event: `我记得自己在小镇生活中逐渐形成了重视${anchor}的判断。`,
+      impact: goal
+        ? `这让我会把“${goal}”作为之后安排生活的参照。`
+        : `这让我之后更容易按“${anchor}”来判断选择。`,
+      section: "identityBaseline"
+    });
+  }
+  fallbackEvents.forEach((item, index) => {
+    const eventText = ensureFirstPersonText(agent, item.event || item.summary || item, "episodic");
+    const meaning = ensureFirstPersonText(agent, item.impact || item.lesson || item.event || item.summary || "这段经历影响了我之后的判断。", "episodic");
+    appendSemanticMemory(agent, {
+      type: "episodic",
+      text: eventText,
+      meaning,
+      myExperience: eventText,
+      at: 0,
+      importance: 3,
+      strength: 58,
+      emotionalImpact: "mixed",
+      source: "life-history-migration",
+      sourceEvents: [`lifeHistory:${agent.id}:${index + 1}`],
+      evidenceIds: [`lifeHistory:${agent.id}:${index + 1}`],
+      tags: ["episodic", "migration", item.section || "lifeHistory"],
+      dedupeKey: `life-history-migration:episodic:${agent.id}:${index + 1}`
+    });
+  });
+  return fallbackEvents.length;
+}
+
+function migrateMemoryPerspectiveForAgent(agent = {}, world = {}) {
+  if (!agent?.id) return false;
+  ensureMemory(agent);
+  const before = JSON.stringify({
+    semanticMemory: agent.semanticMemory,
+    structuredMemory: agent.structuredMemory,
+    episodicMemory: agent.episodicMemory,
+    beliefMemory: agent.beliefMemory,
+    habitMemory: agent.habitMemory,
+    preferenceMemory: agent.preferenceMemory,
+    relationshipMemory: agent.relationshipMemory,
+    vectorMemory: agent.vectorMemory,
+    memorySummary: agent.memorySummary
+  });
+
+  semanticTypes.forEach(type => {
+    agent.semanticMemory[type] = normalizePerspectiveArray(agent, agent.semanticMemory[type], type, type === "habit" ? 40 : 60);
+  });
+  structuredTypes.forEach(type => {
+    agent.structuredMemory[type] = normalizePerspectiveArray(agent, agent.structuredMemory[type], type, type === "habit" ? 50 : 70);
+  });
+  legacyLayers.forEach(layer => {
+    if (layer !== "long" && layer !== "emotional") return;
+    agent.memory[layer] = normalizePerspectiveArray(agent, agent.memory[layer], layer === "emotional" ? "episodic" : "episodic", 60);
+  });
+  const backfilledEpisodic = backfillEpisodicMemoryFromEvents(agent);
+  agent.vectorMemory = (Array.isArray(agent.vectorMemory) ? agent.vectorMemory : [])
+    .map(item => {
+      const normalized = memoryPerspectiveLayer(agent, item, item.structuredType || item.type || "episodic");
+      const scene = ensureFirstPersonText(agent, normalized.scene || normalized.text || normalized.meaning || "", normalized.structuredType || normalized.type || "episodic");
+      return {
+        ...normalized,
+        scene,
+        text: scene,
+        factAuthority: false
+      };
+    })
+    .filter(item => item.scene && !systemMemoryLanguagePattern.test(item.scene))
+    .slice(0, 180);
+
+  syncLongTermMemoryViews(agent);
+  agent.memorySummary = buildMemorySummary(agent, world);
+  agent.memoryPerspectiveLayer ||= {};
+  agent.memoryPerspectiveLayer.version = "v3.3.6";
+  agent.memoryPerspectiveLayer.lastRunClock = Number(world.clock || 0);
+  agent.memoryPerspectiveLayer.backfilledEpisodic = Number(agent.memoryPerspectiveLayer.backfilledEpisodic || 0) + backfilledEpisodic;
+  const after = JSON.stringify({
+    semanticMemory: agent.semanticMemory,
+    structuredMemory: agent.structuredMemory,
+    episodicMemory: agent.episodicMemory,
+    beliefMemory: agent.beliefMemory,
+    habitMemory: agent.habitMemory,
+    preferenceMemory: agent.preferenceMemory,
+    relationshipMemory: agent.relationshipMemory,
+    vectorMemory: agent.vectorMemory,
+    memorySummary: agent.memorySummary
+  });
+  return before !== after;
 }
 
 module.exports = {
@@ -1563,5 +2212,9 @@ module.exports = {
   isRoutineEventLogText,
   consolidateEvent,
   memoryGate,
-  importanceFromEvent
+  importanceFromEvent,
+  memoryPerspectiveLayer,
+  ensureFirstPersonText,
+  isFirstPersonMemoryText,
+  migrateMemoryPerspectiveForAgent
 };

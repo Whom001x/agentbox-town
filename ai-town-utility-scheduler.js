@@ -503,6 +503,43 @@ function socialBias(world, agent, action) {
   return action.id === "contact_familiar" ? best : best * 0.25;
 }
 
+function relationshipMemoryBias(agent = {}, action = {}) {
+  const memories = Array.isArray(agent.relationshipMemory) ? agent.relationshipMemory : [];
+  if (!memories.length || !action?.id) return { score: 0, details: [] };
+  let score = 0;
+  const details = [];
+  memories.slice(0, 20).forEach(memory => {
+    const type = String(memory.relationshipType || memory.impact || "").toLowerCase();
+    const tag = String(memory.emotionalTag || memory.impact || "").toLowerCase();
+    const trust = clamp(num(memory.trust, 0.45), 0, 1, 0.45);
+    const familiarity = clamp(num(memory.familiarity, 0.35), 0, 1, 0.35);
+    const strength = clamp(num(memory.strength, memory.importance || 0.4), 0, 1, 0.4);
+    const interactions = Math.min(1.8, 0.85 + Math.log1p(num(memory.interactionCount, 1)) * 0.18);
+    const base = (trust * 0.55 + familiarity * 0.25 + strength * 0.2) * interactions * 12;
+    let delta = 0;
+    if (tag === "positive" || /help|cooperation|promise|repair/.test(type)) {
+      if (["contact_familiar", "ask_guardian"].includes(action.id)) delta += base;
+      if (["follow_plan", "continue_process"].includes(action.id) && /cooperation|promise/.test(type)) delta += base * 0.45;
+      if (action.id === "cooperate") delta += base * 1.2;
+    }
+    if (tag === "negative" || /conflict|crisis/.test(type)) {
+      if (["contact_familiar", "ask_guardian"].includes(action.id)) delta -= base * 0.65;
+      if (["seek_safety", "observe_environment", "think_and_plan"].includes(action.id)) delta += base * 0.35;
+      if (action.id === "avoid_person") delta += base;
+    }
+    if (!delta) return;
+    score += delta;
+    details.push({
+      targetAgentId: memory.targetAgentId || "",
+      type: memory.relationshipType || memory.impact || "",
+      tag: memory.emotionalTag || memory.impact || "",
+      bias: Number(delta.toFixed(2)),
+      reason: String(memory.effect || memory.relation || memory.event || "").slice(0, 80)
+    });
+  });
+  return { score: Number(score.toFixed(2)), details: details.sort((a, b) => Math.abs(b.bias) - Math.abs(a.bias)).slice(0, 4) };
+}
+
 function needDrive(agent, action) {
   const needs = agent.needs || {};
   const weights = ageWeights(agent);
@@ -721,6 +758,7 @@ function scoreAction(world, agent, action, extras = {}) {
   const weights = cognitive.decisionWeights || {};
   const emotion = emotionBias(agent, action);
   const social = socialBias(world, agent, action);
+  const relationshipMemory = relationshipMemoryBias(agent, action);
   const socialField = socialFieldBiasForAction(world, agent, action);
   const socialFeedback = socialFeedbackBiasForAction(world, agent, action);
   const socialFeedbackWeightedScore = num(socialFeedback.gamma, 0.65) * num(socialFeedback.score, 0);
@@ -730,7 +768,7 @@ function scoreAction(world, agent, action, extras = {}) {
   const personaValue = clamp(0.5 + (personality + selfConsistency.score) / 45, 0, 1, 0.5);
   const emotionValue = clamp(0.5 + emotion / 35, 0, 1, 0.5);
   const goalValue = clamp(0.5 + goal.score / 38, 0, 1, 0.5);
-  const socialValue = clamp(0.5 + (social + socialField.score) / 35, 0, 1, 0.5);
+  const socialValue = clamp(0.5 + (social + relationshipMemory.score + socialField.score) / 35, 0, 1, 0.5);
   const socialFeedbackValue = clamp(0.5 + socialFeedbackWeightedScore / 35, 0, 1, 0.5);
   const noveltyValue = clamp((aVector.novelty || 0) * 0.55 + (aVector.curiosity || 0) * 0.35 + num(cognitive.biasVector?.noveltySeeking, 0.35) * 0.35, 0, 1, 0.2);
   const vectorCap = 0.2;
@@ -774,6 +812,7 @@ function scoreAction(world, agent, action, extras = {}) {
       emotionBias: Number(emotion.toFixed(2)),
       emotionValue: Number(emotionValue.toFixed(3)),
       socialBias: Number(social.toFixed(2)),
+      relationshipMemoryBias: Number(relationshipMemory.score.toFixed(2)),
       socialFieldBias: Number(socialField.score.toFixed(2)),
       socialFeedbackBias: Number(socialFeedback.score.toFixed(2)),
       socialFeedbackGamma: Number(num(socialFeedback.gamma, 0.65).toFixed(3)),
@@ -796,6 +835,7 @@ function scoreAction(world, agent, action, extras = {}) {
     },
     memoryDetails: memory.details,
     memoryInfluenceDetails: influence.details,
+    relationshipMemoryDetails: relationshipMemory.details,
     personalityRuntime: {
       socialDrive: personalityState.socialDrive,
       riskTolerance: personalityState.riskTolerance,
@@ -823,6 +863,8 @@ function scoreAction(world, agent, action, extras = {}) {
       perceptionWeights: cognitive.perceptionWeights,
       driveVector: cognitive.driveVector,
       biasVector: cognitive.biasVector,
+      needDynamicsState: cognitive.needDynamicsState,
+      needEmergencyFlag: cognitive.needEmergencyFlag,
       cognitiveProfile: cognitive.cognitiveProfile,
       socialModifier: cognitive.socialModifier,
       source: cognitive.source
@@ -897,6 +939,7 @@ function decisionTraceFor(action = null) {
 
 function debugDecisionFor(action = null) {
   const trace = decisionTraceFor(action);
+  const needDynamicsState = action?.cognitiveState?.needDynamicsState || null;
   return {
     action: trace.chosenAction,
     reasons: {
@@ -914,6 +957,12 @@ function debugDecisionFor(action = null) {
       cognitiveFit: trace.scoreBreakdown.cognitiveFit,
       risk: trace.scoreBreakdown.risk
     },
+    needEmergencyFlag: action?.cognitiveState?.needEmergencyFlag || {},
+    needDynamics: needDynamicsState ? {
+      modes: needDynamicsState.modes,
+      delta: needDynamicsState.delta,
+      context: needDynamicsState.context
+    } : null,
     score: trace.score || 0,
     probability: trace.probability || 0
   };

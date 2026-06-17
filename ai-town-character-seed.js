@@ -31,6 +31,23 @@ function unique(values = [], limit = 8) {
   return out.slice(0, limit);
 }
 
+function seedFirstPersonText(value = "", type = "episodic") {
+  const text = compact(value, "", 180)
+    .replace(/^Stable habit:\s*/i, "")
+    .replace(/^Long-term direction:\s*/i, "")
+    .replace(/^Self value:\s*/i, "")
+    .replace(/^This person tends to\s*/i, "")
+    .replace(/^Agent tends to\s*/i, "")
+    .replace(/^(这个人|该角色|该居民|角色)\s*/, "");
+  if (!text) return "";
+  if (/^(我|我会|我习惯|我相信|我觉得|我发现|我记得|我喜欢|我不喜欢|那次|这次)/.test(text)) return text;
+  if (type === "belief") return `我相信${text}`;
+  if (type === "habit") return `我习惯${text}`;
+  if (type === "preference") return /不喜欢|讨厌|回避|避免|dislike|avoid/i.test(text) ? `我不喜欢${text.replace(/^不喜欢\s*/, "")}` : `我喜欢${text}`;
+  if (type === "goal") return `我想继续${text}`;
+  return `我记得${text}`;
+}
+
 function hashString(value = "") {
   let hash = 2166136261;
   const text = String(value || "");
@@ -367,9 +384,10 @@ function memoryViewsFromSeed(agentId, lifeHistorySeed, beliefs = [], habits = []
   const episodicMemory = lifeEvents.slice(0, 4).map((item, index) => ({
     id: `seed_${agentId}_episodic_${index + 1}`,
     type: "episodic",
-    event: compact(item.event, "", 180),
-    lesson: compact(item.impact || "这段经历会影响之后的判断。", "", 180),
-    meaning: compact(item.impact || item.event, "", 220),
+    event: seedFirstPersonText(item.event, "episodic"),
+    myExperience: seedFirstPersonText(item.event, "episodic"),
+    lesson: seedFirstPersonText(item.impact || "这段经历会影响我之后的判断。", "episodic"),
+    meaning: seedFirstPersonText(item.impact || item.event, "episodic"),
     emotionalImpact: Number(clamp01(0.18 + index * 0.04, 0.25)),
     importance: Number(clamp01(0.55 + index * 0.03, 0.6)),
     source: "lifeHistorySeed",
@@ -380,7 +398,7 @@ function memoryViewsFromSeed(agentId, lifeHistorySeed, beliefs = [], habits = []
   const beliefMemory = unique(beliefs, 3).map((belief, index) => ({
     id: `seed_${agentId}_belief_${index + 1}`,
     type: "belief",
-    belief: compact(belief, "", 160),
+    belief: seedFirstPersonText(belief, "belief"),
     strength: Number(clamp01(0.58 + profile.routinePreference * 0.18 + index * 0.02, 0.68)),
     confidence: Number(clamp01(0.52 + profile.patience * 0.18, 0.62)),
     source: role === "medical" ? "职业经历" : role === "teacher" ? "教育经历" : role === "security" ? "职责经验" : "人生经历",
@@ -392,8 +410,8 @@ function memoryViewsFromSeed(agentId, lifeHistorySeed, beliefs = [], habits = []
     id: `seed_${agentId}_habit_${index + 1}`,
     type: "habit",
     trigger: index === 0 ? "压力或信息不完整时" : index === 1 ? "需要做选择时" : "日常节奏被打断时",
-    action: compact(habit, "", 140),
-    habit: compact(habit, "", 160),
+    action: seedFirstPersonText(habit, "habit"),
+    habit: seedFirstPersonText(habit, "habit"),
     probability: Number(clamp01(0.46 + profile.routinePreference * 0.26 + profile.patience * 0.1 - index * 0.03, 0.58)),
     strength: Number(clamp01(0.5 + profile.routinePreference * 0.25, 0.62)),
     source: "长期行为模式",
@@ -403,7 +421,7 @@ function memoryViewsFromSeed(agentId, lifeHistorySeed, beliefs = [], habits = []
     ...unique(likes, 2).map((preference, index) => ({
       id: `seed_${agentId}_preference_like_${index + 1}`,
       type: "preference",
-      preference: compact(preference, "", 140),
+      preference: seedFirstPersonText(preference, "preference"),
       strength: Number(clamp01(0.5 + profile.socialDrive * 0.12 + profile.routinePreference * 0.12, 0.6)),
       valence: 20,
       source: "生活偏好",
@@ -412,7 +430,7 @@ function memoryViewsFromSeed(agentId, lifeHistorySeed, beliefs = [], habits = []
     ...unique(dislikes, 1).map((preference, index) => ({
       id: `seed_${agentId}_preference_dislike_${index + 1}`,
       type: "preference",
-      preference: `不喜欢${compact(preference, "", 120)}`,
+      preference: seedFirstPersonText(`不喜欢${compact(preference, "", 120)}`, "preference"),
       strength: Number(clamp01(0.42 + profile.conflictAvoidance * 0.18, 0.52)),
       valence: -15,
       source: "回避偏好",
@@ -791,13 +809,14 @@ function mergeCharacterSeed(agent = {}, seed = {}) {
   const structuredViews = viewMemoryFromStructured(agent);
   agent.episodicMemory = mergeViewItems(agent.episodicMemory, source.episodicMemory || structuredViews.episodicMemory, 30).map(item => ({
     ...item,
-    event: nameAware(item.event || item.text || item.meaning || ""),
-    lesson: nameAware(item.lesson || item.meaning || ""),
-    meaning: nameAware(item.meaning || item.lesson || item.event || "")
+    event: seedFirstPersonText(nameAware(item.event || item.text || item.meaning || ""), "episodic"),
+    myExperience: seedFirstPersonText(nameAware(item.myExperience || item.event || item.text || item.meaning || ""), "episodic"),
+    lesson: seedFirstPersonText(nameAware(item.lesson || item.meaning || ""), "episodic"),
+    meaning: seedFirstPersonText(nameAware(item.meaning || item.lesson || item.event || ""), "episodic")
   })).filter(item => item.event || item.meaning);
   agent.beliefMemory = mergeViewItems(agent.beliefMemory, source.beliefMemory || structuredViews.beliefMemory, 30).map(item => ({
     ...item,
-    belief: nameAware(item.belief || item.text || item.meaning || ""),
+    belief: seedFirstPersonText(nameAware(item.belief || item.text || item.meaning || ""), "belief"),
     strength: clamp01(item.strength, 0.6),
     source: item.source || "character-genesis",
     sourceEvents: Array.isArray(item.sourceEvents) ? item.sourceEvents.slice(0, 8) : []
@@ -805,15 +824,15 @@ function mergeCharacterSeed(agent = {}, seed = {}) {
   agent.habitMemory = mergeViewItems(agent.habitMemory, source.habitMemory || structuredViews.habitMemory, 30).map(item => ({
     ...item,
     trigger: nameAware(item.trigger || "相关情境"),
-    action: nameAware(item.action || item.habit || item.text || item.meaning || ""),
-    habit: nameAware(item.habit || item.action || item.text || item.meaning || ""),
+    action: seedFirstPersonText(nameAware(item.action || item.habit || item.text || item.meaning || ""), "habit"),
+    habit: seedFirstPersonText(nameAware(item.habit || item.action || item.text || item.meaning || ""), "habit"),
     probability: clamp01(item.probability, 0.58),
     source: item.source || "character-genesis",
     sourceEvents: Array.isArray(item.sourceEvents) ? item.sourceEvents.slice(0, 8) : []
   })).filter(item => item.habit || item.action);
   agent.preferenceMemory = mergeViewItems(agent.preferenceMemory, source.preferenceMemory || structuredViews.preferenceMemory, 30).map(item => ({
     ...item,
-    preference: nameAware(item.preference || item.text || item.meaning || ""),
+    preference: seedFirstPersonText(nameAware(item.preference || item.text || item.meaning || ""), "preference"),
     strength: clamp01(item.strength, 0.55),
     source: item.source || "character-genesis",
     sourceEvents: Array.isArray(item.sourceEvents) ? item.sourceEvents.slice(0, 8) : []

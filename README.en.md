@@ -10,7 +10,15 @@ The goal is not only to generate stories. The project aims to simulate a small s
 
 ## Current Version
 
-**V3.3.3.1 Memory Importance Calibration + V3.3.3 Memory Gate + V3.3.2.1 Medical Recovery + V3.3.2 Context Boundary + V3.3.1 Social Feedback + V3.3 Social Dynamics**
+**V3.3.5 Relationship Memory Formation + V3.3.4 Temporal Causal Graph + V3.3.3.1 Memory Importance Calibration + V3.3.3 Memory Gate + V3.3.2.1 Medical Recovery + V3.3.2 Context Boundary + V3.3.1 Social Feedback**
+
+### V3.3.5 Relationship Memory Formation
+
+Adds long-term relationship memory formation. `relationshipMatrix` still stores numeric relationship state, while meaningful interactions now pass through `MemoryImportanceGate` and can become `relationshipMemory` with target, relationship type, trust, familiarity, emotional tag, interaction count, last interaction time, source events, and relationship cause. Ordinary greetings, small talk, and passing by stay out of long-term memory; help, conflict, cooperation, promises, repair, and danger events create traceable relationship causes and influence future actions such as `contact_familiar`, `ask_help`, `avoid_person`, and `cooperate`.
+
+### V3.3.4 Temporal Causal Graph
+
+Adds a temporal causal graph layer. The world no longer stores only `EventLog`; high-strength events now create `causalGraph` chains such as `event -> action -> stateChange -> belief/goal/relationship`. Ordinary low-impact events do not create causal edges. Every edge enforces cause time before effect time, repeated similar chains reinforce `patterns`, daily Reflection reads causal chains to produce `lessonLearned` and `counterfactual`, and long-term memory can trace back through `sourceCausalChain`.
 
 ### V3.3.3.1 Memory Importance Calibration
 
@@ -121,6 +129,7 @@ slow personality and memory update
 ## Capabilities
 
 - Supports 100+ residents in one town simulation.
+- V3.3.4 temporal causal graph: high-strength events form `causalGraph` chains so Reflection and long-term memory can trace why an event changed future behavior.
 - V3.3.3.1 memory importance calibration: distribution normalization, emotion valence, temporal decay, and similar-memory compression keep long-term memory growth stable.
 - V3.3.3 multiplicative MemoryGate: event strength, emotion, relationship, goal, and context jointly decide whether an event enters long-term personality memory.
 - V3.3.2.1 medical recovery loop: clinic capacity, doctor duty, treatment queue, recovery timeline, and after-treatment cooldown close the health loop.

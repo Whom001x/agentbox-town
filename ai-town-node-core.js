@@ -1,5 +1,10 @@
 "use strict";
 
+const {
+  applyNeedDynamicsForWorld,
+  applyNeedActivity
+} = require("./ai-town-need-dynamics");
+
 const START_DATE = new Date(2026, 5, 9);
 const solarTerms = ["小寒", "大寒", "立春", "雨水", "惊蛰", "春分", "清明", "谷雨", "立夏", "小满", "芒种", "夏至", "小暑", "大暑", "立秋", "处暑", "白露", "秋分", "寒露", "霜降", "立冬", "小雪", "大雪", "冬至"];
 const needKeys = ["hunger", "hygiene", "health", "social", "responsibility", "stress", "comfort", "safety"];
@@ -148,17 +153,12 @@ function updateSleepStates(world, minutesPassed) {
     if (agent.isSleeping) {
       agent.energy = clamp(agent.energy + minutesPassed * 0.18, 0, 100);
       agent.sleepQuality = clamp(agent.sleepQuality + minutesPassed * 0.08, 0, 100);
-      const restQuality = clamp(Number(agent.sleepQuality || 75) / 100, 0.35, 1);
-      const restRecovery = Number(agent.needs?.health ?? 100) < 70
-        ? (minutesPassed / 60) * 0.5 * restQuality * ageRecoveryFactor(agent)
-        : 0;
-      adjustNeeds(agent, { stress: minutesPassed * 0.035, comfort: minutesPassed * 0.025, hunger: -minutesPassed * 0.006, health: restRecovery });
       adjustEmotion(agent, { calm: minutesPassed * 0.025, tired: -minutesPassed * 0.05 });
       agent.currentTask = "睡眠休息";
     } else {
       agent.energy = clamp(agent.energy - minutesPassed * 0.035, 0, 100);
       if (tooHungryToSleep && foodAvailableAt(agent, world.clock || 0)) {
-        adjustNeeds(agent, { hunger: 16, comfort: 2, stress: 1 });
+        applyNeedActivity(agent, "emergency_food", { maximum: { hunger: 28, health: 4, stress: 5, comfort: 4 } });
         agent.currentTask = "半夜醒来简单吃点东西";
       }
     }
@@ -187,10 +187,10 @@ function timeDecayChanges(agent, minutesPassed) {
 }
 
 function applyTimeDecay(world, minutesPassed) {
+  const state = applyNeedDynamicsForWorld(world, minutesPassed);
   (world.agents || []).forEach(agent => {
     if (isDead(agent) || agent.isSleeping) return;
     ensureAgentShape(agent);
-    adjustNeeds(agent, timeDecayChanges(agent, minutesPassed));
     const hungerPressure = needPressure(agent.needs.hunger, 60);
     const stressPressure = needPressure(agent.needs.stress, 55);
     const socialPressure = needPressure(agent.needs.social, 45);
@@ -206,9 +206,11 @@ function applyTimeDecay(world, minutesPassed) {
       sad: socialPressure * 1.2
     });
   });
+  return state;
 }
 
 function applyPassiveNeedRecovery(world, minutesPassed) {
+  return world.needDynamicsState || null;
   const hours = Math.max(0, minutesPassed) / 60;
   const minuteOfDay = Number(world.clock || 0) % 1440;
   const isMorning = minuteOfDay >= 360 && minuteOfDay <= 540;
@@ -710,6 +712,7 @@ function applyMedicalEscalation(world, minutesPassed) {
         agent.terminalState.healthZeroMinutes = 0;
         scheduleRecoveryTimeline(world, agent, assessment);
         world.basicLifeDone[key] = true;
+        world.medicalCareCount = Number(world.medicalCareCount || 0) + 1;
         pushRecord(world, "医疗治疗", `${agent.name}在诊所完成${level}级健康处理，健康恢复${effect}。`, "medical", [agent.id, ...staff.slice(0, 3).map(item => item.id)]);
       } else if (!staff.length) {
         adjustNeeds(agent, { safety: 2, stress: 2, comfort: 1, health: level === "critical" ? 1.5 : 0.5 });
@@ -794,8 +797,9 @@ function applyBasicLifeMaintenance(world) {
   const now = minutesToClock(world.clock || 0);
   world.basicLifeDone ||= {};
   const mealWindow = isMealWindow(now.h);
-  const emergencyFoodSlot = Math.floor(Number(world.clock || 0) / 180);
-  const opportunityFoodSlot = Math.floor(Number(world.clock || 0) / 120);
+    const emergencyFoodSlot = Math.floor(Number(world.clock || 0) / 180);
+    const opportunityFoodSlot = Math.floor(Number(world.clock || 0) / 120);
+    const hygieneSlot = Math.floor(Number(world.clock || 0) / 240);
   (world.agents || []).forEach(agent => {
     if (isDead(agent) || agent.isSleeping) return;
     ensureAgentShape(agent);
@@ -809,8 +813,9 @@ function applyBasicLifeMaintenance(world) {
     const shouldEatOpportunity = !mealWindow && canEatHere && beforeHunger < 45 && !world.basicLifeDone[opportunityFoodKey];
     const shouldEatEmergency = canEatHere && beforeHunger <= 20 && !world.basicLifeDone[emergencyFoodKey];
     if (shouldEatMeal || shouldEatOpportunity || shouldEatEmergency) {
-      const hungerGain = beforeHunger <= 8 ? 55 : beforeHunger < 25 ? 45 : beforeHunger < 45 ? 35 : 22;
-      adjustNeeds(agent, { hunger: hungerGain, comfort: 3, stress: 2 });
+      applyNeedActivity(agent, shouldEatEmergency || beforeHunger <= 20 ? "emergency_food" : "meal", {
+        maximum: { hunger: beforeHunger <= 8 ? 50 : beforeHunger < 25 ? 38 : beforeHunger < 45 ? 28 : 18, comfort: 5, stress: 5, health: 4 }
+      });
       if (beforeHunger < 35 || !agent.currentTask || ["维持当前生活安排", "开始一天的日常安排"].includes(agent.currentTask)) {
         agent.currentTask = "补充食物";
       }
@@ -820,10 +825,16 @@ function applyBasicLifeMaintenance(world) {
       }
     }
     if (clinicCareAvailableFor(world, agent) && (agent.needs.hunger <= 5 || agent.needs.stress <= 5) && !world.basicLifeDone[`clinic-${slot}`]) {
-      adjustNeeds(agent, { hunger: agent.needs.hunger <= 5 ? 12 : 0, safety: 6, stress: 5, comfort: 3 });
+      if (agent.needs.hunger <= 5) applyNeedActivity(agent, "emergency_food", { maximum: { hunger: 28, health: 3, stress: 4, comfort: 3 } });
+      applyNeedActivity(agent, "clinic_care", { maximum: { health: 12, safety: 10, stress: 8, comfort: 5 } });
       agent.currentTask = "基础急救";
       world.basicLifeDone[`clinic-${slot}`] = true;
       pushRecord(world, "基础救治", `${agent.name}在诊所有医护在场，获得最低限度照护。`, "survival", [agent.id]);
+    }
+    if (placeId(agent) === "apartment" && Number(agent.needs.hygiene || 0) < 45 && !world.basicLifeDone[`hygiene-${hygieneSlot}-${agent.id}`]) {
+      applyNeedActivity(agent, "clean", { maximum: { hygiene: 30, comfort: 8, social: 3 } });
+      if (Number(agent.needs.hygiene || 0) < 35) agent.currentTask = "鏁寸悊涓庢竻娲?";
+      world.basicLifeDone[`hygiene-${hygieneSlot}-${agent.id}`] = true;
     }
     if (beforeHunger < 20 && !canEatHere && !agent.movement && placeId(agent) !== "apartment") {
       agent.movement = {
@@ -1001,7 +1012,6 @@ function nodeStepPayload(payload, options = {}) {
   doctorDutySystem(world);
   advanceMovement(world);
   applyTimeDecay(world, minutes);
-  applyPassiveNeedRecovery(world, minutes);
   applyRecoveryTimeline(world);
   applyBasicLifeMaintenance(world);
   applyMedicalEscalation(world, minutes);

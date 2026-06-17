@@ -17,9 +17,9 @@ function detectInterruption(world, agent = {}) {
   const angry = Number(emotion.angry ?? 0);
   const sad = Number(emotion.sad ?? 0);
 
-  if (health <= 20) return interruption("health", 100, "seek_clinic_or_help", "health is critical", true);
-  if (safety <= 20) return interruption("safety", 96, "seek_safe_place_or_help", "safety is critical", true);
-  if (hunger <= 20) return interruption("hunger", 90, "eat_or_go_home", "hunger is critical", true);
+  if (health < 20) return interruption("health", 100, "seek_clinic_or_help", "health is critical", true);
+  if (safety < 20) return interruption("safety", 96, "seek_safe_place_or_help", "safety is critical", true);
+  if (hunger < 10) return interruption("hunger", 90, "eat_or_go_home", "hunger is critical", true);
   if (energy <= 18) return interruption("fatigue", 84, "rest_or_go_home", "energy is critical", true);
 
   if (health <= 30) return interruption("health", 72, "slow_down_or_rest", "health is low", false);

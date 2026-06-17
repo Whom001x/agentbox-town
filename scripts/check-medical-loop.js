@@ -99,7 +99,8 @@ function testHundredTickStability() {
   const alive = state.agents.filter(item => item.lifeStatus !== "dead");
   const lowHealth = alive.filter(item => Number(item.needs?.health ?? 100) < 20);
   const clinicPopulation = alive.filter(item => (item.position || item.place) === "clinic").length;
-  const careCount = Object.keys(state.basicLifeDone || {}).filter(key => key.startsWith("medical-care-")).length;
+  const careCount = Number(state.medicalCareCount || 0)
+    + Object.keys(state.basicLifeDone || {}).filter(key => key.startsWith("medical-care-")).length;
   const treatedCount = alive.filter(item => Number(item.medicalState?.treatedAt || 0) > 0).length;
   assert.equal(lowHealth.length, 0, "health <20 should be zero after stability run");
   assert.ok(clinicPopulation / alive.length < 0.2, "clinic population should remain below 20%");
