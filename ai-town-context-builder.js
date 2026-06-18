@@ -148,6 +148,26 @@ function summarizeSocialFeedback(agent = {}, world = {}) {
   };
 }
 
+function summarizeCausalFeedback(agent = {}) {
+  const cognitive = agent.cognitiveState || {};
+  const bias = cognitive.causalBias || {};
+  const active = Array.isArray(cognitive.activeCausalMemory)
+    ? cognitive.activeCausalMemory
+    : (Array.isArray(agent.activeCausalMemory) ? agent.activeCausalMemory : []);
+  return {
+    safetyBias: bias.safetyBias || 0,
+    socialBias: bias.socialBias || 0,
+    responsibilityBias: bias.responsibilityBias || 0,
+    confidence: bias.confidence || 0,
+    active: active.slice(0, 3).map(item => ({
+      category: item.category || "",
+      causalRule: compactText(item.causalRule || item.learning?.causalRule || "", "", 120),
+      confidence: item.confidence || item.learning?.confidence || 0,
+      activation: item.activation || 0
+    }))
+  };
+}
+
 function summarizeActionCandidates(utility = {}, fallback = []) {
   const list = Array.isArray(utility.candidateActions) ? utility.candidateActions : fallback;
   return (Array.isArray(list) ? list : []).slice(0, 8).map(action => ({
@@ -177,7 +197,8 @@ function generateAgentRuntimeSummary(agent = {}, world = {}, options = {}) {
     activeGoal: summarizeGoal(agent),
     importantMemory: summarizeMemory(agent, options.relevantMemories),
     socialRole: compactText(agent.socialRole || agent.job || agent.ageStage || "", "", 80),
-    socialFeedbackSummary: summarizeSocialFeedback(agent, world)
+    socialFeedbackSummary: summarizeSocialFeedback(agent, world),
+    causalFeedbackSummary: summarizeCausalFeedback(agent)
   };
 }
 
@@ -412,7 +433,8 @@ function buildAgentContext(input = {}) {
       currentGoal: summarizeGoal(agent),
       personalityCore: summarizePersonality(agent),
       recentMemorySummary: summarizeMemory(agent, relevantMemories),
-      socialFeedbackSummary: summarizeSocialFeedback(agent, world)
+      socialFeedbackSummary: summarizeSocialFeedback(agent, world),
+      causalFeedbackSummary: summarizeCausalFeedback(agent)
     },
     candidate: input.candidate || {},
     currentLocation: {
@@ -435,6 +457,7 @@ function buildAgentContext(input = {}) {
     decision: input.decision || null,
     socialField: compactSocialField(world.socialField || {}),
     socialFeedbackSummary: summarizeSocialFeedback(agent, world),
+    causalFeedbackSummary: summarizeCausalFeedback(agent),
     candidateActions: summarizeActionCandidates(utility),
     vectorRecall: (utility.vectorRecall || []).slice(0, 4).map(item => ({
       scene: compactText(item.scene || item.text || "", "", 120),

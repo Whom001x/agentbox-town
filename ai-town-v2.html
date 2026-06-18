@@ -1794,6 +1794,54 @@
       };
     }
 
+    function normalizeWeatherBox(box = {}, clock = world?.clock || 8 * 60) {
+      const fallback = makeInitialWeather(clock);
+      const current = box.current && typeof box.current === "object" ? box.current : {};
+      const next6h = box.next6h && typeof box.next6h === "object" ? box.next6h : {};
+      const dailyForecast = box.dailyForecast && typeof box.dailyForecast === "object" ? box.dailyForecast : {};
+      const condition = String(current.condition || fallback.current.condition || "多云").slice(0, 16);
+      const temperature = clamp(Number(current.temperature ?? fallback.current.temperature ?? 24), -20, 45);
+      const humidity = clamp(Number(current.humidity ?? fallback.current.humidity ?? 60), 0, 100);
+      const wind = String(current.wind || fallback.current.wind || "微风").slice(0, 20);
+      const precipitation = clamp(Number(current.precipitation ?? fallback.current.precipitation ?? 0), 0, 100);
+      const comfort = String(current.comfort || fallback.current.comfort || "正常").slice(0, 20);
+      return {
+        calendar: calendarForClock(clock),
+        current: {
+          condition,
+          temperature,
+          humidity,
+          wind,
+          precipitation,
+          comfort,
+          observedAt: Number(current.observedAt ?? clock),
+          reason: String(current.reason || fallback.current.reason || "初始天气，等待 WeatherAgent 生成第一份报告").slice(0, 160)
+        },
+        next6h: {
+          condition: String(next6h.condition || condition).slice(0, 16),
+          confidence: clamp(Number(next6h.confidence ?? fallback.next6h.confidence ?? 72), 50, 95),
+          summary: String(next6h.summary || fallback.next6h.summary || "6小时内以云量变化为主").slice(0, 120)
+        },
+        dailyForecast: {
+          condition: String(dailyForecast.condition || next6h.condition || condition).slice(0, 20),
+          confidence: clamp(Number(dailyForecast.confidence ?? fallback.dailyForecast.confidence ?? 68), 50, 85),
+          summary: String(dailyForecast.summary || fallback.dailyForecast.summary || "一天预测保留不确定性").slice(0, 140)
+        },
+        sevenDayTrend: Array.isArray(box.sevenDayTrend) ? box.sevenDayTrend.slice(0, 7).map((item, index) => ({
+          dayOffset: clamp(Number(item.dayOffset ?? index), 0, 6),
+          condition: String(item.condition || condition).slice(0, 16),
+          confidence: clamp(Number(item.confidence ?? 30), 10, 50),
+          reason: String(item.reason || "").slice(0, 80)
+        })) : [],
+        impacts: Array.isArray(box.impacts) && box.impacts.length
+          ? box.impacts.map(item => String(item).slice(0, 60)).filter(Boolean).slice(0, 5)
+          : fallback.impacts,
+        lastReportKey: box.lastReportKey || "",
+        lastDailyKey: box.lastDailyKey || "",
+        lastAgentAt: Number(box.lastAgentAt || 0)
+      };
+    }
+
     function scheduleTemplate(job, place) {
       if (job.includes("小学生")) return [
         { time: "07:40", place: "school", title: "到校", fixed: true },
@@ -5157,7 +5205,7 @@
         selfNarrativeDone: saved.selfNarrativeDone || {},
         personalityConsistencyDone: saved.personalityConsistencyDone || {},
         dailySettlementDone: saved.dailySettlementDone || {},
-        weatherBox: saved.weatherBox || makeInitialWeather(saved.clock || 8 * 60)
+        weatherBox: normalizeWeatherBox(saved.weatherBox || {}, saved.clock || 8 * 60)
       };
       if (!places.some(place => place.id === world.selectedPlace)) {
         world.selectedPlace = world.agents.find(agent => agent.id === world.selected)?.position || world.agents[0]?.position || places[0]?.id || "";
@@ -5818,310 +5866,6 @@
       };
     }
 
-    async function legacyRunSetupBlueprintAgent(targetAgentCount, targetLocationCount, setupPlaces, seedRows) {
-      const fallback = fallbackSetupBlueprint(targetAgentCount, targetLocationCount, setupPlaces, seedRows);
-      if (!world.config.aiEnabled) return fallback;
-      try {
-        const result = await ai("setupBlueprintAgent", {
-          premise: byId("setupPrompt").value,
-          startTime: byId("setupStartTime").value,
-          targetAgentCount,
-          targetLocationCount,
-          existingPlaces: setupPlaces.map(place => ({ id: place.id, name: place.name, capacity: place.capacity, x: place.x, y: place.y, visible: place.visible })),
-          existingAgents: seedRows,
-          requestedBatchSize: setupAgentBatchSize(targetAgentCount),
-          requestedBatchCount: Math.ceil(targetAgentCount / setupAgentBatchSize(targetAgentCount))
-        });
-        return normalizeSetupBlueprint(result, targetAgentCount, targetLocationCount, setupPlaces, seedRows);
-      } catch (error) {
-        pushLog("建镇规划 AI 兜底", error.message);
-        return fallback;
-      }
-    }
-
-    function setupRoleSlots(targetAgentCount, seedRows, blueprint) {
-      const mix = Array.isArray(blueprint.roleMix) ? blueprint.roleMix : setupRoleMixForCount(targetAgentCount);
-      let mixIndex = 0;
-      let remaining = Number(mix[0]?.count || 0);
-      return Array.from({ length: targetAgentCount }, (_, index) => {
-        const existing = seedRows[index] || null;
-        while (mix[mixIndex + 1] && remaining <= 0) {
-          mixIndex += 1;
-          remaining = Number(mix[mixIndex]?.count || 0);
-        }
-        const hint = mix[mixIndex] || {};
-        remaining -= 1;
-        return {
-          index,
-          id: existing?.id || `agent_${index + 1}`,
-          fixed: Boolean(existing),
-          existing,
-          roleHint: existing?.job || hint.role || "居民",
-          ageRange: hint.ageRange || "",
-          placeHints: hint.places || [],
-          batchHint: (blueprint.roleBatches || []).find(batch => index >= batch.start && index < batch.start + batch.count)?.notes || ""
-        };
-      });
-    }
-
-    function fallbackSetupBatchAgents(slots, setupPlaces) {
-      return slots.map(slot => {
-        const seed = slot.existing || fallbackSetupSeed(slot.index);
-        return normalizeSeed({
-          ...seed,
-          id: slot.id || seed.id || `agent_${slot.index + 1}`,
-          job: seed.job || slot.roleHint || "居民",
-          place: choosePlaceForSeed({ ...seed, job: seed.job || slot.roleHint }, slot.index, setupPlaces)
-        }, slot.index);
-      });
-    }
-
-    function mergeSetupAgentRows(batchResults, slots, setupPlaces, targetAgentCount) {
-      const bySlot = new Map();
-      batchResults.forEach(item => {
-        (Array.isArray(item.result?.agents) ? item.result.agents : []).forEach((agent, offset) => {
-          const slot = item.slots[offset] || item.slots.find(slotItem => slotItem.id === agent.id);
-          if (slot) bySlot.set(slot.index, agent);
-        });
-      });
-      const rows = slots.map(slot => {
-        const aiRow = bySlot.get(slot.index);
-        const base = aiRow || slot.existing || fallbackSetupSeed(slot.index);
-        return normalizeSeed({
-          ...base,
-          id: slot.id || base.id || `agent_${slot.index + 1}`,
-          name: slot.existing?.name && !isPlaceholderAgentName(slot.existing.name) ? slot.existing.name : base.name,
-          job: base.job || slot.roleHint || "居民",
-          place: choosePlaceForSeed({ ...base, job: base.job || slot.roleHint }, slot.index, setupPlaces)
-        }, slot.index);
-      });
-      return ensureRealSeedNames(ensureSetupSeedCount(rows, targetAgentCount)).slice(0, targetAgentCount);
-    }
-
-    async function legacyRunSetupAgentBatchAgent(blueprint, setupPlaces, seedRows, targetAgentCount) {
-      const slots = setupRoleSlots(targetAgentCount, seedRows, blueprint);
-      const batchSize = setupAgentBatchSize(targetAgentCount);
-      const batches = chunkList(slots, batchSize).map((batchSlots, batchIndex) => ({ batchSlots, batchIndex }));
-      const concurrency = Math.min(batches.length, effectiveAiRequestConcurrency());
-      setSetupProgress(`人物批次：${batches.length} 批并行，最多 ${concurrency} 个请求`, 28, true);
-      let done = 0;
-      const results = await runDeferredRetryParallel(batches, concurrency, async item => {
-        const result = await aiOnce("setupAgentBatchAgent", {
-          premise: byId("setupPrompt").value,
-          blueprint: {
-            roleMix: blueprint.roleMix,
-            relationshipPlan: blueprint.relationshipPlan,
-            targetAgentCount,
-            targetLocationCount: setupPlaces.length
-          },
-          places: setupPlaces.map(place => ({ id: place.id, name: place.name, capacity: place.capacity })),
-          slots: item.batchSlots,
-          existingAgents: seedRows,
-          usedNames: seedRows.map(seed => seed.name).filter(Boolean),
-          aiBatch: { index: item.batchIndex + 1, total: batches.length, size: item.batchSlots.length }
-        });
-        done += 1;
-        setSetupProgress(`人物批次完成 ${done}/${batches.length}`, 28 + Math.round(done / Math.max(1, batches.length) * 28), true);
-        return { batchIndex: item.batchIndex, slots: item.batchSlots, result };
-      }, { label: "建镇人物批次" });
-      return {
-        rows: mergeSetupAgentRows(results, slots, setupPlaces, targetAgentCount),
-        batches: results
-      };
-    }
-
-    function fallbackSetupSocialStructure(seedRows, setupPlaces) {
-      const placeIds = new Set(setupPlaces.map(place => place.id));
-      const homePlace = setupPlaces.find(place => /apartment|home|居民|小区|居住|住宅/.test(`${place.id} ${place.name}`))?.id || setupPlaces[0]?.id || "square";
-      const householdsOut = [];
-      const groups = [];
-      const relations = [];
-      const unassigned = [...seedRows];
-      while (unassigned.length) {
-        const first = unassigned.shift();
-        const targetSize = /学生|儿童|小学生|初中|高中/.test(first.job) ? 3 : /老人|退休/.test(first.job) ? 1 : (unassigned.length >= 1 ? 2 : 1);
-        const members = [first.id];
-        while (members.length < targetSize && unassigned.length) members.push(unassigned.shift().id);
-        householdsOut.push({
-          id: `setup_home_${householdsOut.length + 1}`,
-          homePlace,
-          members,
-          type: members.length > 1 ? "family" : "single",
-          routines: ["晚间回家", "同步家里情况"],
-          responsibilities: members.length > 1 ? ["互相照看", "分担日常"] : ["照顾自己"]
-        });
-        members.forEach((from, index) => members.slice(index + 1).forEach(to => {
-          relations.push({ from, to, type: "家人", trust: 78, intimacy: 70, respect: 55, debt: 0 });
-          relations.push({ from: to, to: from, type: "家人", trust: 78, intimacy: 70, respect: 55, debt: 0 });
-        }));
-      }
-      setupPlaces.forEach(place => {
-        if (!placeIds.has(place.id)) return;
-        const members = seedRows.filter(seed => choosePlaceForSeed(seed, 0, setupPlaces) === place.id || seed.place === place.id).map(seed => seed.id).slice(0, 60);
-        if (members.length < 2) return;
-        const type = socialGroupTypeForPlace(place.id);
-        groups.push({ id: `setup_group_${place.id}`, type, place: place.id, members, authority: members.slice(0, 3) });
-        members.forEach((from, index) => members.slice(index + 1, index + 4).forEach(to => {
-          relations.push({ from, to, type, trust: 50, intimacy: 35, respect: 45, debt: 0 });
-          relations.push({ from: to, to: from, type, trust: 50, intimacy: 35, respect: 45, debt: 0 });
-        }));
-      });
-      return { households: householdsOut, groups, relations: relations.slice(0, 1000), logs: [{ title: "本地关系草图", body: `生成 ${householdsOut.length} 个住户、${groups.length} 个圈子。` }] };
-    }
-
-    async function legacyRunSetupRelationSketchAgent(seedRows, setupPlaces, blueprint) {
-      const fallback = fallbackSetupSocialStructure(seedRows, setupPlaces);
-      if (!world.config.aiEnabled) return fallback;
-      try {
-        const result = await ai("setupRelationSketchAgent", {
-          premise: byId("setupPrompt").value,
-          blueprint: {
-            roleMix: blueprint.roleMix,
-            relationshipPlan: blueprint.relationshipPlan
-          },
-          places: setupPlaces.map(place => ({ id: place.id, name: place.name, capacity: place.capacity })),
-          agents: seedRows.map(seed => ({ id: seed.id, name: seed.name, job: seed.job, ageYears: seed.ageYears, place: seed.place })),
-          targetAgentCount: seedRows.length
-        });
-        return {
-          households: Array.isArray(result.households) ? result.households : fallback.households,
-          groups: Array.isArray(result.groups) ? result.groups : fallback.groups,
-          relations: Array.isArray(result.relations) ? result.relations : fallback.relations,
-          logs: Array.isArray(result.logs) ? result.logs : []
-        };
-      } catch (error) {
-        pushLog("关系草图 AI 兜底", error.message);
-        return fallback;
-      }
-    }
-
-    function localSetupAudit(seedRows, setupPlaces, sketch) {
-      const issues = [];
-      const names = new Map();
-      const ids = new Set();
-      const placeIds = new Set(setupPlaces.map(place => place.id));
-      seedRows.forEach(seed => {
-        if (ids.has(seed.id)) issues.push({ type: "duplicate_id", agentId: seed.id, severity: "high", note: "角色 id 重复" });
-        ids.add(seed.id);
-        if (names.has(seed.name)) issues.push({ type: "duplicate_name", agentId: seed.id, severity: "high", note: `姓名与 ${names.get(seed.name)} 重复` });
-        names.set(seed.name, seed.id);
-        if (!placeIds.has(seed.place)) issues.push({ type: "invalid_place", agentId: seed.id, severity: "medium", note: "地点不在地点表中" });
-        if (!seed.memory?.length) issues.push({ type: "missing_memory", agentId: seed.id, severity: "low", note: "缺少初始记忆" });
-      });
-      const householdMembers = new Set((sketch.households || []).flatMap(home => home.members || []));
-      seedRows.forEach(seed => {
-        if (!householdMembers.has(seed.id)) issues.push({ type: "missing_home", agentId: seed.id, severity: "medium", note: "没有住户/家庭落点" });
-      });
-      return { issues, logs: [{ title: "本地建镇审查", body: `发现 ${issues.length} 个待补项。` }] };
-    }
-
-    async function legacyRunSetupAuditAgent(seedRows, setupPlaces, sketch, blueprint) {
-      const local = localSetupAudit(seedRows, setupPlaces, sketch);
-      if (!world.config.aiEnabled) return local;
-      try {
-        const result = await ai("setupAuditAgent", {
-          premise: byId("setupPrompt").value,
-          blueprint,
-          places: setupPlaces.map(place => ({ id: place.id, name: place.name, capacity: place.capacity })),
-          agents: seedRows.map(seed => ({ id: seed.id, name: seed.name, job: seed.job, ageYears: seed.ageYears, place: seed.place, memory: seed.memory })),
-          relationships: sketch,
-          localIssues: local.issues
-        });
-        return {
-          issues: Array.isArray(result.issues) ? result.issues : local.issues,
-          fixAgents: Array.isArray(result.fixAgents) ? result.fixAgents : [],
-          households: Array.isArray(result.households) ? result.households : [],
-          groups: Array.isArray(result.groups) ? result.groups : [],
-          relations: Array.isArray(result.relations) ? result.relations : [],
-          logs: Array.isArray(result.logs) ? result.logs : local.logs
-        };
-      } catch (error) {
-        pushLog("建镇审查 AI 兜底", error.message);
-        return local;
-      }
-    }
-
-    function applySetupAuditFixes(seedRows, audit, setupPlaces) {
-      const fixById = new Map((audit.fixAgents || []).map(item => [item.id || item.agentId, item]));
-      const rows = seedRows.map((seed, index) => {
-        const fix = fixById.get(seed.id);
-        if (!fix) return seed;
-        return normalizeSeed({
-          ...seed,
-          ...fix,
-          id: seed.id,
-          place: setupPlaces.some(place => place.id === fix.place) ? fix.place : seed.place
-        }, index);
-      });
-      return assignSeedPlaces(ensureRealSeedNames(rows), setupPlaces);
-    }
-
-    async function legacyCompleteSetupWithPipeline(targetAgentCount, targetLocationCount, setupPlaces, seedRows) {
-      setSetupProgress("建镇规划 Agent 判断人数、地点和批次", 12, true);
-      const blueprint = await legacyRunSetupBlueprintAgent(targetAgentCount, targetLocationCount, setupPlaces, seedRows);
-      const finalPlaces = ensureSetupPlaceCount((blueprint.places || setupPlaces).map((place, index) => normalizeSetupPlace(place, index)), blueprint.targetLocationCount || targetLocationCount);
-      setSetupProgress(`人物 Agent 并行生成 ${blueprint.targetAgentCount || targetAgentCount} 人`, 24, true);
-      const agentBatch = await legacyRunSetupAgentBatchAgent(blueprint, finalPlaces, seedRows, blueprint.targetAgentCount || targetAgentCount);
-      let finalRows = assignSeedPlaces(agentBatch.rows, finalPlaces);
-      setSetupProgress("关系草图 Agent 生成初始家庭/圈子表", 62, true);
-      let relationshipSketch = await legacyRunSetupRelationSketchAgent(finalRows, finalPlaces, blueprint);
-      setSetupProgress("建镇审查 Agent 检查缺口", 78, true);
-      const audit = await legacyRunSetupAuditAgent(finalRows, finalPlaces, relationshipSketch, blueprint);
-      finalRows = applySetupAuditFixes(finalRows, audit, finalPlaces);
-      relationshipSketch = {
-        households: [...(relationshipSketch.households || []), ...(audit.households || [])],
-        groups: [...(relationshipSketch.groups || []), ...(audit.groups || [])],
-        relations: [...(relationshipSketch.relations || []), ...(audit.relations || [])],
-        logs: [...(relationshipSketch.logs || []), ...(audit.logs || [])]
-      };
-      const localAudit = localSetupAudit(finalRows, finalPlaces, relationshipSketch);
-      return {
-        places: finalPlaces,
-        agents: finalRows,
-        relationships: relationshipSketch,
-        audit: { ...audit, localIssues: localAudit.issues },
-        blueprint,
-        agentBatches: agentBatch.batches.map(item => ({ batchIndex: item.batchIndex, size: item.slots.length, returned: item.result?.agents?.length || 0 })),
-        createdAt: new Date().toISOString()
-      };
-    }
-
-    async function legacyAiCompleteSetup() {
-      if (!world.config.aiEnabled) {
-        openSettings("AI 补全前需要先配置 AI 或本地 AI。");
-        return;
-      }
-      byId("setupHint").textContent = "AI 正在补全角色信息...";
-      setSetupProgress("AI 正在拆分建镇任务", 8, true);
-      const targetAgentCount = desiredSetupAgentCount(readSetupSeeds());
-      const targetLocationCount = desiredSetupLocationCount(targetAgentCount);
-      const setupPlaces = ensureSetupPlaceCount(readSetupPlaces(), targetLocationCount);
-      const seedRows = readSetupSeeds();
-      const tables = await legacyCompleteSetupWithPipeline(targetAgentCount, targetLocationCount, setupPlaces, seedRows);
-      latestSetupTables = tables;
-      renderSetupLocations(tables.places);
-      renderSetupRoles(tables.agents);
-      const batchCount = tables.agentBatches?.length || Math.ceil(tables.agents.length / setupAgentBatchSize(tables.agents.length));
-      const issueCount = tables.audit?.localIssues?.length || tables.audit?.issues?.length || 0;
-      byId("setupHint").textContent = `AI 已分批补全 ${tables.agents.length} 个角色：人物 ${batchCount} 批，粗关系 ${tables.relationships.households?.length || 0} 个住户、${tables.relationships.groups?.length || 0} 个圈子；待补项 ${issueCount}。`;
-      setSetupProgress("AI 分批建镇完成，可以创建并进入", 100, true);
-    }
-
-    async function waitForNodeSetup(slot) {
-      const started = Date.now();
-      while (Date.now() - started < 30 * 60 * 1000) {
-        const progress = await api("/api/runtime/progress", {}, CONFIG_TIMEOUT_MS).catch(() => null);
-        if (progress) {
-          const percent = Number.isFinite(Number(progress.percent)) ? Math.round(Number(progress.percent)) : 0;
-          setSetupProgress(`Node建镇：${progress.phase || "running"} ${progress.currentTask || ""}`, percent, true);
-          if (progress.phase === "failed") throw new Error(progress.lastError || "Node setup failed");
-          if (progress.phase === "completed" && String(progress.currentTask || "").includes(slot)) return progress;
-        }
-        await sleep(1200);
-      }
-      throw new Error("Node setup timed out");
-    }
-
     async function createArchiveFromSetupNode(forceAi = false) {
       if (setupCreateInProgress) {
         byId("setupHint").textContent = "正在创建存档，请稍等。";
@@ -6163,98 +5907,6 @@
         setupCreateInProgress = false;
         byId("setupCreateBtn").disabled = false;
         byId("setupAiBtn").disabled = false;
-      }
-    }
-
-    async function createArchiveFromSetup() {
-      if (setupCreateInProgress) {
-        byId("setupHint").textContent = "正在创建存档，请稍等，不要重复点击。";
-        return;
-      }
-      setupCreateInProgress = true;
-      byId("setupCreateBtn").disabled = true;
-      byId("setupHint").textContent = "正在创建存档，先进入小镇，AI 结构 Agent 会在后台补全。";
-      setSetupProgress("读取角色和地点", 5, true);
-      const name = byId("setupSaveName").value.trim() || `town-${Date.now()}`;
-      try {
-        const currentRows = readSetupSeeds();
-        const tableReady = Boolean(
-          latestSetupTables?.agents?.length &&
-          latestSetupTables.agents.length === currentRows.length &&
-          currentRows.every((row, index) => row.id === latestSetupTables.agents[index]?.id && row.name === latestSetupTables.agents[index]?.name)
-        );
-        const desiredCount = tableReady ? latestSetupTables.agents.length : desiredSetupAgentCount(currentRows);
-        const setupPlaces = ensureSetupPlaceCount(tableReady ? latestSetupTables.places : readSetupPlaces(), desiredSetupLocationCount(desiredCount));
-        setSetupProgress("整理地点配置", 12, true);
-        applyPlaceConfig(setupPlaces);
-        const setupSeeds = assignSeedPlaces(ensureSetupSeedCount(tableReady ? latestSetupTables.agents : currentRows, desiredCount), setupPlaces)
-          .map((seed, index) => normalizeSeed(enrichSetupSeed(seed, index), index));
-        if (!setupSeeds.length) {
-          byId("setupHint").textContent = "至少需要 1 个角色。";
-          setSetupProgress("至少需要 1 个角色", 0, false);
-          return;
-        }
-        setSetupProgress(`初始化 ${setupSeeds.length} 个角色`, 24, true);
-        currentSaveSlot = name;
-        const startClock = setupClockMinutes();
-        world = makeInitialWorld({ ...world.config }, {
-          randomizeEmotion: true,
-          seedData: setupSeeds,
-          resetSeedData: setupSeeds,
-          setupNote: byId("setupPrompt").value.trim(),
-          startClock,
-          customSetup: true
-        });
-        world.selected = world.agents[0]?.id || "lin";
-        world.weatherBox = makeInitialWeather(world.clock);
-        world.seedData = setupSeeds;
-        world.resetSeedData = setupSeeds;
-        world.startClock = startClock;
-        world.customSetup = true;
-        world.setupNote = byId("setupPrompt").value.trim();
-        resetLocationBoxes();
-        const setupRelationshipsFromAi = tableReady && latestSetupTables.relationships && (
-          latestSetupTables.relationships.households?.length ||
-          latestSetupTables.relationships.groups?.length ||
-          latestSetupTables.relationships.relations?.length
-        ) ? latestSetupTables.relationships : null;
-        const setupRelationships = setupRelationshipsFromAi || fallbackSetupSocialStructure(setupSeeds, setupPlaces);
-        world.setupTables = tableReady
-          ? { ...latestSetupTables, agents: setupSeeds, places: setupPlaces, relationships: setupRelationships, createdAt: latestSetupTables.createdAt || new Date().toISOString() }
-          : { blueprint: null, agents: setupSeeds, places: setupPlaces, relationships: setupRelationships, audit: localSetupAudit(setupSeeds, setupPlaces, setupRelationships), agentBatches: [], createdAt: new Date().toISOString() };
-        setSetupProgress(setupRelationshipsFromAi ? "写入 AI 关系草图表" : "生成本地社会结构", 42, true);
-        applySocialStructure(setupRelationships);
-        world.socialStructureDone = true;
-        setSetupProgress("补齐本地社会落点", 48, true);
-        applySocialEmbedding({}, "local");
-        setSetupProgress("生成本地地点制度", 54, true);
-        applyLocationInstitutions({ locationSchedules: Object.values(fallbackLocationInstitutions(currentTime().day)) }, currentTime().day);
-        world.locationInstitutionDone[`day-${currentTime().day}`] = true;
-        setSetupProgress("生成本地地点每日", 59, true);
-        applyLocationDailyPlans({ locationPlans: Object.values(fallbackLocationDailyPlans(currentTime().day)) }, currentTime().day, "local");
-        world.locationDailyDone[`day-${currentTime().day}`] = true;
-        setSetupProgress("生成本地地点链", 61, true);
-        applyLocationChains(fallbackLocationChains(), "local");
-        world.locationChainDone[`block-${currentTime().day}-${Math.floor((world.clock % 1440) / 360)}`] = true;
-        updateLocationBoxes();
-        setSetupProgress("生成本地地点运行态", 64, true);
-        applyLocationRuntime(fallbackLocationRuntime(), "local");
-        setSetupProgress("生成本地社会模式", 72, true);
-        applySocialPatterns(fallbackSocialPatterns(), "local");
-        pushLog("新存档", `已创建自定义存档 ${name}，角色 ${setupSeeds.length} 个。${setupRelationshipsFromAi ? "已写入 AI 建镇关系草图表。" : "已按当前人物生成本地家庭/圈子关系草图。"}`);
-        setSetupProgress("写入存档文件", 82, true);
-        await saveCurrentArchive("create");
-        setSetupProgress("刷新存档列表", 92, true);
-        await refreshSaves();
-        townEntered = true;
-        setSetupProgress("进入小镇界面", 100, true);
-        byId("setupBackdrop").hidden = true;
-        byId("managerBackdrop").hidden = true;
-        render();
-        setTimeout(() => bootstrapArchiveAgentsInBackground(name), 50);
-      } finally {
-        setupCreateInProgress = false;
-        byId("setupCreateBtn").disabled = false;
       }
     }
 
@@ -10157,6 +9809,7 @@
 
     async function runWeatherAgentIfDue(force = false) {
       if (!world.config.aiEnabled) return;
+      world.weatherBox = normalizeWeatherBox(world.weatherBox || {}, world.clock);
       world.weatherBox.calendar = calendarForClock(world.clock);
       const reportKey = weatherReportKey();
       const dailyKey = weatherDailyKey();
@@ -12000,8 +11653,8 @@
     }
 
     function renderWeather() {
-      const box = world.weatherBox || makeInitialWeather(world.clock);
-      box.calendar = calendarForClock(world.clock);
+      const box = normalizeWeatherBox(world.weatherBox || {}, world.clock);
+      world.weatherBox = box;
       const current = box.current || {};
       const trend = Array.isArray(box.sevenDayTrend) && box.sevenDayTrend.length
         ? box.sevenDayTrend.slice(0, 4).map(item => `D+${item.dayOffset}:${item.condition}/${item.confidence}%`).join("；")

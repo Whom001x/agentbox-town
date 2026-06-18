@@ -1,5 +1,78 @@
 # 更新记录
 
+## 2026-06-19 - V3.3.7.5a Adaptive Reflection & Prediction Error Layer
+
+- 新增 `predictionErrorEngine`，Reflection 优先使用本地规则和向量误差，不再每次调用 LLM 做归因。
+- 新增 `expectationMemory`：按 `eventType / expectedOutcome / probability / source` 记录明确预期，例如主动联系熟人预期获得回应。
+- 支持 `expectedEmotionVector` 与实际情绪向量比较，生成 0-1 的 `emotionError`。
+- 新增本地 LLM 触发标记：只有 importance、predictionError 或 emotionDelta 超过阈值时才设置 `llmReflectionEligible`，当前实现不直接发起 LLM 请求。
+- Reflection importance 改为人格加权的几何均值：novelty、emotion、relationship、goal 和 predictionError 会按 `cognitiveProfile` 产生不同权重。
+- 新增 `reflectionCooldown`，默认 100 tick；高预测误差、重大关系变化或重大生存事件可以提前触发。
+- 新增 `reflectionMemory`，只记录 observation、interpretation、beliefChange 和 confidence，不生成流水账总结。
+- 新增 `decisionBias` EMA 更新：`Bias_new = Bias_old * 0.8 + DeltaBias * 0.2`，避免一次事件覆盖人格。
+- 新增 `beliefValidation`：后续事件证明判断错误时降低 confidence，并衰减或归零对应 `decisionBias`。
+- 新增 `npm run check:reflection-learning`，验证 routine 不触发 LLM reflection、预测失败产生误差、高误差改变 belief、错误 belief 可衰减、不同人格 importance 不同。
+
+验证：
+- `npm run check:reflection-learning`
+- `npm run check:reflection`
+- `npm run check:memory-quality`
+- `npm run check:memory-gate`
+- `npm run check:memory-consolidator`
+- `npm run check:relationship-memory`
+- `npm run check:temporal-causal`
+- `npm run check:all`
+- `npm run check`
+
+## 2026-06-19 - V3.3.7.4a Memory Consolidation Stability Layer
+
+- 新增 `habitTemporalValidator`：habit candidate 记录 `eventType`、`timestamps`、`intervalMean` 和 `intervalVariance`。
+- habit 生成不再只看重复次数，而是使用 `frequencyScore * stabilityScore * personalRelevance`；稳定睡眠/用餐/通勤/工作才会形成 habit。
+- 默认稳定条件改为 repeatCount >= 5，睡眠允许约 24h 周期 ±1h，用餐 ±2h，通勤/工作 ±3h。
+- 新增 `relationshipBuffer` 和 `dailyRelationshipSummary`，关系事件先缓存，日结时合并写入 `relationshipMemory`。
+- 新增 `relationshipWriteCooldown`，同一 agentA-agentB 在 100 tick 内最多形成一条关系长期记忆，多次互动合并为摘要。
+- `causalCandidates` 每个角色最多保留 20 条，按 `confidence * log(1 + repeatCount) * recencyFactor` 排序淘汰。
+- 超过 50 tick 未出现且 confidence < 0.3 的 causalCandidate 会被移除。
+- 新增 `cleanHabitMemory()`，通用一次性 habit 会被清理；带地点、人物、情绪、特殊事件或目标关联的个人 habit 会被保护。
+- 新增 `npm run check:memory-stability`，验证稳定睡眠生成 habit、随机睡眠不生成、夫妻/亲密关系每日聊天只生成摘要、causalCandidate 超限淘汰、特殊个人 habit 被保留。
+
+验证：
+- `npm run check:memory-stability`
+- `npm run check:memory-quality`
+- `npm run check:relationship-memory`
+- `npm run check:memory-gate`
+- `npm run check:memory-consolidator`
+- `npm run check:temporal-causal`
+- `npm run check:all`
+- `npm run check`
+
+## 2026-06-18 - V3.3.7.3 Memory Gate Refinement Layer
+
+- 收紧 `MemoryGate`：新增 `memoryValueScore = eventImpact * emotionDelta * novelty * relationshipImpact * causalPotential`，长期记忆只接收真正改变角色判断的事件。
+- 新增 `eventCategory`：`routine`、`experience`、`relationship`、`crisis`、`learning`，不同事件进入不同记忆通道。
+- `sleep`、`meal`、`commute`、`work` 等 routine 默认只进入 `EventLog`；默认重复 7 次后才压缩成一个 `habitMemory`，后续同类 routine 不再反复写长期记忆。
+- 降低关系记忆门槛：帮助、冲突、合作、承诺或 `relationshipDelta > 0.1` 可生成 `relationshipMemory`；普通打招呼、闲聊、路过仍被过滤。
+- 新增 `causalCandidates`：事件只先记录 `A -> B` 候选因果和 confidence，避免单次事件直接生成 `causalMemory`。
+- 新增 `selfModelSanitizer`：过滤 `????` 乱码、JSON/系统模板残留，并对 `lifeNarrative` 做重复句子清理。
+- `IdentityEvolution` 增加 `narrativeHash`，同一主题 30 天内不重复追加 lifeNarrative，只更新强度。
+- 新增 `npm run check:memory-quality`，验证 100 条 routine 不产生 100 条 habit、重复睡觉只压缩成一个 habit、重大事件进入 episodic、关系互动进入 relationshipMemory、因果重复先进入 causalCandidate。
+
+验证：
+- `npm run check:memory-quality`
+- `npm run check:memory-importance`
+- `npm run check:memory-calibration`
+- `npm run check:memory-filter`
+- `npm run check:memory-gate`
+- `npm run check:memory-consolidator`
+- `npm run check:relationship-memory`
+- `npm run check:temporal-causal`
+- `npm run check:agent-action-recovery`
+- `npm run check:cognitive-state`
+- `npm run check:utility-scheduler`
+- `npm run check:social-feedback`
+- `npm run check`
+- `npm run check:all`
+
 ## 2026-06-17 - V3.3.5 Relationship Memory Formation
 
 - 新增长期关系记忆形成层，`relationshipMatrix` 继续保存数值关系，`relationshipMemory` 保存会影响未来行为的关系经验。

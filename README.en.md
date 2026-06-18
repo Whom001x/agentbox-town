@@ -11,6 +11,9 @@ The goal is not only to generate stories. The project aims to simulate a small s
 ## Capabilities
 
 - Supports 100+ residents in one town simulation.
+- V3.3.7.5a adaptive reflection and prediction error: Reflection uses local rule/vector error first, then forms `reflectionMemory`, `decisionBias`, and belief correction only for high-importance or high-error events.
+- V3.3.7.4a memory stability: habits require temporally stable repeated patterns, relationship events buffer into daily summaries, and `causalCandidates` are capped and evicted by score.
+- V3.3.7.3 memory gate refinement: routine events stay in `EventLog` by default, repeated daily patterns compress into one habit, and only relationship, crisis, experience, or learning events enter long-term memory.
 - V3.3.4 temporal causal graph: high-strength events form `causalGraph` chains so Reflection and long-term memory can trace why an event changed future behavior.
 - V3.3.3.1 memory importance calibration: distribution normalization, emotion valence, temporal decay, and similar-memory compression keep long-term memory growth stable.
 - V3.3.3 multiplicative MemoryGate: event strength, emotion, relationship, goal, and context jointly decide whether an event enters long-term personality memory.
@@ -311,7 +314,19 @@ npm run check:all
 
 Full changelog: [CHANGELOG.md](CHANGELOG.md)
 
-**V3.3.6 Memory Self-Experience + V3.3.5 Relationship Memory Formation + V3.3.4 Temporal Causal Graph + V3.3.3.1 Memory Importance Calibration + V3.3.3 Memory Gate + V3.3.2.1 Medical Recovery + V3.3.2 Context Boundary + V3.3.1 Social Feedback**
+**V3.3.7.5a Adaptive Reflection + V3.3.7.4a Memory Stability + V3.3.7.3 Memory Gate Refinement + V3.3.6 Memory Self-Experience + V3.3.5 Relationship Memory Formation + V3.3.4 Temporal Causal Graph + V3.3.3.1 Memory Importance Calibration + V3.3.3 Memory Gate + V3.3.2.1 Medical Recovery + V3.3.2 Context Boundary + V3.3.1 Social Feedback**
+
+### V3.3.7.5a Adaptive Reflection & Prediction Error
+
+Reflection now starts with local `predictionErrorEngine` checks. It compares explicit `expectationMemory` outcomes first, then compares `expectedEmotionVector` against actual emotions. Ordinary routine events do not trigger LLM attribution. Only high-importance, high-error, or high emotion-delta events create `reflectionMemory`, update `decisionBias` through EMA, and validate or weaken beliefs through `beliefValidation`.
+
+### V3.3.7.4a Memory Consolidation Stability
+
+Long-term habits now require temporal stability, not just event count. `habitTemporalValidator` allows stable repeated patterns such as five days of sleep around the same time, while random repeats stay out of habit memory. Relationship events flow through `relationshipBuffer -> dailyRelationshipSummary -> relationshipMemory`, and each resident keeps at most 20 `causalCandidates` with score-based eviction.
+
+### V3.3.7.3 Memory Gate Refinement
+
+`MemoryGate` uses `memoryValueScore = eventImpact * emotionDelta * novelty * relationshipImpact * causalPotential` for long-term writes. Routine events stay in `EventLog`; crisis, learning, relationship, and personally meaningful experience events can enter long-term memory. System errors, JSON fallbacks, and ordinary logs are filtered out.
 
 ### V3.3.6 Memory Self-Experience
 

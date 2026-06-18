@@ -1,7 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
-const { recordLifeEvent } = require("../ai-town-memory-stream");
+const { recordLifeEvent, runDailyReflection } = require("../ai-town-memory-stream");
 const { utilityDecision } = require("../ai-town-utility-scheduler");
 
 function agent(overrides = {}) {
@@ -67,6 +67,11 @@ function relationshipEvent(overrides = {}) {
   };
 }
 
+function flushRelationshipMemory(w) {
+  w.clock = Math.max(Number(w.clock || 0), 1440);
+  runDailyReflection(w, { force: true });
+}
+
 function contactScore(decision) {
   const action = decision.candidateActions.find(item => item.id === "contact_familiar");
   assert.ok(action, "contact_familiar should be a candidate");
@@ -79,6 +84,9 @@ function testImportantInteractionCreatesStructuredRelationshipMemory() {
   const result = recordLifeEvent(w, a, relationshipEvent());
   assert.equal(result.event.memoryGate.shouldRemember, true);
   assert.equal(result.event.memoryGate.memoryType, "social");
+  assert.equal(a.relationshipMemory.length, 0);
+  assert.equal(a.relationshipBuffer.length, 1);
+  flushRelationshipMemory(w);
   assert.equal(a.relationshipMemory.length, 1);
   const memory = a.relationshipMemory[0];
   assert.equal(memory.targetAgentId, "agent_2");
@@ -100,6 +108,8 @@ function testRepeatedInteractionReinforcesSingleRelationshipMemory() {
   recordLifeEvent(w, a, relationshipEvent({ id: "rel_evt_1" }));
   w.clock += 60;
   recordLifeEvent(w, a, relationshipEvent({ id: "rel_evt_2", summary: "Agent Two helped Agent One again with a clinic follow-up." }));
+  assert.equal(a.relationshipMemory.length, 0);
+  flushRelationshipMemory(w);
   assert.equal(a.relationshipMemory.length, 1);
   assert.ok(a.relationshipMemory[0].interactionCount >= 2);
   assert.ok(a.relationshipMemory[0].sourceEvents.length >= 2);
@@ -123,6 +133,7 @@ function testRelationshipMemoryAffectsContactFamiliarScore() {
   const positive = agent();
   const positiveWorld = world(positive);
   recordLifeEvent(positiveWorld, positive, relationshipEvent());
+  flushRelationshipMemory(positiveWorld);
   const positiveScore = contactScore(utilityDecision(positiveWorld, positive));
 
   const negative = agent();
@@ -133,6 +144,7 @@ function testRelationshipMemoryAffectsContactFamiliarScore() {
     relationshipDelta: { trust: -25, resentment: 20 },
     emotionDelta: { angry: 35, anxious: 18 }
   }));
+  flushRelationshipMemory(negativeWorld);
   const negativeScore = contactScore(utilityDecision(negativeWorld, negative));
 
   assert.ok(positiveScore > negativeScore, `positive ${positiveScore} should exceed negative ${negativeScore}`);
@@ -204,6 +216,8 @@ function testPopulationRelationshipMemoryFormation100Ticks() {
       source: "population-test"
     });
   }
+  w.clock = 1440;
+  runDailyReflection(w, { force: true });
 
   const counts = agents.map(item => Array.isArray(item.relationshipMemory) ? item.relationshipMemory.length : 0);
   const nonZero = counts.filter(Boolean).length;

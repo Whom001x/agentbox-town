@@ -18,7 +18,7 @@ import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 
 const assets = {
   townMap: require("./assets/town-map-bg.png"),
-  miniMap: require("./assets/mini-map-bg.png"),
+  miniMap: require("./assets/town-map-bg.png"),
   placeMarker: require("./assets/place-marker.png"),
   eventMarker: require("./assets/event-marker.png")
 };

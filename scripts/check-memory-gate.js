@@ -3,7 +3,8 @@
 const assert = require("node:assert/strict");
 const {
   recordLifeEvent,
-  memoryGate
+  memoryGate,
+  runDailyReflection
 } = require("../ai-town-memory-stream");
 
 function agent(overrides = {}) {
@@ -45,16 +46,25 @@ function testSingleRoutineOnlyEventLog() {
 function testRepeatedRoutineBecomesHabit() {
   const a = agent();
   const w = world(a);
-  for (let i = 0; i < 3; i += 1) {
+  for (let i = 0; i < 5; i += 1) {
+    w.clock = i * 1440 + 22 * 60;
     recordLifeEvent(w, a, {
+      id: `stable_sleep_${i}`,
       type: "plan_sleep",
       plan: { title: "sleep", localAction: "sleep" },
       summary: "Followed plan sleep"
     });
   }
-  assert.equal(w.eventLog.length, 3);
+  assert.equal(w.eventLog.length, 5);
   assert.equal(w.eventLog[0].memoryGate.shouldRemember, true);
   assert.equal(w.eventLog[0].memoryGate.memoryType, "habit");
+  assert.equal(a.semanticMemory.habit.length, 1);
+  w.clock += 1440;
+  recordLifeEvent(w, a, {
+    type: "plan_sleep",
+    plan: { title: "sleep", localAction: "sleep" },
+    summary: "Followed plan sleep"
+  });
   assert.equal(a.semanticMemory.habit.length, 1);
 }
 
@@ -83,6 +93,10 @@ function testRelationshipEventCreatesRelationshipMemory() {
   });
   assert.equal(w.eventLog[0].memoryGate.shouldRemember, true);
   assert.equal(w.eventLog[0].memoryGate.memoryType, "social");
+  assert.equal(a.relationshipMemory.length, 0);
+  assert.equal(a.relationshipBuffer.length, 1);
+  w.clock = 1440;
+  runDailyReflection(w, { force: true });
   assert.ok(a.semanticMemory.relationship.length >= 1);
   assert.ok(a.relationshipMemory.length >= 1);
 }

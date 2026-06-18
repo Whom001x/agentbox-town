@@ -11,6 +11,9 @@ AgentBox Town 是一个多 Agent 虚拟小镇模拟器。它把多个 AI 角色�
 ## 核心能力
 
 - 支持 100+ 角色的小镇模拟。
+- V3.3.7.5a 自适应反思与预测误差：Reflection 先用规则和向量误差判断预期是否失败，只在高重要性/高误差事件上形成 `reflectionMemory`、`decisionBias` 和 belief 修正。
+- V3.3.7.4a 记忆稳定层：habit 必须来自时间稳定的重复模式，关系事件先进入 buffer 再每日合并，`causalCandidates` 限制容量并淘汰低分项。
+- V3.3.7.3 记忆门控精炼：routine 默认只进 `EventLog`，重复日常只压缩成一个 habit，关系/危机/学习事件才进入长期记忆。
 - V3.3.4 时序因果图：高强度事件会形成 `causalGraph`，Reflection 和长期记忆可追溯事件为什么产生影响。
 - V3.3.3.1 记忆重要性校准：使用分布归一化、情绪正负、时间衰减和相似记忆压缩，让长期记忆分布更稳定。
 - V3.3.3 乘法 MemoryGate：事件强度、情绪、关系、目标和上下文共同决定是否进入长期人格记忆。
@@ -313,7 +316,19 @@ npm run check:all
 
 完整更新记录：[CHANGELOG.md](CHANGELOG.md)
 
-**V3.3.6 Memory Self-Experience + V3.3.5 Relationship Memory Formation + V3.3.4 Temporal Causal Graph + V3.3.3.1 Memory Importance Calibration + V3.3.3 Memory Gate + V3.3.2.1 Medical Recovery + V3.3.2 Context Boundary + V3.3.1 Social Feedback**
+**V3.3.7.5a Adaptive Reflection + V3.3.7.4a Memory Stability + V3.3.7.3 Memory Gate Refinement + V3.3.6 Memory Self-Experience + V3.3.5 Relationship Memory Formation + V3.3.4 Temporal Causal Graph + V3.3.3.1 Memory Importance Calibration + V3.3.3 Memory Gate + V3.3.2.1 Medical Recovery + V3.3.2 Context Boundary + V3.3.1 Social Feedback**
+
+### V3.3.7.5a Adaptive Reflection & Prediction Error
+
+Reflection 现在优先使用本地 `predictionErrorEngine`：先读 `expectationMemory` 的明确预期，再比较 `expectedEmotionVector` 与实际情绪向量。普通 routine 不触发 LLM 归因；只有高重要性、高预测误差或明显情绪变化事件才会写入 `reflectionMemory`，并用 EMA 更新 `decisionBias`。后续事件如果证明判断错误，会通过 `beliefValidation` 降低 confidence 或归零偏置。
+
+### V3.3.7.4a Memory Consolidation Stability
+
+长期 habit 不再只看次数，而是要求 `habitTemporalValidator` 验证稳定时间模式，例如连续 5 天固定时间睡眠才形成 habit，随机 5 次不会形成。关系事件改为 `relationshipBuffer -> dailyRelationshipSummary -> relationshipMemory`，同一关系在冷却窗口内合并；`causalCandidates` 每个角色最多保留 20 条，并按 confidence、repeatCount 和 recency 淘汰。
+
+### V3.3.7.3 Memory Gate Refinement
+
+`MemoryGate` 使用 `memoryValueScore = eventImpact * emotionDelta * novelty * relationshipImpact * causalPotential` 判断长期写入。routine 默认只进 `EventLog`，危机、学习、关系变化和有个人意义的 experience 才进入长期记忆；系统错误、JSON 兜底、普通流水账不会污染人格。
 
 ### V3.3.6 Memory Self-Experience
 

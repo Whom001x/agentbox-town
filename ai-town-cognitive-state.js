@@ -7,6 +7,7 @@ const {
 } = require("./ai-town-memory-stream");
 const { socialFieldInfluenceForAgent } = require("./ai-town-social-field");
 const { getSocialModifier } = require("./ai-town-social-feedback");
+const { updateTemporalCausalMemory } = require("./ai-town-temporal-causal");
 
 function num(value, fallback = 0) {
   const number = Number(value);
@@ -492,10 +493,11 @@ function pushDesire(list, id, desire, intensity, source, actionHints = []) {
 
 function desireCandidatesFromState(state = {}, driveVector = {}, context = {}) {
   const desires = [];
-  pushDesire(desires, "keep_duty", "finish_or_continue_current_responsibility", state.responsibilityDrive * 0.75 + (context.plan ? 0.16 : 0), "responsibilityDrive", ["follow_plan", "continue_process"]);
+  const causalBias = state.causalBias || {};
+  pushDesire(desires, "keep_duty", "finish_or_continue_current_responsibility", state.responsibilityDrive * 0.75 + (context.plan ? 0.16 : 0) + num(causalBias.responsibilityBias, 0) * 0.1, "responsibilityDrive", ["follow_plan", "continue_process"]);
   pushDesire(desires, "recover_comfort", "return_to_a_more_comfortable_or_restful_state", state.comfortNeed * 0.78 + state.emotionalLoad * 0.12, "comfortNeed", ["rest", "return_home", "think_and_plan"]);
-  pushDesire(desires, "reduce_risk", "avoid_or_check_current_risk", state.safetyConcern * 0.85, "safetyConcern", ["seek_safety", "observe_environment", "return_home"]);
-  pushDesire(desires, "seek_support", "contact_a_familiar_person_or_ask_for_help", state.socialNeed * 0.7 + state.safetyConcern * 0.12, "socialNeed", ["contact_familiar", "ask_guardian"]);
+  pushDesire(desires, "reduce_risk", "avoid_or_check_current_risk", state.safetyConcern * 0.85 + num(causalBias.safetyBias, 0) * 0.1, "safetyConcern", ["seek_safety", "observe_environment", "return_home"]);
+  pushDesire(desires, "seek_support", "contact_a_familiar_person_or_ask_for_help", state.socialNeed * 0.7 + state.safetyConcern * 0.12 + num(causalBias.socialBias, 0) * 0.12, "socialNeed", ["contact_familiar", "ask_guardian"]);
   pushDesire(desires, "observe_or_explore", "observe_the_environment_or_explore_carefully", state.curiosityDrive * 0.78, "curiosityDrive", ["observe_environment", "walk_nearby", "record_observation"]);
   pushDesire(desires, "eat", "find_a_reasonable_food_opportunity", clamp(num(driveVector.food, 0) / 1.1, 0, 1, 0), "body_attention", ["eat_or_buy_food"]);
   pushDesire(desires, "seek_care", "handle_body_or_health_concern", clamp(num(driveVector.care, 0) / 1.05, 0, 1, 0), "health_attention", ["seek_care", "rest"]);
@@ -503,7 +505,7 @@ function desireCandidatesFromState(state = {}, driveVector = {}, context = {}) {
   return desires.sort((a, b) => b.intensity - a.intensity).slice(0, 8);
 }
 
-function thoughtCandidatesFromState(state = {}, activeMemories = [], activeBeliefs = []) {
+function thoughtCandidatesFromState(state = {}, activeMemories = [], activeBeliefs = [], activeCausalMemory = []) {
   const thoughts = [];
   const push = (trigger, thought, influence, intensity) => {
     const value = clamp(intensity, 0, 1, 0);
@@ -519,6 +521,8 @@ function thoughtCandidatesFromState(state = {}, activeMemories = [], activeBelie
   if (memory) push("memory_activation", `similar memory activated: ${memory.text}`, `memoryActivation+${memory.activation}`, memory.activation);
   const belief = activeBeliefs[0];
   if (belief) push("belief_activation", `active belief: ${belief.belief}`, `beliefActivation+${belief.activation}`, belief.activation);
+  const causal = activeCausalMemory[0];
+  if (causal) push("causal_memory_activation", `causal memory activated: ${causal.causalRule}`, `causalBias+${causal.activation}`, causal.activation);
   return thoughts.sort((a, b) => b.intensity - a.intensity).slice(0, 8);
 }
 
@@ -726,6 +730,22 @@ function cognitiveState(world = {}, agent = {}, context = {}) {
   Object.entries(memorySignals.biasVector).forEach(([key, value]) => add(biasVector, key, value));
   Object.entries(memorySignals.actionModifiers).forEach(([key, value]) => add(actionModifiers, key, value));
 
+  const temporalCausal = config.enabled
+    ? updateTemporalCausalMemory(world, agent, context)
+    : { causalBias: { safetyBias: 0, socialBias: 0, responsibilityBias: 0, confidence: 0 }, activeCausalMemory: [] };
+  const causalBias = temporalCausal.causalBias || { safetyBias: 0, socialBias: 0, responsibilityBias: 0, confidence: 0 };
+  const activeCausalMemory = Array.isArray(temporalCausal.activeCausalMemory) ? temporalCausal.activeCausalMemory : [];
+  add(perceptionWeights, "causalMemory", Math.max(num(causalBias.safetyBias, 0), num(causalBias.socialBias, 0), num(causalBias.responsibilityBias, 0)));
+  add(driveVector, "safety", num(causalBias.safetyBias, 0) * 0.16);
+  add(driveVector, "social", num(causalBias.socialBias, 0) * 0.18);
+  add(driveVector, "support", num(causalBias.socialBias, 0) * 0.14);
+  add(driveVector, "duty", num(causalBias.responsibilityBias, 0) * 0.16);
+  add(driveVector, "order", num(causalBias.responsibilityBias, 0) * 0.08);
+  add(biasVector, "socialSeeking", num(causalBias.socialBias, 0) * 0.12);
+  add(biasVector, "avoidance", num(causalBias.safetyBias, 0) * 0.1);
+  biasVector.riskTolerance = Number(clamp(num(biasVector.riskTolerance, 0.5) - num(causalBias.safetyBias, 0) * 0.06, 0.02, 0.98, 0.5).toFixed(3));
+  actionModifiers.causalMemory = causalBias;
+
   emotionCause.slice(0, 8).forEach(item => {
     const causeText = `${item.emotion || ""} ${(item.causes || []).join(" ")}`.toLowerCase();
     const intensity = scale01(item.intensity, 0.35);
@@ -762,14 +782,16 @@ function cognitiveState(world = {}, agent = {}, context = {}) {
       { value: beliefActivationRaw, weight: config.beliefInfluence * 0.35 },
       { value: emotionLoad, weight: config.emotionInfluence * 0.25 },
       { value: personalityInfluence, weight: config.personalityInfluence * 0.2 },
-      { value: Math.abs(socialEffect), weight: 0.12 }
+      { value: Math.abs(socialEffect), weight: 0.12 },
+      { value: Math.max(num(causalBias.safetyBias, 0), num(causalBias.responsibilityBias, 0)), weight: 0.08 }
     ]),
     socialNeed: weightedInfluence([
       { value: socialLow, weight: 0.35 },
       { value: scale01(emotions.lonely, 0), weight: config.emotionInfluence * 0.28 },
       { value: clamp(num(driveVector.social, 0) / 1.5, 0, 1, 0), weight: 0.22 },
       { value: clamp(rel.count ? rel.intimacy / 100 : 0, 0, 1, 0), weight: config.beliefInfluence * 0.14 },
-      { value: clamp((socialModifier.socialNeedModifier + 1) / 2, 0, 1, 0.5), weight: 0.12 }
+      { value: clamp((socialModifier.socialNeedModifier + 1) / 2, 0, 1, 0.5), weight: 0.12 },
+      { value: num(causalBias.socialBias, 0), weight: 0.12 }
     ]),
     safetyConcern: weightedInfluence([
       { value: safetyLow, weight: 0.35 },
@@ -777,7 +799,8 @@ function cognitiveState(world = {}, agent = {}, context = {}) {
       { value: clamp(num(perceptionWeights.threat, 0) / 1.5, 0, 1, 0), weight: 0.22 },
       { value: 1 - clamp(num(biasVector.riskTolerance, 0.5), 0, 1, 0.5), weight: config.personalityInfluence * 0.24 },
       { value: scale01(emotions.anxious, 0), weight: config.emotionInfluence * 0.16 },
-      { value: clamp(Math.max(0, socialModifier.fearModifier) * 0.62 + Math.max(0, socialModifier.avoidanceModifier) * 0.38, 0, 1, 0), weight: 0.14 }
+      { value: clamp(Math.max(0, socialModifier.fearModifier) * 0.62 + Math.max(0, socialModifier.avoidanceModifier) * 0.38, 0, 1, 0), weight: 0.14 },
+      { value: num(causalBias.safetyBias, 0), weight: 0.12 }
     ]),
     curiosityDrive: weightedInfluence([
       { value: clamp(num(driveVector.curiosity, 0) / 1.4, 0, 1, 0), weight: 0.32 },
@@ -793,7 +816,8 @@ function cognitiveState(world = {}, agent = {}, context = {}) {
       { value: goalActivation, weight: config.goalInfluence * 0.28 },
       { value: clamp(num(biasVector.goalPersistence, 0.5), 0, 1, 0.5), weight: config.personalityInfluence * 0.22 },
       { value: beliefActivationRaw, weight: config.beliefInfluence * 0.18 },
-      { value: clamp((socialModifier.responsibilityModifier + 1) / 2, 0, 1, 0.5), weight: 0.1 }
+      { value: clamp((socialModifier.responsibilityModifier + 1) / 2, 0, 1, 0.5), weight: 0.1 },
+      { value: num(causalBias.responsibilityBias, 0), weight: 0.12 }
     ]),
     comfortNeed: weightedInfluence([
       { value: comfortLow, weight: 0.28 },
@@ -805,22 +829,25 @@ function cognitiveState(world = {}, agent = {}, context = {}) {
       { value: memoryActivation, weight: config.memoryInfluence * 0.14 }
     ]),
     emotionalLoad: emotionLoad,
-    beliefActivation: Number(clamp(beliefActivationRaw, 0, 1, 0).toFixed(3))
+    beliefActivation: Number(clamp(beliefActivationRaw, 0, 1, 0).toFixed(3)),
+    causalBias
   };
   const desireCandidates = config.enabled ? desireCandidatesFromState(cognitiveScalars, driveVector, context) : [];
-  const thoughtCandidates = config.enabled ? thoughtCandidatesFromState(cognitiveScalars, activeMemories, activeBeliefs) : [];
+  const thoughtCandidates = config.enabled ? thoughtCandidatesFromState(cognitiveScalars, activeMemories, activeBeliefs, activeCausalMemory) : [];
   const thoughtStream = appendThoughtStream(agent, world, thoughtCandidates);
 
   const result = {
     agentId: agent.id || "",
     timestamp: num(world.clock, 0),
     version: "3.2",
+    causalLayerVersion: "3.3.7",
     enabled: config.enabled,
     decisionWeights,
     influenceWeights: config,
     ...cognitiveScalars,
     activeGoals,
     activeMemories,
+    activeCausalMemory,
     activeBeliefs,
     desireCandidates,
     thoughtCandidates,
@@ -833,6 +860,7 @@ function cognitiveState(world = {}, agent = {}, context = {}) {
     needEmergencyFlag,
     socialFieldInfluence,
     socialModifier,
+    temporalCausal,
     memoryEvidence: memorySignals.evidence,
     relationshipSignals: rel,
     cognitiveProfile: profileSignals,
@@ -841,6 +869,7 @@ function cognitiveState(world = {}, agent = {}, context = {}) {
   agent.cognitiveState = result;
   agent.desireCandidates = desireCandidates;
   agent.activeBeliefs = activeBeliefs;
+  agent.activeCausalMemory = activeCausalMemory;
   return result;
 }
 

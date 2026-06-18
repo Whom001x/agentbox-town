@@ -5,6 +5,7 @@ const {
   connectMemoryCause,
   causalReflectionAnchors
 } = require("./ai-town-causal-graph");
+const { updateTemporalCausalMemory } = require("./ai-town-temporal-causal");
 
 const legacyLayers = ["short", "long", "emotional", "secret", "rumor"];
 const semanticTypes = ["habit", "experience", "episodic", "belief", "relationship", "social", "preference", "goal"];
@@ -76,6 +77,32 @@ const defaultContextFactors = {
   hearsay: 0.1,
   indirect: 0.1
 };
+const defaultMemoryQualityConfig = {
+  memoryValueThreshold: 0.08,
+  routineHabitThreshold: 5,
+  routineHabitRefreshDays: 30,
+  causalCandidateThreshold: 0.12,
+  maxCausalCandidates: 20,
+  causalCandidateStaleTicks: 50,
+  relationshipWriteCooldown: 100
+};
+const defaultReflectionLearningConfig = {
+  cooldown: 100,
+  importanceThreshold: 0.6,
+  predictionErrorThreshold: 0.7,
+  earlyPredictionErrorThreshold: 0.8,
+  emotionDeltaThreshold: 0.35
+};
+const habitTemporalRules = {
+  sleep: { minRepeats: 5, expectedInterval: 1440, tolerance: 60 },
+  meal: { minRepeats: 5, expectedInterval: 1440, tolerance: 120 },
+  commute: { minRepeats: 5, expectedInterval: 1440, tolerance: 180 },
+  work: { minRepeats: 5, expectedInterval: 1440, tolerance: 180 },
+  study: { minRepeats: 5, expectedInterval: 1440, tolerance: 180 },
+  rest: { minRepeats: 5, expectedInterval: 1440, tolerance: 180 },
+  routine: { minRepeats: 5, expectedInterval: 1440, tolerance: 180 }
+};
+const genericRoutineHabitKinds = new Set(["sleep", "meal", "commute", "work", "study", "rest", "routine"]);
 const blockedMemoryPatterns = [
   /Followed plan/i,
   /Followed the plan/i,
@@ -87,6 +114,15 @@ const blockedMemoryPatterns = [
   /Stable habit/i,
   /Based on/i,
   /JSON Schema/i,
+  /AI\s*返回格式错误/i,
+  /AI\s*杩斿洖/i,
+  /AI returned invalid JSON/i,
+  /invalid JSON/i,
+  /JSON\s*修复兜底/i,
+  /JSON\s*淇/i,
+  /system_error|system error/i,
+  /停下整理思路|停在原地整理思路/i,
+  /鍋滀笅鏁寸悊/i,
   /JSON指令|复杂的JSON|生成符合JSON/i
 ];
 
@@ -219,6 +255,55 @@ function uniqueStrings(values = [], limit = 8) {
   return output.slice(0, limit);
 }
 
+function isCorruptOrTemplateText(text = "") {
+  const value = String(text || "").trim();
+  if (!value) return true;
+  if (/\?{2,}/.test(value)) return true;
+  if (/\uFFFD/.test(value)) return true;
+  if (/^\s*[\[{]/.test(value) || /"[^"]+"\s*:/.test(value)) return true;
+  return isBlockedMemoryText(value);
+}
+
+function dedupeNarrativeText(text = "", limit = 260) {
+  const value = String(text || "").replace(/\s+/g, " ").trim();
+  if (!value) return "";
+  const parts = value
+    .split(/(?<=[.!?。！？])\s+|(?<=[.!?。！？])/u)
+    .map(item => item.trim())
+    .filter(Boolean);
+  if (!parts.length) return value.slice(0, limit);
+  const seen = new Set();
+  const output = [];
+  parts.forEach(part => {
+    const key = part.toLowerCase().replace(/\s+/g, " ").replace(/[.!?。！？]+$/u, "");
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    output.push(part);
+  });
+  return output.join(" ").replace(/\s+/g, " ").trim().slice(0, limit);
+}
+
+function sanitizeSelfModel(agent = {}) {
+  const self = agent.selfModel || {};
+  const cleanArray = (items, limit = 8) => uniqueStrings(
+    (Array.isArray(items) ? items : [])
+      .map(item => compactString(item, "", 160))
+      .filter(item => item && !isCorruptOrTemplateText(item)),
+    limit
+  );
+  ["values", "fears", "selfBeliefs", "strengths", "concerns", "competenceBeliefs"].forEach(key => {
+    if (Array.isArray(self[key])) self[key] = cleanArray(self[key], key === "selfBeliefs" ? 12 : 8);
+  });
+  ["identity", "currentSelfView", "selfImage"].forEach(key => {
+    if (self[key] && isCorruptOrTemplateText(self[key])) self[key] = "";
+    else if (self[key]) self[key] = compactString(self[key], "", key === "identity" ? 180 : 220);
+  });
+  if (self.lifeNarrative && isCorruptOrTemplateText(self.lifeNarrative)) self.lifeNarrative = "";
+  if (self.lifeNarrative) self.lifeNarrative = dedupeNarrativeText(self.lifeNarrative, 260);
+  agent.selfModel = self;
+  return self;
+}
+
 function uniqueRelationshipCauses(values = [], limit = 8) {
   const seen = new Set();
   const output = [];
@@ -241,6 +326,13 @@ function normalizeRatio(value, fallback = 0) {
   if (!Number.isFinite(number)) return fallback;
   if (number > 1) return clampNumber(number / (number <= 10 ? 10 : 100), 0, 1, fallback);
   return clampNumber(number, 0, 1, fallback);
+}
+
+function normalizePercentSignal(value, fallback = 0) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  if (Math.abs(number) <= 1) return clampNumber(Math.abs(number), 0, 1, fallback);
+  return clampNumber(Math.abs(number) / 100, 0, 1, fallback);
 }
 
 function normalizedObjectValue(value, fallback = 0) {
@@ -587,6 +679,7 @@ function multiplicativeMemoryImportance(world = {}, agent = {}, event = {}) {
   const contextFactor = contextFactorForEvent(agent, event);
   const memoryType = memoryTypeForDecay(event);
   const timeFactor = timeFactorForEvent(world, event, memoryType);
+  const sourceFactor = event.sourceType === "local" ? 0.5 : 1;
   const valence = dimensions.emotionValence || emotionValenceFromEvent(event);
   const emotionWeight = emotionMemoryWeight(event, valence);
   const importance = (
@@ -594,13 +687,14 @@ function multiplicativeMemoryImportance(world = {}, agent = {}, event = {}) {
     * (dimensions.V_emotion + MEMORY_IMPORTANCE_EPSILON) ** weights.emotion
     * (dimensions.V_relation + MEMORY_IMPORTANCE_EPSILON) ** weights.relation
     * (dimensions.V_goal + MEMORY_IMPORTANCE_EPSILON) ** weights.goal
-  ) * contextFactor * timeFactor;
+  ) * contextFactor * timeFactor * sourceFactor;
   return {
     importance: Number(clampNumber(importance, 0, 1, 0).toFixed(3)),
     dimensions,
     weights,
     contextFactor: Number(contextFactor.toFixed(3)),
     timeFactor: Number(timeFactor.toFixed(3)),
+    sourceFactor,
     memoryTypeForDecay: memoryType,
     emotionValence: valence,
     emotionMemoryWeight: emotionWeight
@@ -609,6 +703,7 @@ function multiplicativeMemoryImportance(world = {}, agent = {}, event = {}) {
 
 function ensureSelfModel(agent = {}) {
   agent.selfModel ||= {};
+  sanitizeSelfModel(agent);
   const identityCore = agent.identityCore || {};
   const profile = agent.personalityProfile || {};
   const goals = Array.isArray(agent.longTermGoals) ? agent.longTermGoals : [];
@@ -654,11 +749,12 @@ function ensureSelfModel(agent = {}) {
     profile.competenceBeliefs
   ], 8);
   agent.selfModel.lifeNarrative = compactString(
-    agent.selfModel.lifeNarrative || agent.selfNarrative || agent.selfModel.currentSelfView || agent.selfModel.identity,
+    dedupeNarrativeText(agent.selfModel.lifeNarrative || agent.selfNarrative || agent.selfModel.currentSelfView || agent.selfModel.identity, 260),
     agent.selfModel.currentSelfView || agent.selfModel.identity,
     260
   );
   agent.selfModel.selfConsistencyWeight = clampNumber(agent.selfModel.selfConsistencyWeight, 0, 1, 0.65);
+  sanitizeSelfModel(agent);
   return agent.selfModel;
 }
 
@@ -850,6 +946,7 @@ function ensureMemory(agent) {
   });
   agent.vectorMemory ||= [];
   if (!Array.isArray(agent.vectorMemory)) agent.vectorMemory = [];
+  ensureReflectionLearning(agent);
   ensureSelfModel(agent);
   ensureEmotionCauses(agent);
   return agent.memory;
@@ -1235,9 +1332,9 @@ function appendSemanticMemory(agent, memory = {}) {
     tags: Array.isArray(memory.tags) ? memory.tags.slice(0, 8) : [],
     dedupeKey,
     compressionKey,
-    count: 1,
-    firstTime: at,
-    lastTime: at,
+    count: Math.max(1, Number(memory.count || 1)),
+    firstTime: memory.firstTime ?? at,
+    lastTime: memory.lastTime ?? at,
     averageImportance: clampNumber(memory.importance, 1, 5, 3),
     summary: String(memory.summary || memory.meaning || text).slice(0, 260)
   };
@@ -1427,23 +1524,24 @@ function isRoutineLifeDetail(detail = {}) {
 
 function eventSignificanceSignals(event = {}) {
   const text = eventTextForGate(event);
-  const novelty = event.category === "routine" ? 0 : normalizeRatio(event.abnormality, 0.25);
+  const novelty = event.category === "routine" ? 0 : normalizePercentSignal(event.abnormality, 0.25);
   const emotionChange = Math.max(
     normalizedDeltaValue(event.emotionDelta, 0),
-    normalizeRatio(event.emotionalIntensity, 0)
+    event.category === "routine" ? 0 : normalizePercentSignal(event.emotionalIntensity, 0)
   );
   const relationshipChange = Math.max(
     normalizedDeltaValue(event.relationshipDelta || event.relationDelta || {}, 0),
-    normalizeRatio(event.relationshipImpact || event.relationImpact, 0)
+    normalizePercentSignal(event.relationshipImpact || event.relationImpact, 0)
   );
   const goalChange = Math.max(
     normalizedDeltaValue(event.goalDelta || {}, 0),
-    normalizeRatio(event.goalImpact || event.futureImpact, 0)
+    normalizePercentSignal(event.goalImpact || event.futureImpact, 0)
   );
   const explicitHealthDelta = Math.abs(Number(event.needDelta?.health ?? event.healthChange ?? 0));
+  const witnessHealth = Boolean(event.targetAgentId && event.targetAgentId !== event.agentId && !event.interruption?.type);
   const healthChange = Math.max(
-    normalizeRatio(explicitHealthDelta, 0),
-    event.interruption?.type === "health" || /health|clinic|medical|ill|sick/.test(text) ? 0.55 : 0
+    normalizePercentSignal(explicitHealthDelta, 0),
+    event.interruption?.type === "health" || /health|clinic|medical|ill|sick/.test(text) ? (witnessHealth ? 0.12 : 0.55) : 0
   );
   const score = clampNumber(
     novelty * 0.22
@@ -1465,54 +1563,678 @@ function eventSignificanceSignals(event = {}) {
   };
 }
 
+function reflectionLearningConfig(world = {}) {
+  const config = world.config?.reflectionLearning || world.reflectionLearning || {};
+  return {
+    cooldown: Math.round(clampNumber(config.cooldown, 0, 100000, defaultReflectionLearningConfig.cooldown)),
+    importanceThreshold: clampNumber(config.importanceThreshold, 0, 1, defaultReflectionLearningConfig.importanceThreshold),
+    predictionErrorThreshold: clampNumber(config.predictionErrorThreshold, 0, 1, defaultReflectionLearningConfig.predictionErrorThreshold),
+    earlyPredictionErrorThreshold: clampNumber(config.earlyPredictionErrorThreshold, 0, 1, defaultReflectionLearningConfig.earlyPredictionErrorThreshold),
+    emotionDeltaThreshold: clampNumber(config.emotionDeltaThreshold, 0, 1, defaultReflectionLearningConfig.emotionDeltaThreshold)
+  };
+}
+
+function ensureReflectionLearning(agent = {}) {
+  if (!Array.isArray(agent.expectationMemory)) agent.expectationMemory = [];
+  if (!Array.isArray(agent.reflectionMemory)) agent.reflectionMemory = [];
+  agent.decisionBias ||= {};
+  agent.beliefValidation ||= {};
+  agent.reflectionLearningState ||= {};
+  return agent.reflectionLearningState;
+}
+
+function memoryQualityConfig(world = {}) {
+  const config = world.config?.memoryQuality || world.memoryQuality || {};
+  return {
+    memoryValueThreshold: clampNumber(config.memoryValueThreshold, 0, 1, defaultMemoryQualityConfig.memoryValueThreshold),
+    routineHabitThreshold: Math.round(clampNumber(config.routineHabitThreshold, 2, 60, defaultMemoryQualityConfig.routineHabitThreshold)),
+    routineHabitRefreshDays: Math.round(clampNumber(config.routineHabitRefreshDays, 1, 365, defaultMemoryQualityConfig.routineHabitRefreshDays)),
+    causalCandidateThreshold: clampNumber(config.causalCandidateThreshold, 0, 1, defaultMemoryQualityConfig.causalCandidateThreshold),
+    maxCausalCandidates: Math.round(clampNumber(config.maxCausalCandidates, 5, 200, defaultMemoryQualityConfig.maxCausalCandidates)),
+    causalCandidateStaleTicks: Math.round(clampNumber(config.causalCandidateStaleTicks, 1, 10000, defaultMemoryQualityConfig.causalCandidateStaleTicks)),
+    relationshipWriteCooldown: Math.round(clampNumber(config.relationshipWriteCooldown, 0, 100000, defaultMemoryQualityConfig.relationshipWriteCooldown))
+  };
+}
+
+function numericStats(values = []) {
+  const numbers = values.map(value => Number(value)).filter(Number.isFinite);
+  if (!numbers.length) return { mean: 0, variance: 0, std: 0 };
+  const mean = numbers.reduce((sum, value) => sum + value, 0) / numbers.length;
+  const variance = numbers.reduce((sum, value) => sum + (value - mean) ** 2, 0) / numbers.length;
+  return {
+    mean,
+    variance,
+    std: Math.sqrt(variance)
+  };
+}
+
+function habitRule(kind = "routine") {
+  return habitTemporalRules[kind] || habitTemporalRules.routine;
+}
+
+function habitCandidateFromEvent(agent = {}, event = {}, kind = routineKind(event), includeEvent = true) {
+  agent.memoryProfile ||= { habits: {}, lastConsolidatedAt: 0 };
+  agent.memoryProfile.habitCandidates ||= {};
+  const key = `habit:${kind}`;
+  const existing = agent.memoryProfile.habitCandidates[key] || {};
+  const timestamps = Array.isArray(existing.timestamps) ? existing.timestamps.map(Number).filter(Number.isFinite) : [];
+  const clock = Number(event.clock || 0);
+  if (includeEvent && Number.isFinite(clock)) timestamps.push(clock);
+  return {
+    eventType: kind,
+    timestamps: timestamps.slice(-30)
+  };
+}
+
+function habitTemporalValidator(candidate = {}, kind = candidate.eventType || "routine") {
+  const rule = habitRule(kind);
+  const timestamps = (Array.isArray(candidate.timestamps) ? candidate.timestamps : [])
+    .map(Number)
+    .filter(Number.isFinite)
+    .sort((a, b) => a - b);
+  const intervals = timestamps.slice(1).map((time, index) => time - timestamps[index]);
+  const intervalStats = numericStats(intervals);
+  const timeOfDayStats = numericStats(timestamps.map(time => ((time % 1440) + 1440) % 1440));
+  const expectedInterval = Number(rule.expectedInterval || 1440);
+  const tolerance = Number(rule.tolerance || 180);
+  const intervalDrift = intervals.length
+    ? Math.abs(intervalStats.mean - expectedInterval) + intervalStats.std
+    : Infinity;
+  const stableByInterval = intervals.length >= 1 && intervalDrift <= tolerance;
+  const stableByTimeWindow = timestamps.length >= 2 && timeOfDayStats.std <= tolerance;
+  const repeatCount = timestamps.length;
+  const stable = repeatCount >= Number(rule.minRepeats || 5) && (stableByInterval || stableByTimeWindow);
+  return {
+    eventType: kind,
+    repeatCount,
+    timestamps,
+    intervalMean: Number(intervalStats.mean.toFixed(3)),
+    intervalVariance: Number(intervalStats.variance.toFixed(3)),
+    intervalStd: Number(intervalStats.std.toFixed(3)),
+    timeOfDayStd: Number(timeOfDayStats.std.toFixed(3)),
+    expectedInterval,
+    tolerance,
+    stable
+  };
+}
+
+function habitPersonalRelevance(event = {}) {
+  const text = eventTextForGate(event);
+  let score = 0.35;
+  if (event.place || event.locationId || event.targetAgentId) score += 0.2;
+  if (rawDeltaMagnitude(event.emotionDelta, 0) >= 12) score += 0.18;
+  if (rawDeltaMagnitude(event.goalDelta, 0) >= 8 || Number(event.goalImpact || 0) >= 20) score += 0.18;
+  if (/stress|lonely|friend|family|promise|conflict|help|support|tavern|bar|studio|write|writing|goal|special/i.test(text)) score += 0.22;
+  return clampNumber(score, 0.1, 1, 0.35);
+}
+
+function habitStabilityForEvent(agent = {}, event = {}, kind = routineKind(event)) {
+  const candidate = habitCandidateFromEvent(agent, event, kind, true);
+  const validation = habitTemporalValidator(candidate, kind);
+  const rule = habitRule(kind);
+  const frequencyScore = clampNumber(validation.repeatCount / Number(rule.minRepeats || 5), 0, 1, 0);
+  const intervalStd = Number.isFinite(Number(validation.intervalStd)) ? Number(validation.intervalStd) : Infinity;
+  const timeOfDayStd = Number.isFinite(Number(validation.timeOfDayStd)) ? Number(validation.timeOfDayStd) : Infinity;
+  const drift = Math.min(intervalStd, timeOfDayStd);
+  const stabilityScore = validation.stable ? clampNumber(1 - Math.min(drift, rule.tolerance) / Math.max(rule.tolerance * 2, 1), 0.5, 1, 1) : 0;
+  const personalRelevance = habitPersonalRelevance(event);
+  const score = frequencyScore * stabilityScore * personalRelevance;
+  return {
+    candidate,
+    validation,
+    frequencyScore: Number(frequencyScore.toFixed(3)),
+    stabilityScore: Number(stabilityScore.toFixed(3)),
+    personalRelevance: Number(personalRelevance.toFixed(3)),
+    score: Number(score.toFixed(3)),
+    stable: validation.stable && score >= 0.3
+  };
+}
+
+function storeHabitCandidate(agent = {}, event = {}, kind = routineKind(event)) {
+  agent.memoryProfile ||= { habits: {}, lastConsolidatedAt: 0 };
+  agent.memoryProfile.habitCandidates ||= {};
+  const key = `habit:${kind}`;
+  const candidate = habitCandidateFromEvent(agent, event, kind, true);
+  const validation = habitTemporalValidator(candidate, kind);
+  agent.memoryProfile.habitCandidates[key] = {
+    ...candidate,
+    intervalMean: validation.intervalMean,
+    intervalVariance: validation.intervalVariance,
+    lastSeenAt: Number(event.clock || 0)
+  };
+  return { ...candidate, ...validation };
+}
+
+function eventTypeForExpectation(event = {}) {
+  return String(event.actionType || event.localAction || event.type || event.interruption?.type || "event").slice(0, 80);
+}
+
+function inferExpectation(event = {}) {
+  const eventType = eventTypeForExpectation(event);
+  const text = eventTextForGate(event);
+  if (/contact_familiar|ask_help|social_support|relationship_support|help|support|care/.test(`${eventType} ${text}`)) {
+    return { eventType, expectedOutcome: "response", probability: 0.8, source: "rule" };
+  }
+  if (/medical|clinic|health_rest|seek_care/.test(`${eventType} ${text}`)) {
+    return { eventType, expectedOutcome: "stabilize", probability: 0.75, source: "rule" };
+  }
+  if (/work|study|responsibility/.test(`${eventType} ${text}`)) {
+    return { eventType, expectedOutcome: "progress", probability: 0.65, source: "rule" };
+  }
+  return null;
+}
+
+function normalizeOutcome(value, fallback = 0.5) {
+  if (typeof value === "boolean") return value ? 1 : 0;
+  if (Number.isFinite(Number(value))) return normalizeRatio(value, fallback);
+  const text = String(value || "").toLowerCase();
+  if (!text) return fallback;
+  if (/reject|refuse|fail|failed|ignored|no_response|denied|worse|lost|拒绝|失败|无人回应/.test(text)) return 0;
+  if (/success|accepted|responded|helped|recovered|stabilized|progress|完成|成功|回应|帮助|恢复/.test(text)) return 1;
+  return fallback;
+}
+
+function expectedEmotionVectorFromEvent(event = {}) {
+  const vector = event.expectedEmotionVector || event.expectedEmotion || event.beforeActionExpectation?.emotionVector || null;
+  return vector && typeof vector === "object" ? vector : null;
+}
+
+function actualEmotionVectorFromEvent(agent = {}, event = {}) {
+  const explicit = event.actualEmotionVector || event.actualEmotion || event.afterEmotionVector || null;
+  if (explicit && typeof explicit === "object") return explicit;
+  if (agent.emotionVector && typeof agent.emotionVector === "object") return agent.emotionVector;
+  return null;
+}
+
+function emotionVectorDistance(expected = null, actual = null) {
+  if (!expected || !actual) return 0;
+  const keys = uniqueStrings([Object.keys(expected), Object.keys(actual)], 20);
+  if (!keys.length) return 0;
+  const sum = keys.reduce((total, key) => {
+    const delta = Number(expected[key] || 0) - Number(actual[key] || 0);
+    return total + delta ** 2;
+  }, 0);
+  return Number(clampNumber(Math.sqrt(sum / keys.length) / 100, 0, 1, 0).toFixed(3));
+}
+
+function upsertExpectationMemory(agent = {}, expectation = {}, clock = 0) {
+  ensureReflectionLearning(agent);
+  if (!expectation?.eventType) return null;
+  const item = {
+    eventType: expectation.eventType,
+    expectedOutcome: compactString(expectation.expectedOutcome || "expected outcome", "", 80),
+    probability: normalizeRatio(expectation.probability, 0.5),
+    source: expectation.source || "rule",
+    lastConfirmed: clock
+  };
+  const existing = agent.expectationMemory.find(entry => entry.eventType === item.eventType && entry.expectedOutcome === item.expectedOutcome);
+  if (existing) {
+    existing.probability = Number((Number(existing.probability || 0.5) * 0.8 + item.probability * 0.2).toFixed(3));
+    existing.lastConfirmed = clock;
+    existing.source = item.source;
+    return existing;
+  }
+  agent.expectationMemory.unshift(item);
+  agent.expectationMemory = agent.expectationMemory.slice(0, 40);
+  return item;
+}
+
+function decayInvalidatedBelief(agent = {}, eventType = "", predictionError = 0) {
+  ensureReflectionLearning(agent);
+  const validation = agent.beliefValidation[eventType];
+  if (!validation || predictionError > 0.25) return null;
+  validation.confidence = Number(clampNumber(Number(validation.confidence || 0) * 0.8, 0, 1, 0).toFixed(3));
+  validation.lastChecked = Date.now();
+  if (agent.decisionBias[eventType] != null) {
+    agent.decisionBias[eventType] = validation.confidence < 0.2
+      ? 0
+      : Number((Number(agent.decisionBias[eventType] || 0) * 0.8).toFixed(3));
+  }
+  return validation;
+}
+
+function predictionErrorEngine(world = {}, agent = {}, event = {}) {
+  ensureReflectionLearning(agent);
+  const clock = Number(event.clock || world.clock || 0);
+  const eventType = eventTypeForExpectation(event);
+  const explicitExpectation = event.expectedOutcome || event.expectedProbability != null
+    ? {
+      eventType,
+      expectedOutcome: event.expectedOutcome || "expected outcome",
+      probability: event.expectedProbability ?? event.expectedOutcomeProbability ?? 0.5,
+      source: "event"
+    }
+    : null;
+  const expectation = explicitExpectation
+    || agent.expectationMemory.find(item => item.eventType === eventType)
+    || inferExpectation(event);
+  const storedExpectation = expectation ? upsertExpectationMemory(agent, expectation, clock) : null;
+  const actualOutcome = normalizeOutcome(event.actualOutcome ?? event.outcome ?? event.result ?? event.summary, 0.5);
+  const ruleError = storedExpectation ? Math.abs(Number(storedExpectation.probability || 0.5) - actualOutcome) : 0;
+  const emotionError = emotionVectorDistance(expectedEmotionVectorFromEvent(event), actualEmotionVectorFromEvent(agent, event));
+  const predictionError = Number(Math.max(ruleError, emotionError).toFixed(3));
+  decayInvalidatedBelief(agent, eventType, predictionError);
+  const config = reflectionLearningConfig(world);
+  const emotionDelta = normalizedDeltaValue(event.emotionDelta, 0);
+  const result = {
+    eventType,
+    layer: ruleError > 0 ? "rule" : emotionError > 0 ? "vector" : "none",
+    ruleError: Number(ruleError.toFixed(3)),
+    emotionError,
+    predictionError,
+    expected: storedExpectation ? {
+      eventType: storedExpectation.eventType,
+      expectedOutcome: storedExpectation.expectedOutcome,
+      probability: storedExpectation.probability,
+      source: storedExpectation.source
+    } : null,
+    actualOutcome,
+    llmReflectionEligible: false,
+    llmReason: ""
+  };
+  result.llmReflectionEligible = predictionError > config.predictionErrorThreshold || emotionDelta > config.emotionDeltaThreshold;
+  result.llmReason = result.llmReflectionEligible ? "local threshold crossed; LLM attribution may be requested by caller" : "";
+  event.predictionError = predictionError;
+  event.predictionErrorDetail = result;
+  return result;
+}
+
+function reflectionImportanceWeights(agent = {}) {
+  const profile = agent.cognitiveProfile || {};
+  return {
+    novelty: 1 + normalizeRatio(profile.curiosity, 0.5),
+    emotion: 1 + normalizeRatio(profile.empathy ?? agent.identityCore?.socialSensitivity, 0.5),
+    relationship: 1 + normalizeRatio(profile.socialDrive, 0.5),
+    goal: 1 + normalizeRatio(profile.ambition, 0.5),
+    prediction: 1 + normalizeRatio(profile.routinePreference ?? profile.patience, 0.5)
+  };
+}
+
+function reflectionImportanceForEvent(world = {}, agent = {}, event = {}, prediction = event.predictionErrorDetail || {}) {
+  const signals = eventSignificanceSignals(event);
+  const weights = reflectionImportanceWeights(agent);
+  const dimensions = {
+    novelty: signals.novelty,
+    emotion: signals.emotionChange,
+    relationship: signals.relationshipChange,
+    goal: signals.goalChange,
+    prediction: Number(prediction.predictionError ?? event.predictionError ?? 0)
+  };
+  const entries = Object.entries(dimensions);
+  const weightSum = entries.reduce((sum, [key]) => sum + Number(weights[key] || 1), 0) || 1;
+  const logScore = entries.reduce((sum, [key, value]) => sum + Number(weights[key] || 1) * Math.log(Math.max(0.05, Number(value || 0))), 0) / weightSum;
+  const importance = Number(clampNumber(Math.exp(logScore), 0, 1, 0).toFixed(3));
+  return {
+    importance,
+    dimensions,
+    weights,
+    formula: "normalized geometric mean of Novelty, EmotionImpact, RelationshipImpact, GoalImpact, PredictionError"
+  };
+}
+
+function updateDecisionBiasFromReflection(agent = {}, eventType = "", deltaBias = 0) {
+  ensureReflectionLearning(agent);
+  const oldBias = Number(agent.decisionBias[eventType] || 0);
+  const next = oldBias * 0.8 + Number(deltaBias || 0) * 0.2;
+  agent.decisionBias[eventType] = Number(clampNumber(next, -1, 1, 0).toFixed(3));
+  return agent.decisionBias[eventType];
+}
+
+function reflectionTextForEvent(event = {}, prediction = {}, importance = {}) {
+  const eventType = prediction.eventType || eventTypeForExpectation(event);
+  if (prediction.predictionError >= 0.7) {
+    return {
+      observation: `我发现${eventType}的结果和原先预期不一致。`,
+      interpretation: "我不能只按过去的成功率判断这类行动。",
+      beliefChange: `我需要重新评估${eventType}的可靠性。`
+    };
+  }
+  return {
+    observation: `我注意到${eventType}改变了我的判断。`,
+    interpretation: "这件事对之后的选择有参考价值。",
+    beliefChange: `我会把${eventType}的结果作为之后判断的参考。`
+  };
+}
+
+function applyReflectionLearning(world = {}, agent = {}, event = {}) {
+  ensureReflectionLearning(agent);
+  const prediction = event.predictionErrorDetail || predictionErrorEngine(world, agent, event);
+  const importance = reflectionImportanceForEvent(world, agent, event, prediction);
+  const config = reflectionLearningConfig(world);
+  const emotionDelta = normalizedDeltaValue(event.emotionDelta, 0);
+  const majorRelationship = relationshipDeltaMagnitude(event.relationshipDelta || event.relationDelta || {}) > 0.25;
+  const survival = Boolean(event.interruption?.canOverridePlan && ["health", "safety", "hunger"].includes(event.interruption.type));
+  const trigger = importance.importance > config.importanceThreshold
+    || prediction.predictionError > config.predictionErrorThreshold
+    || emotionDelta > config.emotionDeltaThreshold
+    || majorRelationship
+    || survival;
+  event.reflectionLearning = {
+    importance,
+    predictionError: prediction,
+    llmReflectionEligible: trigger && (importance.importance > config.importanceThreshold || prediction.predictionError > config.predictionErrorThreshold || emotionDelta > config.emotionDeltaThreshold),
+    triggered: trigger
+  };
+  if (!trigger) return null;
+  const text = reflectionTextForEvent(event, prediction, importance);
+  const confidence = clampNumber(Math.max(importance.importance, prediction.predictionError), 0.1, 0.95, 0.5);
+  const memory = {
+    id: `reflection_${agent.id}_${event.id || event.clock || Date.now()}`,
+    eventId: event.id || "",
+    eventType: prediction.eventType || eventTypeForExpectation(event),
+    observation: text.observation,
+    interpretation: text.interpretation,
+    beliefChange: text.beliefChange,
+    confidence: Number(confidence.toFixed(3)),
+    predictionError: prediction.predictionError,
+    importance: importance.importance,
+    source: "adaptive-reflection",
+    at: Number(world.clock || event.clock || 0)
+  };
+  agent.reflectionMemory.unshift(memory);
+  agent.reflectionMemory = agent.reflectionMemory.slice(0, 40);
+  agent.beliefValidation[memory.eventType] = {
+    belief: memory.beliefChange,
+    confidence: memory.confidence,
+    sourceEvent: memory.eventId,
+    lastChecked: memory.at
+  };
+  updateDecisionBiasFromReflection(agent, memory.eventType, prediction.actualOutcome < Number(prediction.expected?.probability ?? 0.5) ? -confidence : confidence);
+  appendSemanticMemory(agent, {
+    type: "belief",
+    text: memory.beliefChange,
+    meaning: memory.interpretation,
+    at: memory.at,
+    importance: clampNumber(Math.ceil(memory.importance * 5), 2, 5, 3),
+    strength: clampNumber(45 + memory.confidence * 45, 45, 92, 65),
+    confidence: memory.confidence,
+    source: "adaptive-reflection",
+    evidenceIds: [memory.eventId].filter(Boolean),
+    sourceEvents: [memory.eventId].filter(Boolean),
+    tags: ["reflection", memory.eventType],
+    dedupeKey: `reflection-belief:${agent.id}:${memory.eventType}`
+  });
+  syncLongTermMemoryViews(agent);
+  agent.reflectionLearningState.lastRunClock = Number(world.clock || event.clock || 0);
+  return memory;
+}
+
+function reflectionLearningCandidate(world = {}, agent = {}) {
+  const seen = new Set();
+  const events = [
+    ...(Array.isArray(agent.eventLog) ? agent.eventLog : []),
+    ...(Array.isArray(world.eventLog) ? world.eventLog.filter(event => event.agentId === agent.id) : [])
+  ]
+    .filter(event => event && !seen.has(event.id) && seen.add(event.id))
+    .slice(0, 20)
+    .map(event => {
+      const prediction = event.predictionErrorDetail || predictionErrorEngine(world, agent, event);
+      const importance = reflectionImportanceForEvent(world, agent, event, prediction);
+      const emotionDelta = normalizedDeltaValue(event.emotionDelta, 0);
+      const score = Math.max(importance.importance, prediction.predictionError, emotionDelta);
+      return { event, prediction, importance, emotionDelta, score };
+    })
+    .sort((a, b) => Number(b.score || 0) - Number(a.score || 0));
+  return events[0] || null;
+}
+
+function causalPotentialForEvent(event = {}, model = {}, eventSignificance = {}) {
+  const graphStrength = normalizeRatio(event.causalGraph?.strength, 0);
+  const explicit = normalizeRatio(event.causalPotential, 0);
+  const stateChange = Math.max(
+    normalizedDeltaValue(event.needDelta, 0),
+    normalizedDeltaValue(event.emotionDelta, 0),
+    normalizedDeltaValue(event.goalDelta, 0),
+    eventSignificance.healthChange || 0
+  );
+  const causalHint = /because|caused|led to|triggered|learn|realize|result|therefore/i.test(eventTextForGate(event)) ? 0.55 : 0;
+  return Number(clampNumber(Math.max(graphStrength, explicit, stateChange, causalHint, Number(model.importance || 0) * 0.6), 0, 1, 0).toFixed(3));
+}
+
+function relationshipMemoryEligible(event = {}, eventSignificance = {}) {
+  if (!isMeaningfulRelationshipEvent(event)) return false;
+  const text = eventTextForGate(event);
+  if (/help|assist|care|save|rescue|support|cooperate|together|promise|apolog|forgive|conflict|argue|fight|betray|trust/i.test(text)) return true;
+  const delta = relationshipDeltaMagnitude(event.relationshipDelta || event.relationDelta || {});
+  const impact = normalizePercentSignal(event.relationshipImpact || event.relationImpact, 0);
+  return delta > 0.1 || impact > 0.1 || Number(eventSignificance.relationshipChange || 0) > 0.1 || normalizedDeltaValue(event.emotionDelta, 0) >= 0.18;
+}
+
+function memoryValueScoreForEvent(event = {}, model = {}, eventSignificance = {}) {
+  const eventImpact = Number(model.dimensions?.V_event ?? eventSignificance.novelty ?? 0);
+  const emotionDelta = Math.max(
+    normalizedDeltaValue(event.emotionDelta, 0),
+    event.category === "routine" ? 0 : Number(model.dimensions?.V_emotion || 0)
+  );
+  const novelty = Number(eventSignificance.novelty || 0);
+  const relationshipImpact = relationshipMemoryEligible(event, eventSignificance)
+    ? Math.max(normalizeRatio(relationshipDeltaMagnitude(event.relationshipDelta || event.relationDelta || {}), 0), Number(model.dimensions?.V_relation || 0), 0.2)
+    : Number(eventSignificance.relationshipChange || 0);
+  const causalPotential = causalPotentialForEvent(event, model, eventSignificance);
+  const score = eventImpact * emotionDelta * novelty * relationshipImpact * causalPotential;
+  return {
+    score: Number(clampNumber(score, 0, 1, 0).toFixed(3)),
+    dimensions: {
+      eventImpact: Number(clampNumber(eventImpact, 0, 1, 0).toFixed(3)),
+      emotionDelta: Number(clampNumber(emotionDelta, 0, 1, 0).toFixed(3)),
+      novelty: Number(clampNumber(novelty, 0, 1, 0).toFixed(3)),
+      relationshipImpact: Number(clampNumber(relationshipImpact, 0, 1, 0).toFixed(3)),
+      causalPotential
+    },
+    formula: "eventImpact * emotionDelta * novelty * relationshipImpact * causalPotential"
+  };
+}
+
+function isCrisisEvent(event = {}) {
+  const text = eventTextForGate(event);
+  if (/death|dead|fatal|disaster|crisis|danger|unsafe|injury|ill|sick|risk/i.test(text)) return true;
+  return Boolean(event.interruption?.canOverridePlan && ["health", "safety"].includes(event.interruption.type));
+}
+
+function isLearningEvent(event = {}, memoryValue = {}, eventSignificance = {}) {
+  const text = eventTextForGate(event);
+  if (/learn|realize|understand|belief|value|lesson|because|therefore/i.test(text)) return true;
+  return Number(memoryValue.dimensions?.causalPotential || 0) >= 0.45
+    && (Number(eventSignificance.score || 0) >= 0.35 || Number(memoryValue.score || 0) >= 0.04);
+}
+
+function eventCategoryForMemory(event = {}, gateInputs = {}) {
+  const { eventSignificance = {}, memoryValue = {} } = gateInputs;
+  if (event.category === "routine") return "routine";
+  if (relationshipMemoryEligible(event, eventSignificance)) return "relationship";
+  if (isCrisisEvent(event)) return "crisis";
+  if (isLearningEvent(event, memoryValue, eventSignificance)) return "learning";
+  if (Number(memoryValue.score || 0) >= Number(gateInputs.threshold || 0.08) || Number(eventSignificance.score || 0) >= Number(gateInputs.significanceMinimum || 0.45)) return "experience";
+  return "routine";
+}
+
+function routineHabitStored(agent = {}, kind = "routine") {
+  const dedupeKey = `habit:${kind}`;
+  const semantic = Array.isArray(agent.semanticMemory?.habit) ? agent.semanticMemory.habit : [];
+  const structured = Array.isArray(agent.structuredMemory?.habit) ? agent.structuredMemory.habit : [];
+  return semantic.some(item => item?.dedupeKey === dedupeKey || item?.compressionKey === dedupeKey || item?.trigger === kind || item?.tags?.includes(kind))
+    || structured.some(item => item?.trigger === kind || item?.tags?.includes(kind) || item?.text === habitText(agent, kind));
+}
+
+function dominantCausalEffect(event = {}) {
+  const needDelta = event.needDelta && typeof event.needDelta === "object" ? event.needDelta : {};
+  const emotionDelta = event.emotionDelta && typeof event.emotionDelta === "object" ? event.emotionDelta : {};
+  const candidates = [];
+  Object.entries(needDelta).forEach(([key, value]) => {
+    const number = Number(value || 0);
+    if (number) candidates.push({ key: `${key}_${number < 0 ? "down" : "up"}`, magnitude: Math.abs(number) });
+  });
+  Object.entries(emotionDelta).forEach(([key, value]) => {
+    const number = Number(value || 0);
+    if (number) candidates.push({ key: `${key}_${number < 0 ? "down" : "up"}`, magnitude: Math.abs(number) });
+  });
+  if (event.interruption?.type) candidates.push({ key: `${event.interruption.type}_pressure`, magnitude: Number(event.interruption.priority || 0) });
+  if (relationshipDeltaMagnitude(event.relationshipDelta || event.relationDelta || {}) > 0) {
+    candidates.push({ key: "relationship_changed", magnitude: relationshipDeltaMagnitude(event.relationshipDelta || event.relationDelta || {}) });
+  }
+  candidates.sort((a, b) => b.magnitude - a.magnitude);
+  return candidates[0]?.key || "";
+}
+
+function causalTriggerForEvent(event = {}) {
+  if (event.category === "routine") return routineKind(event);
+  return String(event.localAction || event.actionType || event.type || event.interruption?.type || "event").slice(0, 80);
+}
+
+function trimCausalCandidatePool(world = {}, agent = {}, quality = memoryQualityConfig(world)) {
+  if (!Array.isArray(agent.causalCandidates)) return [];
+  const clock = Number(world.clock || 0);
+  const staleTicks = Number(quality.causalCandidateStaleTicks || 50);
+  agent.causalCandidates = agent.causalCandidates
+    .filter(candidate => {
+      const lastSeen = Number(candidate.lastSeen ?? candidate.lastSeenAt ?? 0);
+      const stale = clock - lastSeen > staleTicks && Number(candidate.confidence || 0) < 0.3;
+      return !stale;
+    })
+    .map(candidate => {
+      const lastSeen = Number(candidate.lastSeen ?? candidate.lastSeenAt ?? clock);
+      const recencyFactor = 1 / (1 + Math.max(0, clock - lastSeen) / Math.max(staleTicks, 1));
+      const repeatCount = Number(candidate.repeatCount || candidate.count || 1);
+      const score = Number(candidate.confidence || 0) * Math.log1p(repeatCount) * recencyFactor;
+      return { ...candidate, score: Number(score.toFixed(3)) };
+    })
+    .sort((a, b) => Number(b.score || 0) - Number(a.score || 0))
+    .slice(0, quality.maxCausalCandidates);
+  return agent.causalCandidates;
+}
+
+function upsertCausalCandidate(world = {}, agent = {}, event = {}, gate = {}) {
+  if (!agent?.id || !event?.id) return null;
+  const quality = memoryQualityConfig(world);
+  const cause = causalTriggerForEvent(event);
+  const effect = dominantCausalEffect(event);
+  const confidence = Math.max(
+    Number(gate.memoryValue?.dimensions?.causalPotential || 0),
+    normalizedDeltaValue(event.needDelta, 0),
+    normalizedDeltaValue(event.emotionDelta, 0),
+    normalizeRatio(event.causalGraph?.strength, 0)
+  );
+  if (!cause || !effect || confidence < quality.causalCandidateThreshold) return null;
+  if (!Array.isArray(agent.causalCandidates)) agent.causalCandidates = [];
+  const key = `${cause}->${effect}`;
+  let item = agent.causalCandidates.find(candidate => candidate.key === key);
+  const clock = Number(event.clock || world.clock || 0);
+  if (!item) {
+    item = {
+      id: `cc_${agent.id}_${key.replace(/[^a-zA-Z0-9_]+/g, "_").slice(0, 80)}`,
+      key,
+      A: cause,
+      B: effect,
+      trigger: cause,
+      effect,
+      confidence: 0,
+      count: 0,
+      repeatCount: 0,
+      firstSeenAt: clock,
+      lastSeenAt: clock,
+      lastSeen: clock,
+      sourceEvents: []
+    };
+    agent.causalCandidates.unshift(item);
+  }
+  item.count = Number(item.count || 0) + 1;
+  item.repeatCount = item.count;
+  item.lastSeenAt = clock;
+  item.lastSeen = clock;
+  item.confidence = Number(clampNumber(Math.max(Number(item.confidence || 0), confidence) + Math.min(0.08, confidence * 0.08), 0, 0.95, confidence).toFixed(3));
+  item.sourceEvents = uniqueStrings([item.sourceEvents, event.id], 8);
+  trimCausalCandidatePool(world, agent, quality);
+  event.causalCandidate = {
+    A: item.A,
+    B: item.B,
+    trigger: item.trigger,
+    effect: item.effect,
+    confidence: item.confidence,
+    count: item.count,
+    repeatCount: item.repeatCount
+  };
+  return item;
+}
+
 function memoryGate(world = {}, agent = {}, event = {}) {
   ensureMemory(agent);
   const routine = event.category === "routine";
   const kind = routineKind(event);
   const currentHabit = agent.memoryProfile?.habits?.[`habit:${kind}`] || {};
   const routineCount = routine ? Number(currentHabit.count || 0) + 1 : 0;
+  const habitStability = routine ? habitStabilityForEvent(agent, event, kind) : null;
   const text = eventTextForGate(event);
   const model = multiplicativeMemoryImportance(world, agent, event);
   const baseThreshold = memoryImportanceThreshold(world);
+  const quality = memoryQualityConfig(world);
   const threshold = !routine && model.emotionMemoryWeight?.label === "ordinary" ? Math.min(0.95, baseThreshold * 1.15) : baseThreshold;
   const eventSignificance = eventSignificanceSignals(event);
   const significanceMinimum = normalizeRatio(world.config?.memoryEventSignificanceMinimum ?? world.memoryEventSignificanceMinimum, 0.45);
+  const memoryValue = memoryValueScoreForEvent(event, model, eventSignificance);
+  const memoryValueThreshold = quality.memoryValueThreshold;
+  const relationshipEligible = relationshipMemoryEligible(event, eventSignificance);
+  const eventCategory = eventCategoryForMemory(event, {
+    eventSignificance,
+    memoryValue,
+    threshold: memoryValueThreshold,
+    significanceMinimum
+  });
   let importance = model.importance;
   let memoryType = "episodic";
   if (routine) {
-    importance = routineCount >= 3 ? Math.max(threshold, Math.min(0.28, 0.14 + routineCount * 0.035)) : Math.min(threshold * 0.66, importance);
-    memoryType = routineCount >= 3 ? "habit" : "";
-  } else if (isMeaningfulRelationshipEvent(event) && (model.dimensions.V_relation >= 0.35 || eventSignificance.relationshipChange >= 0.1 || eventSignificance.emotionChange >= 0.3)) {
+    const alreadyStored = routineHabitStored(agent, kind);
+    const stableHabit = Boolean(habitStability?.stable) && routineCount >= quality.routineHabitThreshold;
+    importance = stableHabit && !alreadyStored
+      ? Math.max(threshold, Math.min(0.32, 0.12 + routineCount * 0.025))
+      : Math.min(threshold * 0.66, importance);
+    memoryType = stableHabit && !alreadyStored ? "habit" : "";
+  } else if (relationshipEligible) {
     memoryType = "social";
   } else if (event.interruption?.canOverridePlan && ["health", "safety"].includes(event.interruption.type)) {
-    memoryType = "belief";
-  } else if (importance >= 0.35 || /belief|value|realize|learned|important/i.test(text)) {
+    memoryType = "episodic";
+  } else if (eventCategory === "learning" || importance >= 0.35 || /belief|value|realize|learned|important/i.test(text)) {
     memoryType = "belief";
   }
 
+  const routineShouldRemember = routine && Boolean(habitStability?.stable) && routineCount >= quality.routineHabitThreshold && !routineHabitStored(agent, kind);
+  const crisisShouldRemember = eventCategory === "crisis";
+  const relationshipShouldRemember = eventCategory === "relationship" && relationshipEligible;
+  const learningShouldRemember = eventCategory === "learning" && (memoryValue.score >= memoryValueThreshold || eventSignificance.score >= 0.35 || isLearningEvent(event, memoryValue, eventSignificance));
+  const experienceShouldRemember = eventCategory === "experience" && memoryValue.score >= memoryValueThreshold;
   const shouldRemember = routine
-    ? routineCount >= 3
-    : (!isBlockedMemoryText(event.summary || "") && (importance >= threshold || eventSignificance.score >= significanceMinimum));
+    ? routineShouldRemember
+    : (!isBlockedMemoryText(event.summary || "") && (crisisShouldRemember || relationshipShouldRemember || learningShouldRemember || experienceShouldRemember));
   return {
     shouldRemember,
     importance: Number(clampNumber(importance, 0, 1, 0).toFixed(3)),
     memoryType,
+    eventCategory,
+    memoryValueScore: memoryValue.score,
+    memoryValue,
     eventSignificance,
     significanceMinimum,
     routine,
     routineKind: kind,
     routineCount,
+    routineHabitThreshold: quality.routineHabitThreshold,
+    routineHabitStored: routine ? routineHabitStored(agent, kind) : false,
+    habitTemporal: habitStability?.validation || null,
+    habitFrequencyScore: habitStability?.frequencyScore || 0,
+    habitStabilityScore: habitStability?.stabilityScore || 0,
+    habitPersonalRelevance: habitStability?.personalRelevance || 0,
+    habitScore: habitStability?.score || 0,
     dimensions: model.dimensions,
     weights: model.weights,
     contextFactor: model.contextFactor,
     timeFactor: model.timeFactor,
+    sourceFactor: model.sourceFactor,
     emotionValence: model.emotionValence,
     emotionMemoryWeight: model.emotionMemoryWeight,
     threshold,
-    formula: "((V_event + epsilon)^w_event * (V_emotion + epsilon)^w_emotion * (V_relation + epsilon)^w_relation * (V_goal + epsilon)^w_goal) * contextFactor * timeFactor",
-    personalityImpact: importance >= 0.45,
+    formula: "((V_event + epsilon)^w_event * (V_emotion + epsilon)^w_emotion * (V_relation + epsilon)^w_relation * (V_goal + epsilon)^w_goal) * contextFactor * timeFactor * sourceFactor",
+    personalityImpact: eventCategory !== "routine" && (importance >= 0.45 || memoryValue.score >= Math.max(0.18, memoryValueThreshold * 2)),
     reason: shouldRemember
-      ? routine ? "repeated routine became habit" : "event has future behavioral impact"
+      ? routine ? "routine pattern crossed habit threshold" : `${eventCategory} event changed future interpretation`
       : "ordinary event stays in EventLog only"
   };
 }
@@ -1523,13 +2245,18 @@ function updateHabit(agent, event = {}, gate = null) {
   const key = `habit:${kind}`;
   const profile = agent.memoryProfile;
   profile.habits ||= {};
+  const candidate = storeHabitCandidate(agent, event, kind);
   const current = profile.habits[key] || { count: 0, firstSeenAt: event.clock || 0, lastSeenAt: 0 };
   current.count = Number(current.count || 0) + 1;
   current.lastSeenAt = event.clock || 0;
   current.kind = kind;
   current.text = habitText(agent, kind);
+  current.timestamps = candidate.timestamps;
+  current.intervalMean = candidate.intervalMean;
+  current.intervalVariance = candidate.intervalVariance;
   profile.habits[key] = current;
-  if (!gate?.shouldRemember) return null;
+  const stable = gate?.habitTemporal?.stable || candidate.stable;
+  if (!gate?.shouldRemember || !stable) return null;
   return appendSemanticMemory(agent, {
     type: "habit",
     text: current.text,
@@ -1537,12 +2264,101 @@ function updateHabit(agent, event = {}, gate = null) {
     at: event.clock || 0,
     importance: current.count >= 4 ? 3 : 2,
     strength: clampNumber(35 + current.count * 5, 35, 85, 45),
+    trigger: kind,
+    action: current.text,
+    probability: clampNumber(gate.habitScore || 0.45, 0.35, 0.95, 0.45),
     source: event.causalGraph?.chainId ? "causal-graph" : "memory-consolidator",
     sourceCausalChain: event.causalGraph?.chainId || "",
     evidenceIds: [event.id],
+    sourceEvents: [event.id],
     tags: ["habit", kind],
-    dedupeKey: key
+    dedupeKey: key,
+    count: current.count,
+    firstTime: current.firstSeenAt,
+    lastTime: current.lastSeenAt
   });
+}
+
+function habitMemoryText(memory = {}) {
+  return String([
+    memory.text,
+    memory.meaning,
+    memory.habit,
+    memory.action,
+    memory.trigger,
+    memory.compressionKey,
+    memory.dedupeKey,
+    ...(Array.isArray(memory.tags) ? memory.tags : [])
+  ].filter(Boolean).join(" ")).toLowerCase();
+}
+
+function hasPersonalHabitAnchor(memory = {}) {
+  const text = habitMemoryText(memory);
+  return Boolean(memory.targetAgentId || memory.target || memory.place || memory.locationId)
+    || (Array.isArray(memory.tags) && memory.tags.length > 2)
+    || /stress|lonely|friend|family|promise|conflict|help|support|tavern|bar|studio|workshop|write|writing|goal|special|clinic|crisis/i.test(text);
+}
+
+function habitImportanceScore(memory = {}) {
+  const count = Math.max(Number(memory.count || 0), Array.isArray(memory.sourceEvents) ? memory.sourceEvents.length : 0, Array.isArray(memory.evidenceIds) ? memory.evidenceIds.length : 0);
+  const trigger = String(memory.trigger || memory.tags?.[1] || "").toLowerCase();
+  const generic = genericRoutineHabitKinds.has(trigger) || genericRoutineHabitKinds.has(String(memory.tags?.[1] || "").toLowerCase());
+  let score = 0;
+  if (count >= 5) score += 0.45;
+  else score += Math.min(0.25, count * 0.05);
+  if (hasPersonalHabitAnchor(memory)) score += 0.55;
+  if (!generic) score += 0.2;
+  score += normalizeRatio(memory.importance, 0.2) * 0.15;
+  return Number(clampNumber(score, 0, 1, 0).toFixed(3));
+}
+
+function cleanHabitArray(items = [], report = { removed: 0, protected: 0, merged: 0 }) {
+  const byKey = new Map();
+  const output = [];
+  (Array.isArray(items) ? items : []).forEach(item => {
+    if (!item || typeof item !== "object") return;
+    const text = habitMemoryText(item);
+    const trigger = String(item.trigger || item.tags?.[1] || "").toLowerCase();
+    const count = Math.max(Number(item.count || 0), Array.isArray(item.sourceEvents) ? item.sourceEvents.length : 0, Array.isArray(item.evidenceIds) ? item.evidenceIds.length : 0, 1);
+    const generic = genericRoutineHabitKinds.has(trigger) || genericRoutineHabitKinds.has(String(item.tags?.[1] || "").toLowerCase()) || /habit:(sleep|meal|commute|work|study|rest|routine)/.test(text);
+    const protectedHabit = habitImportanceScore(item) >= 0.6 || hasPersonalHabitAnchor(item);
+    if (generic && count <= 1 && !protectedHabit) {
+      report.removed += 1;
+      return;
+    }
+    if (protectedHabit) report.protected += 1;
+    const key = item.compressionKey || item.dedupeKey || `${trigger}:${normalizedMemoryTextKey(text)}`;
+    const existing = byKey.get(key);
+    if (existing) {
+      existing.count = Number(existing.count || 1) + Number(item.count || 1);
+      existing.sourceEvents = uniqueStrings([existing.sourceEvents, item.sourceEvents, item.evidenceIds], 8);
+      existing.evidenceIds = uniqueStrings([existing.evidenceIds, item.evidenceIds, item.sourceEvents], 8);
+      existing.lastSeenAt = Math.max(Number(existing.lastSeenAt || 0), Number(item.lastSeenAt || item.at || 0));
+      existing.lastConfirmed = Math.max(Number(existing.lastConfirmed || 0), Number(item.lastConfirmed || item.at || 0));
+      report.merged += 1;
+      return;
+    }
+    byKey.set(key, item);
+    output.push(item);
+  });
+  return output;
+}
+
+function cleanHabitMemory(agent = {}) {
+  ensureMemory(agent);
+  const report = { removed: 0, protected: 0, merged: 0 };
+  agent.semanticMemory.habit = cleanHabitArray(agent.semanticMemory.habit, report).slice(0, 40);
+  const semanticKeys = new Set(agent.semanticMemory.habit.map(item => item.compressionKey || item.dedupeKey || normalizedMemoryTextKey(habitMemoryText(item))));
+  agent.structuredMemory.habit = cleanHabitArray(agent.structuredMemory.habit, report)
+    .filter(item => {
+      const key = item.compressionKey || item.dedupeKey || normalizedMemoryTextKey(habitMemoryText(item));
+      const duplicate = semanticKeys.has(key);
+      if (duplicate) report.merged += 1;
+      return !duplicate;
+    })
+    .slice(0, 50);
+  syncLongTermMemoryViews(agent);
+  return report;
 }
 
 function memoryChangesFromEvent(agent, event = {}, gate = {}, meaning = "") {
@@ -1645,51 +2461,150 @@ function relationshipMemoryText(agent = {}, event = {}, target = {}, type = "imp
   return reason ? `${labels[type] || labels.important_exchange}：${reason}` : (labels[type] || labels.important_exchange);
 }
 
-function relationshipMemoryFromEvent(world = {}, agent = {}, event = {}, gate = {}, meaning = "") {
+function relationshipBufferForAgent(agent = {}) {
+  if (!Array.isArray(agent.relationshipBuffer)) agent.relationshipBuffer = [];
+  if (!Array.isArray(agent.dailyRelationshipSummary)) agent.dailyRelationshipSummary = [];
+  return agent.relationshipBuffer;
+}
+
+function latestRelationshipMemoryForTarget(agent = {}, targetAgentId = "") {
+  const items = [
+    ...(Array.isArray(agent.semanticMemory?.relationship) ? agent.semanticMemory.relationship : []),
+    ...(Array.isArray(agent.structuredMemory?.social) ? agent.structuredMemory.social : [])
+  ].filter(item => (item.targetAgentId || item.target) === targetAgentId);
+  return items.sort((a, b) => Number(b.lastInteractionTime || b.lastSeenAt || b.at || 0) - Number(a.lastInteractionTime || a.lastSeenAt || a.at || 0))[0] || null;
+}
+
+function bufferRelationshipEvent(world = {}, agent = {}, event = {}, gate = {}, meaning = "") {
   if (!gate?.shouldRemember || gate.memoryType !== "social" || !isMeaningfulRelationshipEvent(event)) return null;
   const targetAgentId = String(event.targetAgentId || "");
   if (!targetAgentId || targetAgentId === agent.id) return null;
   const target = (world.agents || []).find(item => item.id === targetAgentId) || {};
   const rel = agent.relationshipMatrix?.[targetAgentId] || {};
+  const clock = Number(event.clock || world.clock || 0);
+  const day = Math.floor(clock / 1440);
   const relationshipType = event.relationshipType || relationshipTypeFromEvent(event);
   const emotionalTag = relationshipEmotionalTag(event);
   const valence = emotionalTag === "negative" ? -45 : emotionalTag === "positive" ? 45 : 0;
-  const text = relationshipMemoryText(agent, event, target, relationshipType);
   const cause = {
     causeEvent: compactString(event.summary || meaning || event.type || "relationship event", "", 180),
     effect: relationshipEffectFromEvent(event),
     strength: gate.importance
   };
-  const importance = clampNumber(Math.ceil(Number(gate.importance || 0.2) * 5), 1, 5, 3);
-  const memory = appendSemanticMemory(agent, {
-    type: "relationship",
-    text,
-    meaning: meaning || text,
-    at: event.clock || 0,
-    importance,
-    strength: clampNumber(45 + importance * 8 + relationshipDeltaMagnitude(event.relationshipDelta || event.relationDelta || {}) * 3, 35, 95, 58),
-    confidence: Math.min(0.95, 0.45 + Number(gate.importance || 0) * 0.45),
-    valence,
-    target: targetAgentId,
+  const key = `${targetAgentId}:${relationshipType}:${day}`;
+  const buffer = relationshipBufferForAgent(agent);
+  let item = buffer.find(entry => entry.key === key);
+  if (!item) {
+    const text = relationshipMemoryText(agent, event, target, relationshipType);
+    item = {
+      id: `relbuf_${agent.id}_${targetAgentId}_${day}_${relationshipType}`,
+      key,
+      day,
+      type: "relationship_buffer",
+      targetAgentId,
+      targetName: target.name || event.targetAgentName || targetAgentId,
+      relationshipType,
+      emotionalTag,
+      valence,
+      text,
+      meaning: meaning || text,
+      trust: rel.trust ?? rel.affinity ?? 50,
+      familiarity: rel.familiarity ?? rel.intimacy ?? 40,
+      interactionCount: 0,
+      firstInteractionTime: clock,
+      lastInteractionTime: clock,
+      importanceTotal: 0,
+      importanceMax: 0,
+      sourceEvents: [],
+      relationshipCauses: []
+    };
+    buffer.unshift(item);
+  }
+  item.interactionCount = Number(item.interactionCount || 0) + 1;
+  item.lastInteractionTime = Math.max(Number(item.lastInteractionTime || 0), clock);
+  item.importanceTotal = Number(item.importanceTotal || 0) + Number(gate.importance || 0.2);
+  item.importanceMax = Math.max(Number(item.importanceMax || 0), Number(gate.importance || 0.2));
+  item.sourceEvents = uniqueStrings([item.sourceEvents, event.id], 20);
+  item.relationshipCauses = uniqueRelationshipCauses([item.relationshipCauses, cause], 12);
+  agent.relationshipBuffer = buffer.slice(0, 120);
+  event.relationshipBuffered = {
+    key,
     targetAgentId,
-    relationshipType,
-    trust: rel.trust ?? rel.affinity ?? 50,
-    familiarity: rel.familiarity ?? rel.intimacy ?? 40,
-    emotionalTag,
-    interactionCount: 1,
-    lastInteractionTime: event.clock || 0,
-    relationshipCause: cause,
-    relationshipCauses: [cause],
-    source: event.causalGraph?.chainId ? "causal-graph" : "relationship-memory-formation",
-    sourceCausalChain: event.causalGraph?.chainId || "",
-    sourceEvents: [event.id],
-    evidenceIds: [event.id],
-    tags: ["relationship", relationshipType, emotionalTag],
-    dedupeKey: `relationship:${agent.id}:${targetAgentId}:${relationshipType}`,
-    compressionKey: `relationship:${targetAgentId}:${relationshipType}`
+    interactionCount: item.interactionCount
+  };
+  return item;
+}
+
+function consolidateRelationshipBuffer(world = {}, agent = {}, options = {}) {
+  ensureMemory(agent);
+  const buffer = relationshipBufferForAgent(agent);
+  const clock = Number(world.clock || 0);
+  const currentDay = Math.floor(clock / 1440);
+  const quality = memoryQualityConfig(world);
+  const kept = [];
+  const written = [];
+  buffer.forEach(item => {
+    if (!options.force && Number(item.day || 0) >= currentDay) {
+      kept.push(item);
+      return;
+    }
+    const targetAgentId = item.targetAgentId || "";
+    if (!targetAgentId) return;
+    const recent = latestRelationshipMemoryForTarget(agent, targetAgentId);
+    const recentAt = Number(recent?.lastInteractionTime || recent?.lastSeenAt || recent?.at || 0);
+    const withinCooldown = recent && clock - recentAt < quality.relationshipWriteCooldown;
+    const relationshipType = withinCooldown ? (recent.relationshipType || item.relationshipType) : item.relationshipType;
+    const averageImportance = Number(item.importanceTotal || 0) / Math.max(1, Number(item.interactionCount || 1));
+    const importance = clampNumber(Math.ceil(Math.max(item.importanceMax || 0, averageImportance || 0.2) * 5), 1, 5, 3);
+    const memory = appendSemanticMemory(agent, {
+      type: "relationship",
+      text: item.text,
+      meaning: item.meaning || item.text,
+      at: item.lastInteractionTime || clock,
+      importance,
+      strength: clampNumber(45 + importance * 8 + Number(item.interactionCount || 1) * 2, 35, 95, 58),
+      confidence: Math.min(0.95, 0.45 + Math.max(item.importanceMax || 0, averageImportance || 0) * 0.45),
+      valence: item.valence || 0,
+      target: targetAgentId,
+      targetAgentId,
+      relationshipType,
+      trust: item.trust,
+      familiarity: item.familiarity,
+      emotionalTag: item.emotionalTag,
+      interactionCount: Number(item.interactionCount || 1),
+      interactionCountDelta: Number(item.interactionCount || 1),
+      lastInteractionTime: item.lastInteractionTime || clock,
+      relationshipCause: item.relationshipCauses?.[0] || null,
+      relationshipCauses: item.relationshipCauses || [],
+      source: "relationship-daily-consolidation",
+      sourceEvents: item.sourceEvents || [],
+      evidenceIds: item.sourceEvents || [],
+      tags: ["relationship", relationshipType, item.emotionalTag].filter(Boolean),
+      dedupeKey: `relationship:${agent.id}:${targetAgentId}:${relationshipType}`,
+      compressionKey: `relationship:${targetAgentId}:${relationshipType}`,
+      count: Number(item.interactionCount || 1)
+    });
+    if (memory) written.push(memory);
+    agent.dailyRelationshipSummary.unshift({
+      person: targetAgentId,
+      events: Number(item.interactionCount || 1),
+      summary: item.meaning || item.text,
+      strength: Number(Math.max(item.importanceMax || 0, averageImportance || 0).toFixed(3)),
+      at: clock
+    });
   });
-  syncLongTermMemoryViews(agent);
-  return memory;
+  agent.relationshipBuffer = kept.slice(0, 120);
+  agent.dailyRelationshipSummary = agent.dailyRelationshipSummary.slice(0, 30);
+  if (written.length) syncLongTermMemoryViews(agent);
+  return {
+    written: written.length,
+    buffered: agent.relationshipBuffer.length,
+    summaries: written.map(item => item.id)
+  };
+}
+
+function relationshipMemoryFromEvent(world = {}, agent = {}, event = {}, gate = {}, meaning = "") {
+  return bufferRelationshipEvent(world, agent, event, gate, meaning);
 }
 
 function consolidateEvent(world, agent, event = {}) {
@@ -1697,6 +2612,7 @@ function consolidateEvent(world, agent, event = {}) {
   const gate = memoryGate(world, agent, event);
   event.memoryGate = gate;
   event.memoryChanges = memoryChangesFromEvent(agent, event, gate);
+  upsertCausalCandidate(world, agent, event, gate);
   if (event.category === "routine") {
     return updateHabit(agent, event, gate);
   }
@@ -1759,6 +2675,11 @@ function recordLifeEvent(world, agent, detail = {}) {
   if (!world || !agent?.id) return null;
   ensureEventLog(world, agent);
   ensureMemory(agent);
+  const summaryText = String(detail.summary || "");
+  const sourceType = String(detail.sourceType || detail.actionSourceType || detail.action?.sourceType || detail.plan?.sourceType || "");
+  if (sourceType === "system_error" || /AI\s*返回格式错误|AI\s*杩斿洖|AI returned invalid JSON|invalid JSON|JSON\s*修复兜底|JSON\s*淇|system_error|system error|停下整理思路|停在原地整理思路|鍋滀笅鏁寸悊/i.test(summaryText)) {
+    return null;
+  }
   const signals = estimateEventSignals(detail);
   const category = isRoutineLifeDetail(detail) ? "routine" : "exception";
   const clock = Number(world.clock || 0);
@@ -1784,6 +2705,11 @@ function recordLifeEvent(world, agent, detail = {}) {
     relationImpact: detail.relationImpact ?? detail.relationshipImpact,
     goalImpact: detail.goalImpact,
     goalDelta: detail.goalDelta || null,
+    expectedOutcome: detail.expectedOutcome || detail.expectation?.expectedOutcome || "",
+    expectedProbability: detail.expectedProbability ?? detail.expectation?.probability,
+    actualOutcome: detail.actualOutcome ?? detail.outcome ?? detail.result,
+    expectedEmotionVector: detail.expectedEmotionVector || detail.expectedEmotion || null,
+    actualEmotionVector: detail.actualEmotionVector || detail.actualEmotion || null,
     interruption: detail.interruption ? {
       type: detail.interruption.type || "",
       priority: detail.interruption.priority || 0,
@@ -1793,8 +2719,11 @@ function recordLifeEvent(world, agent, detail = {}) {
     abnormality: signals.abnormality,
     emotionalIntensity: signals.emotionalIntensity,
     futureImpact: signals.futureImpact,
-    source: detail.source || "life-engine"
+    source: detail.source || "life-engine",
+    sourceType: sourceType || detail.source || "life-engine"
   };
+  const predictionError = predictionErrorEngine(world, agent, event);
+  event.predictionError = predictionError.predictionError;
   world.eventLog.unshift(event);
   world.eventLog = world.eventLog.slice(0, 2000);
   agent.eventLog.unshift(event);
@@ -1802,6 +2731,11 @@ function recordLifeEvent(world, agent, detail = {}) {
   const causalGraph = analyzeEventImpact(world, agent, event);
   const memory = consolidateEvent(world, agent, event);
   const memoryCausalGraph = connectMemoryCause(world, agent, event, memory);
+  const temporalCausal = updateTemporalCausalMemory(world, agent, {
+    event,
+    memory,
+    source: "record-life-event"
+  });
   const cause = emotionCauseFromEvent(event);
   if (cause) {
     recordEmotionCause(agent, {
@@ -1816,7 +2750,7 @@ function recordLifeEvent(world, agent, detail = {}) {
   normalizeGoalRuntime(agent, world);
   agent.memoryProfile.lastConsolidatedAt = clock;
   agent.memorySummary = buildMemorySummary(agent, world);
-  return { event, memory, causalGraph: memoryCausalGraph || causalGraph || null };
+  return { event, memory, causalGraph: memoryCausalGraph || causalGraph || null, temporalCausal };
 }
 
 function recordPlanMemory(world, agent, detail = {}) {
@@ -1956,9 +2890,23 @@ function runDailyReflection(world, options = {}) {
     ensureMemory(agent);
     ensureSelfModel(agent);
     const goalRuntime = normalizeGoalRuntime(agent, world);
+    const relationshipConsolidation = consolidateRelationshipBuffer(world, agent, { force: options.force });
+    const habitCleanup = cleanHabitMemory(agent);
+    const reflectionConfig = reflectionLearningConfig(world);
+    const adaptiveCandidate = reflectionLearningCandidate(world, agent);
+    const lastAdaptiveReflection = Number(agent.reflectionLearningState?.lastRunClock ?? -Infinity);
+    const adaptiveCooldownReady = options.force || clock - lastAdaptiveReflection >= reflectionConfig.cooldown;
+    const adaptiveEarlyTrigger = Boolean(adaptiveCandidate && (
+      adaptiveCandidate.prediction.predictionError > reflectionConfig.earlyPredictionErrorThreshold
+      || relationshipDeltaMagnitude(adaptiveCandidate.event.relationshipDelta || adaptiveCandidate.event.relationDelta || {}) > 0.25
+      || (adaptiveCandidate.event.interruption?.canOverridePlan && ["health", "safety", "hunger"].includes(adaptiveCandidate.event.interruption.type))
+    ));
     syncLongTermMemoryViews(agent);
     agent.reflection ||= {};
-    if (!options.force && agent.reflection.day === day) return;
+    if (!options.force && agent.reflection.day === day && !adaptiveEarlyTrigger) return;
+    const adaptiveReflection = adaptiveCandidate && (adaptiveCooldownReady || adaptiveEarlyTrigger)
+      ? applyReflectionLearning(world, agent, adaptiveCandidate.event)
+      : null;
     const meaningfulEvents = recentMeaningfulEvents(world, agent, 6);
     const memories = summarizeTopMemories(agent, clock, 8).filter(item => item.source !== "local-reflection");
     const causalAnchors = causalReflectionAnchors(world, agent, 3);
@@ -1997,6 +2945,28 @@ function runDailyReflection(world, options = {}) {
       causalAnchors,
       lessonLearned: causalAnchors[0]?.lessonLearned || "",
       counterfactual: causalAnchors[0]?.counterfactual || "",
+      relationshipConsolidation,
+      habitCleanup,
+      adaptiveReflection: adaptiveReflection ? {
+        id: adaptiveReflection.id,
+        eventType: adaptiveReflection.eventType,
+        confidence: adaptiveReflection.confidence,
+        predictionError: adaptiveReflection.predictionError,
+        importance: adaptiveReflection.importance
+      } : null,
+      predictionError: adaptiveCandidate ? {
+        eventId: adaptiveCandidate.event.id || "",
+        eventType: adaptiveCandidate.prediction.eventType,
+        value: adaptiveCandidate.prediction.predictionError,
+        layer: adaptiveCandidate.prediction.layer,
+        llmReflectionEligible: Boolean(adaptiveCandidate.event.reflectionLearning?.llmReflectionEligible)
+      } : null,
+      reflectionCooldown: {
+        cooldown: reflectionConfig.cooldown,
+        cooldownReady: Boolean(adaptiveCooldownReady),
+        earlyTrigger: Boolean(adaptiveEarlyTrigger),
+        lastRunClock: Number(agent.reflectionLearningState?.lastRunClock || 0)
+      },
       learnedBeliefs,
       habitsUpdated: newHabits,
       newHabits,
@@ -2216,5 +3186,11 @@ module.exports = {
   memoryPerspectiveLayer,
   ensureFirstPersonText,
   isFirstPersonMemoryText,
-  migrateMemoryPerspectiveForAgent
+  migrateMemoryPerspectiveForAgent,
+  habitTemporalValidator,
+  cleanHabitMemory,
+  consolidateRelationshipBuffer,
+  predictionErrorEngine,
+  reflectionImportanceForEvent,
+  applyReflectionLearning
 };

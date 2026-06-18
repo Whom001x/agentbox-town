@@ -3,9 +3,10 @@ const https = require("https");
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
-const { nodeStepPayload, minutesToClock } = require("./ai-town-node-core");
+const { nodeStepPayload, minutesToClock, calendarForClock } = require("./ai-town-node-core");
 const { guardAction } = require("./ai-town-world-guard");
 const { createAiRouter } = require("./ai-town-ai-router");
+const { resolveLocalAction } = require("./ai-town-local-action-resolver");
 const { agentContextFromWorld, normalizeAction, exportTownSft, writeJsonl } = require("./ai-town-sft-exporter");
 const jsonUtils = require("./ai-town-json-utils");
 const { ensureDailyPlans, currentPlanItem, normalizeDailyPlan } = require("./ai-town-planner");
@@ -67,6 +68,7 @@ const AI_RETRY_DELAY_MS = Number(process.env.AI_TOWN_RETRY_DELAY_MS || 1000);
 const DEFAULT_AI_RATE_LIMIT_RPM = Number(process.env.AI_TOWN_RATE_LIMIT_RPM || 60);
 const DEFAULT_AI_RETRY_MAX_DELAY_MS = Number(process.env.AI_TOWN_RETRY_MAX_DELAY_MS || 60000);
 const DEFAULT_AI_RATE_LIMIT_COOLDOWN_MS = Number(process.env.AI_TOWN_RATE_LIMIT_COOLDOWN_MS || 60000);
+const AGENT_ACTION_MAX_JSON_ATTEMPTS = 3;
 
 const aiConfig = {
   apiKeys: (process.env.AI_TOWN_API_KEYS || process.env.AI_TOWN_API_KEY || process.env.OPENAI_API_KEY || "")
@@ -112,7 +114,12 @@ const metrics = {
   continuousErrors: 0,
   rateLimitWaits: 0,
   lastRateLimitWaitMs: 0,
-  lastRetryDelayMs: 0
+  lastRetryDelayMs: 0,
+  actionRetryCount: 0,
+  actionLocalFallbackCount: 0,
+  actionLLMAttemptCount: 0,
+  actionLLMSuccessCount: 0,
+  actionLLMFailureCount: 0
 };
 let keyCursor = 0;
 let keyHealth = [];
@@ -447,6 +454,11 @@ function resetMetrics() {
   metrics.rateLimitWaits = 0;
   metrics.lastRateLimitWaitMs = 0;
   metrics.lastRetryDelayMs = 0;
+  metrics.actionRetryCount = 0;
+  metrics.actionLocalFallbackCount = 0;
+  metrics.actionLLMAttemptCount = 0;
+  metrics.actionLLMSuccessCount = 0;
+  metrics.actionLLMFailureCount = 0;
   aiContinuousErrors = 0;
   keyHealth.forEach(item => {
     item.success = 0;
@@ -810,8 +822,11 @@ function publicMetrics() {
   const localAi = isLocalAiBaseUrl(aiConfig.baseUrl);
   const aiEnabled = aiConfig.apiKeys.length > 0 || localAi;
   const effectiveKeyCount = aiEnabled ? Math.max(1, aiConfig.apiKeys.length) : 0;
+  const actionAttempts = Number(metrics.actionLLMAttemptCount || 0);
+  const actionFailures = Number(metrics.actionLLMFailureCount || 0);
   return {
     ...metrics,
+    actionLLMFailureRate: actionAttempts ? Number((actionFailures / actionAttempts).toFixed(4)) : 0,
     continuousErrors: aiContinuousErrors,
     maxContinuousErrors: null,
     retryMode: "until_manual_stop",
@@ -1495,8 +1510,8 @@ function readSaveLogPayload(slot, options = {}) {
       updatedAt
     },
     clock,
-    logs: (Array.isArray(logs) ? logs : []).slice(0, limit),
-    records: (Array.isArray(records) ? records : []).slice(0, limit),
+    logs: (Array.isArray(logs) ? logs : []).filter(item => !nodeRuntimeIsSystemErrorObject(item)).slice(0, limit),
+    records: (Array.isArray(records) ? records : []).filter(item => !nodeRuntimeIsSystemErrorObject(item)).slice(0, limit),
     updatedAt
   };
 }
@@ -1505,6 +1520,32 @@ function compactText(value, fallback = "", limit = 180) {
   if (value === null || value === undefined) return fallback;
   const text = typeof value === "string" ? value : JSON.stringify(value);
   return String(text || fallback).replace(/\s+/g, " ").trim().slice(0, limit);
+}
+
+function nodeRuntimeIsSystemErrorText(value = "") {
+  return /AI\s*返回格式错误|AI\s*杩斿洖|AI returned invalid JSON|invalid JSON|JSON\s*修复兜底|JSON\s*淇|JSON repair fallback|system_error|system error|AgentAction failed|格式错误|鏍煎紡閿欒|停下整理思路|停在原地整理思路|鍋滀笅鏁寸悊/i
+    .test(String(value || ""));
+}
+
+function nodeRuntimeObjectText(value, depth = 0) {
+  if (depth > 3 || value === null || value === undefined) return "";
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return String(value);
+  if (Array.isArray(value)) return value.slice(0, 12).map(item => nodeRuntimeObjectText(item, depth + 1)).join(" ");
+  if (typeof value === "object") {
+    return Object.values(value).slice(0, 20).map(item => nodeRuntimeObjectText(item, depth + 1)).join(" ");
+  }
+  return "";
+}
+
+function nodeRuntimeIsSystemErrorObject(value) {
+  if (!value || typeof value !== "object") return nodeRuntimeIsSystemErrorText(value);
+  if (value.sourceType === "system_error" || value.source === "system_error") return true;
+  return nodeRuntimeIsSystemErrorText(nodeRuntimeObjectText(value));
+}
+
+function nodeRuntimeIsWorldActionSourceAllowed(action = {}) {
+  const sourceType = String(action.sourceType || "llm");
+  return sourceType === "llm" || sourceType === "local";
 }
 
 function compactAgentForMobile(agent = {}) {
@@ -2042,10 +2083,67 @@ function migrateWorldPersonalityRuntime(payloadOrWorld = {}, options = {}) {
   return { changed, count };
 }
 
+function makeInitialWeatherBox(clock = 8 * 60, existing = {}) {
+  const current = existing?.current && typeof existing.current === "object" ? existing.current : {};
+  const next6h = existing?.next6h && typeof existing.next6h === "object" ? existing.next6h : {};
+  const daily = existing?.dailyForecast && typeof existing.dailyForecast === "object" ? existing.dailyForecast : {};
+  const condition = compactText(current.condition || "多云", "多云", 16);
+  const temperature = clampNumber(current.temperature, -20, 45, 24);
+  const humidity = clampNumber(current.humidity, 0, 100, 60);
+  const wind = compactText(current.wind || "微风", "微风", 20);
+  const precipitation = clampNumber(current.precipitation, 0, 100, 0);
+  const comfort = compactText(current.comfort || (temperature >= 30 ? "偏热" : temperature <= 5 ? "偏冷" : "正常"), "正常", 20);
+  return {
+    calendar: calendarForClock(clock),
+    current: {
+      condition,
+      temperature,
+      humidity,
+      wind,
+      precipitation,
+      comfort,
+      observedAt: Number(current.observedAt ?? clock),
+      reason: compactText(current.reason || "初始天气，等待 WeatherAgent 生成第一份报告", "初始天气，等待 WeatherAgent 生成第一份报告", 160)
+    },
+    next6h: {
+      condition: compactText(next6h.condition || condition, condition, 16),
+      confidence: clampNumber(next6h.confidence, 50, 95, 72),
+      summary: compactText(next6h.summary || "6小时内以云量变化为主", "6小时内以云量变化为主", 120)
+    },
+    dailyForecast: {
+      condition: compactText(daily.condition || next6h.condition || condition, condition, 20),
+      confidence: clampNumber(daily.confidence, 50, 85, 68),
+      summary: compactText(daily.summary || "一天预测保留不确定性，等待 WeatherAgent 更新", "一天预测保留不确定性，等待 WeatherAgent 更新", 140)
+    },
+    sevenDayTrend: Array.isArray(existing?.sevenDayTrend)
+      ? existing.sevenDayTrend.slice(0, 7).map((item, index) => ({
+        dayOffset: clampNumber(item?.dayOffset, 0, 6, index),
+        condition: compactText(item?.condition || condition, condition, 16),
+        confidence: clampNumber(item?.confidence, 10, 50, 30),
+        reason: compactText(item?.reason || "", "", 80)
+      }))
+      : [],
+    impacts: Array.isArray(existing?.impacts) && existing.impacts.length
+      ? existing.impacts.map(item => compactText(item, "", 60)).filter(Boolean).slice(0, 5)
+      : ["户外移动略受天气影响"],
+    lastReportKey: existing?.lastReportKey || "",
+    lastDailyKey: existing?.lastDailyKey || "",
+    lastAgentAt: Number(existing?.lastAgentAt || 0)
+  };
+}
+
+function ensureWeatherBox(world = {}) {
+  const clock = Number(world.clock || world.startClock || 8 * 60);
+  world.weatherBox = makeInitialWeatherBox(clock, world.weatherBox || {});
+  return world.weatherBox;
+}
+
 function normalizeWorldBeforeSave(world = {}) {
+  ensureWeatherBox(world);
   if (!Array.isArray(world.agents)) return world;
   normalizeWorldEventTimes(world);
   normalizeLocationRuntimeStaff(world);
+  nodeRuntimeCleanSystemErrorPollution(world);
   const existingSocial = world.socialStructures && typeof world.socialStructures === "object" ? world.socialStructures : {};
   if (!Array.isArray(world.households) && Array.isArray(existingSocial.households)) world.households = cloneSocialRows(existingSocial.households);
   if (!Array.isArray(world.groups) && Array.isArray(existingSocial.groups)) world.groups = cloneSocialRows(existingSocial.groups);
@@ -2471,6 +2569,18 @@ function nodeRuntimeCompactCognitiveForBatch(cognitive = null) {
       belief: compactText(item.belief || item.text || "", "", 100),
       activation: item.activation,
       strength: item.strength
+    })),
+    causalBias: cognitive.causalBias ? {
+      safetyBias: cognitive.causalBias.safetyBias || 0,
+      socialBias: cognitive.causalBias.socialBias || 0,
+      responsibilityBias: cognitive.causalBias.responsibilityBias || 0,
+      confidence: cognitive.causalBias.confidence || 0
+    } : null,
+    activeCausalMemory: (cognitive.activeCausalMemory || []).slice(0, 3).map(item => ({
+      category: item.category || "",
+      causalRule: compactText(item.causalRule || "", "", 120),
+      confidence: item.confidence || 0,
+      activation: item.activation || 0
     })),
     socialModifier: cognitive.socialModifier ? {
       fearModifier: cognitive.socialModifier.fearModifier,
@@ -3076,19 +3186,28 @@ function nodeRuntimeWorldContext(world, agents = null, kind = "worldAgent") {
 
 function nodeRuntimeCompactInformationFlowsForAi(world = {}, max = 30) {
   return Array.isArray(world.informationFlows)
-    ? world.informationFlows.slice(0, max).map(item => nodeRuntimeCompactItem(item, 120))
+    ? world.informationFlows
+      .filter(item => !nodeRuntimeIsSystemErrorObject(item))
+      .slice(0, max)
+      .map(item => nodeRuntimeCompactItem(item, 120))
     : [];
 }
 
 function nodeRuntimeCompactEventImpactsForAi(world = {}, max = 20) {
   return Array.isArray(world.eventImpacts)
-    ? world.eventImpacts.slice(0, max).map(item => nodeRuntimeCompactItem(item, 120))
+    ? world.eventImpacts
+      .filter(item => !nodeRuntimeIsSystemErrorObject(item))
+      .slice(0, max)
+      .map(item => nodeRuntimeCompactItem(item, 120))
     : [];
 }
 
 function nodeRuntimeCompactSocialProcessesForAi(world = {}, max = 40) {
   return Array.isArray(world.socialProcesses)
-    ? world.socialProcesses.slice(0, max).map(item => nodeRuntimeCompactItem(item, 100))
+    ? world.socialProcesses
+      .filter(item => !nodeRuntimeIsSystemErrorObject(item))
+      .slice(0, max)
+      .map(item => nodeRuntimeCompactItem(item, 100))
     : [];
 }
 
@@ -3140,7 +3259,9 @@ function nodeRuntimeDedupBySignature(existing = [], incoming = [], keys = [], ma
 
 function nodeRuntimeSanitizeEventImpacts(world, items = []) {
   const validIds = nodeRuntimeAgentIdSet(world);
-  return (Array.isArray(items) ? items : []).slice(0, 12).map(item => {
+  return (Array.isArray(items) ? items : [])
+    .filter(item => !nodeRuntimeIsSystemErrorObject(item))
+    .slice(0, 12).map(item => {
     const compact = nodeRuntimeCompactItem(item);
     compact.directKnownBy = nodeRuntimeFilterIds(compact.directKnownBy || compact.knownBy, validIds, 6);
     compact.affectedAgents = (Array.isArray(compact.affectedAgents) ? compact.affectedAgents : [])
@@ -3152,12 +3273,14 @@ function nodeRuntimeSanitizeEventImpacts(world, items = []) {
     compact.at = world.clock || 0;
     compact.source = "node-event-impact";
     return compact;
-  }).filter(item => item.eventId || item.title || item.summary);
+  }).filter(item => !nodeRuntimeIsSystemErrorObject(item) && (item.eventId || item.title || item.summary));
 }
 
 function nodeRuntimeSanitizeInformationFlows(world, items = []) {
   const validIds = nodeRuntimeAgentIdSet(world);
-  return (Array.isArray(items) ? items : []).slice(0, 20).map(item => {
+  return (Array.isArray(items) ? items : [])
+    .filter(item => !nodeRuntimeIsSystemErrorObject(item))
+    .slice(0, 20).map(item => {
     const compact = nodeRuntimeCompactItem(item);
     const critical = ["critical", "death"].includes(String(compact.informationPacket?.informationType || ""));
     const maxKnown = critical ? 16 : compact.public === true ? 12 : 8;
@@ -3176,12 +3299,14 @@ function nodeRuntimeSanitizeInformationFlows(world, items = []) {
     compact.source = String(compact.source || compact.informationPacket?.source || compact.directKnownBy?.[0] || "");
     compact.sourceModule = "node-information-propagation";
     return compact;
-  }).filter(item => item.fact && item.knownBy.length);
+  }).filter(item => !nodeRuntimeIsSystemErrorObject(item) && item.fact && item.knownBy.length);
 }
 
 function nodeRuntimeSanitizeSocialProcesses(world, items = []) {
   const validIds = nodeRuntimeAgentIdSet(world);
-  return (Array.isArray(items) ? items : []).slice(0, 20).map(item => {
+  return (Array.isArray(items) ? items : [])
+    .filter(item => !nodeRuntimeIsSystemErrorObject(item))
+    .slice(0, 20).map(item => {
     const compact = nodeRuntimeCompactItem(item);
     compact.participants = nodeRuntimeFilterIds(compact.participants, validIds, 8);
     compact.knownBy = nodeRuntimeFilterIds(compact.knownBy, validIds, 8);
@@ -3193,13 +3318,60 @@ function nodeRuntimeSanitizeSocialProcesses(world, items = []) {
     compact.at = world.clock || 0;
     compact.source = "node-social-process";
     return compact;
-  }).filter(item => item.type && item.participants.length);
+  }).filter(item => !nodeRuntimeIsSystemErrorObject(item) && item.type && item.participants.length);
+}
+
+function nodeRuntimeDedupeSocialProcesses(items = []) {
+  const seen = new Set();
+  const result = [];
+  for (const item of Array.isArray(items) ? items : []) {
+    if (!item || nodeRuntimeIsSystemErrorObject(item)) continue;
+    const key = item.id
+      ? `id:${item.id}`
+      : `sig:${nodeRuntimePropagationSignature(item, ["type", "participants", "truth", "stage"])}`;
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    result.push(item);
+  }
+  return result;
+}
+
+function nodeRuntimeCleanSystemErrorPollution(world = {}) {
+  const filterItems = value => Array.isArray(value)
+    ? value.filter(item => !nodeRuntimeIsSystemErrorObject(item))
+    : value;
+  ["records", "logs", "eventLog", "eventImpacts", "informationFlows", "relationshipDynamics"].forEach(key => {
+    world[key] = filterItems(world[key]) || [];
+  });
+  world.socialProcesses = nodeRuntimeDedupeSocialProcesses(filterItems(world.socialProcesses) || []);
+  if (world.informationFlowGraph && typeof world.informationFlowGraph === "object") {
+    world.informationFlowGraph.nodes = filterItems(world.informationFlowGraph.nodes) || [];
+    world.informationFlowGraph.edges = filterItems(world.informationFlowGraph.edges) || [];
+  }
+  (world.agents || []).forEach(agent => {
+    agent.eventLog = filterItems(agent.eventLog) || [];
+    if (agent.memory && typeof agent.memory === "object") {
+      ["short", "long", "emotional", "secret", "rumor"].forEach(layer => {
+        agent.memory[layer] = filterItems(agent.memory[layer]) || [];
+      });
+    }
+    if (agent.semanticMemory && typeof agent.semanticMemory === "object") {
+      Object.keys(agent.semanticMemory).forEach(layer => {
+        agent.semanticMemory[layer] = filterItems(agent.semanticMemory[layer]) || [];
+      });
+    }
+    ["episodicMemory", "beliefMemory", "habitMemory", "preferenceMemory", "relationshipMemory"].forEach(key => {
+      agent[key] = filterItems(agent[key]) || [];
+    });
+  });
+  return world;
 }
 
 function nodeRuntimeSeedSocialProcesses(world, eventImpacts = [], informationFlows = []) {
   const validIds = nodeRuntimeAgentIdSet(world);
   const seeds = [];
   const push = item => {
+    if (nodeRuntimeIsSystemErrorObject(item)) return;
     const participants = nodeRuntimeFilterIds(item.participants || [], validIds, 8);
     if (participants.length < 2) return;
     seeds.push({
@@ -3223,6 +3395,7 @@ function nodeRuntimeSeedSocialProcesses(world, eventImpacts = [], informationFlo
   };
   const medicalRecords = (world.records || [])
     .filter(record => record?.type === "medical")
+    .filter(record => !nodeRuntimeIsSystemErrorObject(record))
     .slice(0, 10);
   medicalRecords.forEach(record => {
     const participants = Array.isArray(record.agents) ? record.agents : [];
@@ -3242,7 +3415,7 @@ function nodeRuntimeSeedSocialProcesses(world, eventImpacts = [], informationFlo
       });
     }
   });
-  (eventImpacts || []).forEach(impact => {
+  (eventImpacts || []).filter(impact => !nodeRuntimeIsSystemErrorObject(impact)).forEach(impact => {
     const direct = impact.directKnownBy || impact.knownBy || [];
     const affected = (impact.affectedAgents || []).map(item => item.agentId);
     const participants = [impact.sourceAgentId, ...direct, ...affected].filter(Boolean);
@@ -3260,7 +3433,7 @@ function nodeRuntimeSeedSocialProcesses(world, eventImpacts = [], informationFlo
       });
     }
   });
-  (informationFlows || []).forEach(flow => {
+  (informationFlows || []).filter(flow => !nodeRuntimeIsSystemErrorObject(flow)).forEach(flow => {
     const participants = nodeRuntimeFilterIds([...(flow.knownBy || []), ...(flow.transmissions || []).flatMap(tx => [tx.from, tx.to])], validIds, 8);
     if (participants.length >= 2 && /求助|严重|身体|医疗|诊所|冲突|误会|拒绝/.test(`${flow.fact || ""}`)) {
       push({
@@ -3557,6 +3730,134 @@ function nodeRuntimeActionPayload(world, agent, candidate = {}) {
     crisisTriage: agent.crisisTriage || null,
     knowledgeJudgement: agent.knowledgeJudgement || null,
     outcomeJudgement: agent.outcomeJudgement || null
+  };
+}
+
+function nodeRuntimeNormalizeAgentActionResult(result, sourceType = "llm") {
+  if (!result || typeof result !== "object" || !result.action || typeof result.action !== "object") {
+    const error = new Error("AgentAction JSON missing action object");
+    error.type = "invalid_agent_action";
+    throw error;
+  }
+  const action = result.action;
+  if (nodeRuntimeIsSystemErrorObject(action)) {
+    const error = new Error("AgentAction produced system error content");
+    error.type = "system_error_action";
+    throw error;
+  }
+  action.sourceType = sourceType;
+  if (!action.type) action.type = "wait";
+  if (!action.summary && action.currentTask) action.summary = String(action.currentTask).slice(0, 180);
+  if (!action.currentTask && action.summary) action.currentTask = String(action.summary).slice(0, 80);
+  action.relationChanges = Array.isArray(action.relationChanges) ? action.relationChanges : [];
+  action.newEvents = Array.isArray(action.newEvents) ? action.newEvents : [];
+  action.actionSteps = Array.isArray(action.actionSteps) ? action.actionSteps : [];
+  return result;
+}
+
+function nodeRuntimeAgentActionRetryPayload(world, agent, candidate = {}, attempt = 2, error = null) {
+  const planItem = candidate.currentPlanItem || currentPlanItem(world, agent);
+  const interruption = candidate.interruption || detectInterruption(world, agent);
+  const selectedAction = candidate.utilityDecision?.selectedAction || null;
+  return {
+    recoveryMode: "agentAction_json_retry",
+    retryAttempt: attempt,
+    previousError: {
+      type: String(error?.type || "invalid_json").slice(0, 60),
+      message: String(error?.message || error || "").slice(0, 220)
+    },
+    instruction: "Return strict JSON only. Do not explain. Do not include markdown. Output one small valid action for this agent.",
+    schema: {
+      action: {
+        type: "work|move|observe|talk|react|wait|plan",
+        summary: "",
+        currentTask: "",
+        newLocation: "",
+        mood: "",
+        internalState: { desire: "", thought: "", worry: "", expectation: "", hesitation: "", preference: "", interpretation: "" },
+        intent: { want: "", reason: "", emotion: "" },
+        emotionDelta: {},
+        actionSteps: [{ title: "", status: "todo|doing|done|blocked", reason: "" }],
+        processUpdate: { goal: "", stage: "prepare|move|wait|execute|feedback|blocked", progressDelta: 0, currentStep: "", completedSteps: [], blockedBy: "", finished: false },
+        memory: { layer: "short", text: "", importance: 1 },
+        relationChanges: [],
+        newEvents: []
+      }
+    },
+    time: nodeRuntimeClockText(world),
+    clock: world.clock || 0,
+    agent: nodeRuntimeAgentBrief(agent, world),
+    currentLocation: nodeRuntimeCompactItem(nodeRuntimePlace(world, nodeRuntimePlaceId(world, agent)), 100),
+    visibleAgents: nodeRuntimeVisibleAgents(world, agent).slice(0, 6),
+    needs: agent.needs || {},
+    emotionVector: agent.emotionVector || agent.emotions || {},
+    currentPlanItem: planItem,
+    interruption,
+    candidate: nodeRuntimeCompactItem(candidate, 90),
+    utilityDecision: {
+      priority: candidate.utilityDecision?.priority,
+      selectedAction,
+      candidateActions: Array.isArray(candidate.utilityDecision?.candidateActions)
+        ? candidate.utilityDecision.candidateActions.slice(0, 8).map(item => nodeRuntimeCompactItem(item, 90))
+        : []
+    },
+    cognitiveState: nodeRuntimeCompactItem(agent.cognitiveState || candidate.utilityDecision?.cognitiveState || null, 80),
+    desireCandidates: Array.isArray(agent.desireCandidates || candidate.utilityDecision?.desireCandidates)
+      ? (agent.desireCandidates || candidate.utilityDecision?.desireCandidates).slice(0, 6)
+      : [],
+    activeBeliefs: Array.isArray(agent.activeBeliefs || candidate.utilityDecision?.activeBeliefs)
+      ? (agent.activeBeliefs || candidate.utilityDecision?.activeBeliefs).slice(0, 6)
+      : [],
+    allowedPlaces: Array.isArray(world.places) ? world.places.map(place => ({ id: place.id, name: place.name })).slice(0, 80) : []
+  };
+}
+
+async function nodeRuntimeGenerateAgentAction(world, agent, candidate = {}, index = 0) {
+  const errors = [];
+  for (let attempt = 1; attempt <= AGENT_ACTION_MAX_JSON_ATTEMPTS; attempt += 1) {
+    const payload = attempt === 1
+      ? nodeRuntimeActionPayload(world, agent, candidate)
+      : nodeRuntimeAgentActionRetryPayload(world, agent, candidate, attempt, errors[errors.length - 1]);
+    try {
+      metrics.actionLLMAttemptCount += 1;
+      const result = await aiRouter.runOnce("agentAction", payload);
+      const normalized = nodeRuntimeNormalizeAgentActionResult(result, "llm");
+      metrics.actionLLMSuccessCount += 1;
+      return {
+        status: "fulfilled",
+        queueId: `node-${world.clock || 0}-${agent.id}-${index}`,
+        agent,
+        candidate,
+        result: nodeRuntimeGuardAction(world, agent, normalized)
+      };
+    } catch (error) {
+      metrics.actionLLMFailureCount += 1;
+      errors.push(error);
+      if (attempt < AGENT_ACTION_MAX_JSON_ATTEMPTS) {
+        metrics.actionRetryCount += 1;
+        continue;
+      }
+    }
+  }
+
+  metrics.actionLocalFallbackCount += 1;
+  const localResult = resolveLocalAction(world, agent, candidate, { attempts: AGENT_ACTION_MAX_JSON_ATTEMPTS, errors });
+  world.logs ||= [];
+  world.logs.unshift({
+    title: "AgentAction Local Resolver",
+    body: `${agent.name || agent.id}: local fallback after ${AGENT_ACTION_MAX_JSON_ATTEMPTS} failed AgentAction attempts`,
+    type: "node_runtime_recovery",
+    time: nodeRuntimeClockText(world),
+    clock: world.clock || 0,
+    source: "agent-action-recovery",
+    sourceType: "local"
+  });
+  return {
+    status: "fulfilled",
+    queueId: `node-${world.clock || 0}-${agent.id}-${index}`,
+    agent,
+    candidate,
+    result: nodeRuntimeGuardAction(world, agent, nodeRuntimeNormalizeAgentActionResult(localResult, "local"))
   };
 }
 
@@ -4020,6 +4321,7 @@ function nodeRuntimeStoreTrainingSample(world, agent, aiResult, timePassage = nu
   const action = aiResult?.action || {};
   const text = `${action.type || ""} ${action.summary || ""} ${action.currentTask || ""}`;
   if (!action || typeof action !== "object") return;
+  if (action.sourceType === "local" || action.sourceType === "system_error" || nodeRuntimeIsSystemErrorObject(action)) return;
   if (/JSON 修复兜底|格式错误|越权|系统修正|已死亡|不能继续行动|AI 返回格式错误|停下整理思路/.test(text)) return;
   if (!String(action.summary || action.currentTask || "").trim()) return;
   world.trainingSamples ||= [];
@@ -4041,6 +4343,8 @@ function nodeRuntimeStoreTrainingSample(world, agent, aiResult, timePassage = nu
 function nodeRuntimeApplyAction(world, agent, aiResult, timePassage = null, settlementPatch = null) {
   if (freezeDeadAgent(agent, world)) return null;
   const action = aiResult?.action || {};
+  action.sourceType = action.sourceType === "local" ? "local" : action.sourceType === "system" ? "system" : "llm";
+  if (!nodeRuntimeIsWorldActionSourceAllowed(action) || nodeRuntimeIsSystemErrorObject(action)) return null;
   nodeRuntimeAttachSubjectiveLayer(action, agent);
   if (aiResult && typeof aiResult === "object") aiResult.action = action;
   agent.internalState = action.internalState || null;
@@ -4102,13 +4406,30 @@ function nodeRuntimeApplyAction(world, agent, aiResult, timePassage = null, sett
     agents: [agent.id],
     time: nodeRuntimeClockText(world),
     clock: world.clock || 0,
-    source: "node-runtime-agent-loop"
+    source: "node-runtime-agent-loop",
+    sourceType: action.sourceType
   });
   world.records = world.records.slice(0, 300);
+  recordLifeEvent(world, agent, {
+    type: action.actionId || action.type || "agentAction",
+    summary: String(action.summary || action.currentTask || "").slice(0, 220),
+    source: "node-agent-action",
+    sourceType: action.sourceType,
+    needDelta: action.needDelta || settlementPatch?.needDelta || null,
+    emotionDelta: action.emotionDelta || settlementPatch?.emotionDelta || null,
+    emotionalIntensity: action.sourceType === "local" ? 24 : Math.max(20, Number(action.memory?.importance || 2) * 12),
+    futureImpact: action.sourceType === "local" ? 18 : Math.max(18, Number(action.memory?.importance || 2) * 10),
+    goalImpact: action.processUpdate ? Math.min(1, Math.max(0.1, Number(action.processUpdate.progressDelta || 0) / 100)) : 0,
+    contextScope: "direct"
+  });
   return action;
 }
 
 async function nodeRuntimeRunPostAgents(world, actionItems, settlementPatches = []) {
+  actionItems = (Array.isArray(actionItems) ? actionItems : []).filter(item => {
+    const action = item?.result?.action || {};
+    return nodeRuntimeIsWorldActionSourceAllowed(action) && !nodeRuntimeIsSystemErrorObject(action);
+  });
   if (!actionItems.length) return;
   const postContextAgents = actionItems.map(item => item.agent).filter(Boolean);
   const actionEvents = actionItems.map(item => ({
@@ -4118,10 +4439,12 @@ async function nodeRuntimeRunPostAgents(world, actionItems, settlementPatches = 
     place: nodeRuntimePlaceId(world, item.agent),
     sourceAgentId: item.agent.id,
     summary: item.result?.action?.summary || item.agent.currentTask || "",
+    sourceType: item.result?.action?.sourceType || "llm",
     knownBy: [item.agent.id, ...nodeRuntimeVisibleAgents(world, item.agent).map(agent => agent.id)],
     timePassage: item.timePassage || null,
     settlementPatch: nodeRuntimeFindPatch(settlementPatches, item)
-  }));
+  })).filter(item => !nodeRuntimeIsSystemErrorObject(item));
+  if (!actionEvents.length) return;
   const impact = await callAiWithRetry("eventImpactAgent", { ...nodeRuntimeWorldContext(world, postContextAgents), actionEvents, events: actionEvents });
   if (!Array.isArray(world.eventImpacts)) world.eventImpacts = [];
   const eventImpacts = nodeRuntimeDedupBySignature(
@@ -4174,6 +4497,7 @@ async function nodeRuntimeRunPostAgents(world, actionItems, settlementPatches = 
   world.relationshipDynamics.unshift(...relationItems.slice(0, 20).map(item => ({ ...nodeRuntimeCompactItem(item), at: world.clock || 0, source: "node-relationship-dynamics" })));
   world.relationshipDynamics = world.relationshipDynamics.slice(0, 120);
   if (!Array.isArray(world.socialProcesses)) world.socialProcesses = [];
+  world.socialProcesses = nodeRuntimeDedupeSocialProcesses(world.socialProcesses);
   const processItems = social.processes || social.socialProcesses || social.updates || [];
   const localSocialSeeds = nodeRuntimeSeedSocialProcesses(world, eventImpacts, informationFlows);
   const socialProcesses = nodeRuntimeDedupBySignature(
@@ -4182,7 +4506,7 @@ async function nodeRuntimeRunPostAgents(world, actionItems, settlementPatches = 
     ["type", "participants", "truth", "stage"]
   );
   world.socialProcesses.unshift(...socialProcesses);
-  world.socialProcesses = world.socialProcesses.slice(0, 120);
+  world.socialProcesses = nodeRuntimeDedupeSocialProcesses(world.socialProcesses).slice(0, 120);
   world.logs ||= [];
   world.logs.unshift({
     title: "Node Post Agents",
@@ -4385,12 +4709,17 @@ async function runNodeRuntimeStep(slot) {
       .map((candidate, index) => {
         const agent = byId.get(candidate.agentId);
         if (freezeDeadAgent(agent, world)) return Promise.resolve({ status: "skipped", agent, candidate, reason: "dead" });
-        return callAiWithRetry("agentAction", nodeRuntimeActionPayload(world, agent, candidate))
-          .then(result => ({ status: "fulfilled", queueId: `node-${world.clock || 0}-${agent.id}-${index}`, agent, candidate, result: nodeRuntimeGuardAction(world, agent, result) }))
+        return nodeRuntimeGenerateAgentAction(world, agent, candidate, index)
           .catch(error => ({ status: "rejected", agent, candidate, error }));
       });
     const actionResults = await Promise.all(actionCalls);
-    const successfulActions = actionResults.filter(item => item.status === "fulfilled" && !isDeadAgent(item.agent));
+    const successfulActions = actionResults.filter(item => {
+      const action = item.result?.action || {};
+      return item.status === "fulfilled"
+        && !isDeadAgent(item.agent)
+        && nodeRuntimeIsWorldActionSourceAllowed(action)
+        && !nodeRuntimeIsSystemErrorObject(action);
+    });
     if (successfulActions.length) {
       updateRuntimeProgress("time-passage", { phaseIndex: 8, currentTask: `${successfulActions.length} actions` });
       const passages = await nodeRuntimeRunTimePassage(world, successfulActions);
@@ -4481,10 +4810,15 @@ function markKeySuccess(index, durationMs) {
 function markKeyFailure(index, error, durationMs) {
   const item = keyHealth[index];
   if (!item) return;
+  const outputFormatError = ["invalid_json", "invalid_agent_action", "system_error_action"].includes(error?.type);
   item.failure += 1;
-  item.consecutiveFailures += 1;
   item.lastDurationMs = durationMs;
   item.lastError = error.message.slice(0, 160);
+  if (outputFormatError) {
+    item.consecutiveFailures = 0;
+    return;
+  }
+  item.consecutiveFailures += 1;
   if (isPermanentAiError(error)) {
     item.cooldownUntil = Date.now() + 60000;
     return;
@@ -4860,7 +5194,8 @@ function strictJson(text, task = "") {
         "characterSeedAgent",
         "characterConsistencyAgent",
         "setupAgentBatchAgent",
-        "setupRelationSketchAgent"
+        "setupRelationSketchAgent",
+        "agentAction"
       ]);
       if (retryJsonTasks.has(task)) throw error;
       const fallback = fallbackJson(task);
@@ -6795,7 +7130,7 @@ function setupMakeWorld({ slot, prompt, startClock, config, places, seeds, relat
       setupNote: prompt || "",
       customSetup: true,
       setupTables,
-      weatherBox: { current: { condition: "多云", temperature: 24, humidity: 60 }, calendar: { day: Math.floor(startClock / 1440) + 1 } },
+      weatherBox: makeInitialWeatherBox(startClock),
       nodeRuntimeCounters: { tick: 0, context: 0, post: 0, saveSplit: 0 }
     },
     locationBoxes: {}

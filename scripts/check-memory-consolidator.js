@@ -30,7 +30,9 @@ function baseWorld(agent, clock = 600) {
 function testRoutineStaysEventLogUntilHabitForms() {
   const agent = baseAgent();
   const world = baseWorld(agent);
+  world.clock = 22 * 60;
   recordLifeEvent(world, agent, {
+    id: "stable_sleep_0",
     type: "plan_sleep",
     plan: { title: "sleep", localAction: "sleep" },
     summary: "钱芳仪按计划休息"
@@ -40,17 +42,16 @@ function testRoutineStaysEventLogUntilHabitForms() {
   assert.equal(agent.memory.long.length, 0);
   assert.equal(agent.semanticMemory.habit.length, 0);
   assert.equal(world.eventLog[0].memoryGate.shouldRemember, false);
-  recordLifeEvent(world, agent, {
-    type: "plan_sleep",
-    plan: { title: "sleep", localAction: "sleep" },
-    summary: "routine sleep"
-  });
-  recordLifeEvent(world, agent, {
-    type: "plan_sleep",
-    plan: { title: "sleep", localAction: "sleep" },
-    summary: "routine sleep"
-  });
-  assert.equal(world.eventLog.length, 3);
+  for (let index = 1; index < 5; index += 1) {
+    world.clock = index * 1440 + 22 * 60;
+    recordLifeEvent(world, agent, {
+      id: `stable_sleep_${index}`,
+      type: "plan_sleep",
+      plan: { title: "sleep", localAction: "sleep" },
+      summary: "routine sleep"
+    });
+  }
+  assert.equal(world.eventLog.length, 5);
   assert.equal(agent.semanticMemory.habit.length, 1);
   assert.equal(world.eventLog[0].memoryGate.memoryType, "habit");
   assert.match(agent.semanticMemory.habit[0].text, /规律|休息|生活节奏/);
@@ -84,7 +85,7 @@ function testReflectionDoesNotSummarizeReflection() {
   runDailyReflection(world, { force: true });
   assert.equal(agent.memory.long.some(item => /Daily reflection/i.test(item.text || "")), false);
   assert.equal(/Daily reflection/i.test(agent.memorySummary), false);
-  assert.match(agent.memorySummary, /角色近期状态/);
+  assert.match(agent.memorySummary, /角色近期(状态|记忆)/);
 }
 
 function testRelevantMemoryUsesSemanticMeaning() {

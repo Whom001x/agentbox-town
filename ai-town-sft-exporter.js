@@ -119,6 +119,10 @@ function normalizeAction(action = {}) {
   return compactObject({
     action: {
       type: action.type || "wait",
+      sourceType: action.sourceType || "llm",
+      source: action.source || "",
+      reason: action.reason || "",
+      confidence: action.confidence,
       internalState: action.internalState || null,
       intent: action.intent || null,
       summary: action.summary || action.currentTask || "",

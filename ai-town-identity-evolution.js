@@ -36,6 +36,40 @@ function uniqueStrings(values = [], limit = 8) {
   return output.slice(0, limit);
 }
 
+function narrativeThemeHash(theme = "") {
+  return String(theme || "stable")
+    .toLowerCase()
+    .replace(/[^a-z0-9_\-\u4e00-\u9fa5]+/g, "_")
+    .slice(0, 80) || "stable";
+}
+
+function shouldAppendNarrativeTheme(selfModel = {}, theme = "", clock = 0) {
+  const hash = narrativeThemeHash(theme);
+  const state = selfModel.narrativeHash && typeof selfModel.narrativeHash === "object"
+    ? selfModel.narrativeHash
+    : {};
+  const lastAt = num(state[hash]?.lastAt, -Infinity);
+  const repeatWindow = 30 * 1440;
+  if (Number.isFinite(lastAt) && clock - lastAt < repeatWindow) {
+    state[hash] = {
+      hash,
+      lastAt: clock,
+      count: num(state[hash]?.count, 1) + 1,
+      strength: clamp(num(state[hash]?.strength, 0.2) + 0.03, 0, 1, 0.2)
+    };
+    selfModel.narrativeHash = state;
+    return false;
+  }
+  state[hash] = {
+    hash,
+    lastAt: clock,
+    count: num(state[hash]?.count, 0) + 1,
+    strength: clamp(num(state[hash]?.strength, 0.2) + 0.05, 0, 1, 0.2)
+  };
+  selfModel.narrativeHash = state;
+  return true;
+}
+
 function textOf(value) {
   if (!value) return "";
   if (typeof value === "string") return value;
@@ -464,11 +498,13 @@ function evolveAgentIdentity(world = {}, agent = {}, options = {}) {
       220
     );
     selfModel.selfImage = compactString(selfModel.selfImage || selfModel.currentSelfView, selfModel.currentSelfView, 180);
-    selfModel.lifeNarrative = compactString(
-      `${selfModel.lifeNarrative || selfModel.identity || ""} 最近的${theme}经历正在缓慢影响其判断方式。`,
-      selfModel.currentSelfView,
-      260
-    );
+    if (shouldAppendNarrativeTheme(selfModel, theme, clock)) {
+      selfModel.lifeNarrative = compactString(
+        `${selfModel.lifeNarrative || selfModel.identity || ""} 最近的${theme}经历正在缓慢影响其判断方式。`,
+        selfModel.currentSelfView,
+        260
+      );
+    }
   }
 
   syncLongTermMemoryViews(agent);

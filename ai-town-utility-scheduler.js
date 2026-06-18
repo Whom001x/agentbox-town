@@ -21,6 +21,7 @@ const {
 } = require("./ai-town-cognitive-state");
 const { socialFieldBiasForAction } = require("./ai-town-social-field");
 const { socialFeedbackBiasForAction } = require("./ai-town-social-feedback");
+const { causalBiasForAction, causalWeight } = require("./ai-town-temporal-causal");
 
 function num(value, fallback = 0) {
   const number = Number(value);
@@ -761,6 +762,8 @@ function scoreAction(world, agent, action, extras = {}) {
   const relationshipMemory = relationshipMemoryBias(agent, action);
   const socialField = socialFieldBiasForAction(world, agent, action);
   const socialFeedback = socialFeedbackBiasForAction(world, agent, action);
+  const causal = causalBiasForAction(world, agent, action, cognitive);
+  const causalCompensatoryWeight = causalWeight(world);
   const socialFeedbackWeightedScore = num(socialFeedback.gamma, 0.65) * num(socialFeedback.score, 0);
   const context = contextFit(world, agent, action, extras);
   const eligibilityBias = num(action.eligibilityBias || action.eligibility?.bias, 0);
@@ -770,6 +773,7 @@ function scoreAction(world, agent, action, extras = {}) {
   const goalValue = clamp(0.5 + goal.score / 38, 0, 1, 0.5);
   const socialValue = clamp(0.5 + (social + relationshipMemory.score + socialField.score) / 35, 0, 1, 0.5);
   const socialFeedbackValue = clamp(0.5 + socialFeedbackWeightedScore / 35, 0, 1, 0.5);
+  const causalValue = clamp(num(causal.value, 0.5), 0, 1, 0.5);
   const noveltyValue = clamp((aVector.novelty || 0) * 0.55 + (aVector.curiosity || 0) * 0.35 + num(cognitive.biasVector?.noveltySeeking, 0.35) * 0.35, 0, 1, 0.2);
   const vectorCap = 0.2;
   const vectorValue = Math.min(clamp(vector.raw / 8, 0, 1, 0), vectorCap);
@@ -782,6 +786,7 @@ function scoreAction(world, agent, action, extras = {}) {
     + num(weights.novelty, 0.3)
     + num(weights.social, 0.35)
     + num(weights.social, 0.35) * 0.35
+    + causalCompensatoryWeight
   );
   const compensatory =
     (num(weights.memory, 0.55) * memoryValue
@@ -790,7 +795,8 @@ function scoreAction(world, agent, action, extras = {}) {
       + num(weights.goal, 0.55) * goalValue
       + num(weights.novelty, 0.3) * noveltyValue
       + num(weights.social, 0.35) * socialValue
-      + num(weights.social, 0.35) * 0.35 * socialFeedbackValue) / weightTotal;
+      + num(weights.social, 0.35) * 0.35 * socialFeedbackValue
+      + causalCompensatoryWeight * causalValue) / weightTotal;
   const combinedA = clamp(compensatory * 0.78 + contextValue * 0.22 + vectorValue, 0, 1.2, 0.5);
   const noise = (seededRandom(`${agent.id}:${world?.clock || 0}:${action.id}:v3`) - 0.5) * cognitiveTemperature(agent, cognitive) * 1.2;
   const score = combinedA * constraint.value * 100 + noise;
@@ -819,6 +825,9 @@ function scoreAction(world, agent, action, extras = {}) {
       socialFeedbackWeighted: Number(socialFeedbackWeightedScore.toFixed(2)),
       socialFeedbackValue: Number(socialFeedbackValue.toFixed(3)),
       socialValue: Number(socialValue.toFixed(3)),
+      causalBias: Number(causal.score.toFixed(2)),
+      causalValue: Number(causalValue.toFixed(3)),
+      causalWeight: Number(causalCompensatoryWeight.toFixed(3)),
       goalBias: Number(goal.score.toFixed(2)),
       goalValue: Number(goalValue.toFixed(3)),
       selfConsistency: Number(selfConsistency.score.toFixed(2)),
@@ -857,6 +866,7 @@ function scoreAction(world, agent, action, extras = {}) {
       beliefActivation: cognitive.beliefActivation,
       activeGoals: cognitive.activeGoals,
       activeMemories: cognitive.activeMemories,
+      activeCausalMemory: cognitive.activeCausalMemory,
       activeBeliefs: cognitive.activeBeliefs,
       desireCandidates: cognitive.desireCandidates,
       thoughtCandidates: cognitive.thoughtCandidates,
@@ -867,10 +877,13 @@ function scoreAction(world, agent, action, extras = {}) {
       needEmergencyFlag: cognitive.needEmergencyFlag,
       cognitiveProfile: cognitive.cognitiveProfile,
       socialModifier: cognitive.socialModifier,
+      causalBias: cognitive.causalBias,
+      temporalCausal: cognitive.temporalCausal,
       source: cognitive.source
     },
     socialFieldBias: socialField,
     socialFeedbackBias: socialFeedback,
+    causalBias: causal,
     realityConstraint: constraint,
     goalDetails: goal.details,
     selfConsistencyDetails: selfConsistency.details,
@@ -907,7 +920,7 @@ function decisionTraceFor(action = null) {
   if (!action) {
     return {
       chosenAction: "",
-      scoreBreakdown: { need: 0, memory: 0, personality: 0, goal: 0, emotion: 0, social: 0, socialField: 0, socialFeedback: 0, consistency: 0, cognitiveFit: 0, eligibility: 0 }
+      scoreBreakdown: { need: 0, memory: 0, personality: 0, goal: 0, emotion: 0, social: 0, socialField: 0, socialFeedback: 0, causal: 0, consistency: 0, cognitiveFit: 0, eligibility: 0 }
     };
   }
   const components = action.components || {};
@@ -924,6 +937,7 @@ function decisionTraceFor(action = null) {
       social: Number(components.socialBias || 0),
       socialField: Number(components.socialFieldBias || 0),
       socialFeedback: Number(components.socialFeedbackWeighted || 0),
+      causal: Number(components.causalBias || 0),
       consistency: Number(components.selfConsistency || 0),
       eligibility: Number(components.eligibilityBias || 0),
       context: Number(components.contextFit || 0),
@@ -951,6 +965,7 @@ function debugDecisionFor(action = null) {
       social: trace.scoreBreakdown.social,
       socialField: trace.scoreBreakdown.socialField,
       socialFeedback: trace.scoreBreakdown.socialFeedback,
+      causal: trace.scoreBreakdown.causal,
       consistency: trace.scoreBreakdown.consistency,
       eligibility: trace.scoreBreakdown.eligibility,
       context: trace.scoreBreakdown.context,
