@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const { appendMemory, recordLifeEvent, runDailyReflection, retrieveRelevantMemories } = require("../ai-town-memory-stream");
 const { aggregateDecision } = require("../ai-town-decision-aggregator");
 const { judgeAction, mergeWorldMasterJudgement } = require("../ai-town-world-master");
+const { cognitiveState } = require("../ai-town-cognitive-state");
 const { utilityDecision } = require("../ai-town-utility-scheduler");
 
 function agent(overrides = {}) {
@@ -34,6 +35,11 @@ function world(agents, clock = 1440) {
     places: [{ id: "school" }, { id: "clinic" }, { id: "apartment" }],
     agents
   };
+}
+
+function decide(w, a, context = {}) {
+  const state = cognitiveState(w, a, context);
+  return utilityDecision(state.psychologicalState);
 }
 
 function testReflectionUsesImportantMemory() {
@@ -87,10 +93,10 @@ function testExperienceMemoryPersonalityUtilityLoop() {
     interruption: { type: "health", priority: 96, canOverridePlan: true, reason: "health critical" },
     summary: "Test Agent felt sick and changed the work plan."
   });
-  const decision = utilityDecision(w, a);
+  const decision = decide(w, a);
   assert.ok(a.semanticMemory.experience.length >= 1);
   assert.ok(decision.personalityRuntime);
-  assert.ok(decision.memoryInfluence.memoryBias.some(item => item.action === "seek_care"));
+  assert.ok(decision.psychologicalState.projection.memoryActivation > 0);
   assert.ok(decision.decisionTrace.scoreBreakdown.memory > 0);
   assert.ok(decision.debugDecision.action);
 }

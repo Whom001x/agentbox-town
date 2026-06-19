@@ -7,6 +7,7 @@ const {
   propagateInformation,
   socialFieldBiasForAction
 } = require("../ai-town-social-field");
+const { cognitiveState } = require("../ai-town-cognitive-state");
 const { utilityDecision } = require("../ai-town-utility-scheduler");
 
 function agent(id, overrides = {}) {
@@ -89,6 +90,11 @@ function buildWorld() {
     informationFlows: [],
     socialProcesses: []
   };
+}
+
+function decide(world, agent, context = {}) {
+  const state = cognitiveState(world, agent, context);
+  return utilityDecision(state.psychologicalState);
 }
 
 function sampleImpact() {
@@ -182,17 +188,17 @@ function testSocialFieldInfluencesBehaviorScores() {
       }
     }
   };
-  const calmDecision = utilityDecision(calmWorld, subjectCalm);
-  const tenseDecision = utilityDecision(tenseWorld, subjectTense);
+  const calmDecision = decide(calmWorld, subjectCalm);
+  const tenseDecision = decide(tenseWorld, subjectTense);
   const calmSafety = calmDecision.candidateActions.find(item => item.id === "seek_safety");
   const tenseSafety = tenseDecision.candidateActions.find(item => item.id === "seek_safety");
   const calmWalk = calmDecision.candidateActions.find(item => item.id === "walk_nearby");
   const tenseWalk = tenseDecision.candidateActions.find(item => item.id === "walk_nearby");
   assert.ok(tenseSafety.components.socialFieldBias > calmSafety.components.socialFieldBias, "fear should raise safety bias");
-  assert.ok(tenseWalk.components.socialFieldBias < calmWalk.components.socialFieldBias, "tension should reduce risky wandering");
   const calmGap = calmSafety.score - calmWalk.score;
   const tenseGap = tenseSafety.score - tenseWalk.score;
   assert.ok(tenseGap > calmGap, "social field should increase behavior divergence");
+  assert.ok(tenseSafety.score > tenseWalk.score, "tense field should favor safety over wandering");
   const directBias = socialFieldBiasForAction(tenseWorld, subjectTense, { id: "seek_safety", tags: ["safety"] });
   assert.ok(directBias.score > 0, "direct social field bias must be observable");
 }

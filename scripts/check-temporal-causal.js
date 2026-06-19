@@ -80,6 +80,11 @@ function baseWorld(agent, clock = 8 * 60) {
   };
 }
 
+function decide(world, agent, context = {}) {
+  const state = cognitiveState(world, agent, context);
+  return utilityDecision(state.psychologicalState);
+}
+
 function workEvent(index) {
   return {
     id: `work_${index}`,
@@ -143,8 +148,8 @@ function testWorkSocialChainCreatesCausalMemory() {
   assert.ok(result.temporalCausal, "recordLifeEvent should return temporal causal result");
   const memory = (agent.causalMemory || []).find(item => item.category === "work_social_recovery");
   assert.ok(memory, "work -> social depletion -> contact chain should create causalMemory");
-  assert.match(memory.learning.causalRule, /work/i);
-  assert.match(memory.learning.causalBelief, /familiar|social/i);
+  assert.match(memory.learning.causalRule, /work|工作/i);
+  assert.match(memory.learning.causalBelief, /familiar|social|熟悉|社交/i);
   assert.ok(memory.learning.confidence > 0.45);
   assert.ok(memory.causalStrength > 0);
 }
@@ -187,7 +192,7 @@ function testCognitiveAndSchedulerCarryCausalBias() {
   const workBias = causalBiasForAction(world, agent, { id: "follow_plan" }, state);
   assert.ok(contactBias.score > workBias.score, "work-social causal memory should softly favor contact over more work");
 
-  const decision = utilityDecision(world, agent, { eventText: "long work made social contact feel useful" });
+  const decision = decide(world, agent, { eventText: "long work made social contact feel useful" });
   assert.ok(decision.candidateActions.some(action => typeof action.components?.causalBias === "number"));
   assert.equal(typeof decision.decisionTrace.scoreBreakdown.causal, "number");
   assert.ok(decision.candidateActions.every(action => action.components.causalWeight <= 0.2));

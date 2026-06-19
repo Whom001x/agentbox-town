@@ -49,10 +49,100 @@ function add(vector, key, value) {
   vector[key] = Number((num(vector[key], 0) + Number(value)).toFixed(4));
 }
 
+function blendNumber(prev, next, alpha) {
+  return Number((num(prev, next) * alpha + num(next, prev) * (1 - alpha)).toFixed(4));
+}
+
+function blendVector(prev = {}, next = {}, alpha = 0.85) {
+  const output = {};
+  new Set([...Object.keys(prev || {}), ...Object.keys(next || {})]).forEach(key => {
+    output[key] = blendNumber(prev?.[key], next?.[key], alpha);
+  });
+  return output;
+}
+
 function scale01(value, fallback = 0) {
   const number = num(value, fallback);
   if (number <= 1 && number >= 0) return number;
   return clamp(number / 100, 0, 1, fallback);
+}
+
+function stageFromAgent(agent = {}) {
+  const age = num(agent.ageYears ?? agent.age, 35);
+  const text = `${agent.ageStage || ""} ${agent.job || ""} ${textOf(agent.identityCore)} ${textOf(agent.selfModel)}`.toLowerCase();
+  if (age <= 12 || includesAny(text, ["child", "kid", "student child", "\u513f\u7ae5", "\u5b69\u5b50", "\u5c0f\u5b66\u751f"])) return "child";
+  if (age <= 18 || includesAny(text, ["teen", "student", "\u9752\u5c11\u5e74", "\u5b66\u751f", "\u4e2d\u5b66\u751f"])) return "teen";
+  if (age >= 65 || includesAny(text, ["elder", "old", "retired", "\u8001\u4eba", "\u8001\u5e74", "\u9000\u4f11"])) return "elder";
+  return "adult";
+}
+
+function professionFromAgent(agent = {}) {
+  const text = `${agent.job || ""} ${agent.ageStage || ""} ${textOf(agent.identityCore)} ${textOf(agent.selfModel)}`.toLowerCase();
+  if (includesAny(text, ["doctor", "nurse", "clinic", "medical", "physician", "\u533b\u751f", "\u62a4\u58eb", "\u533b\u62a4", "\u8bca\u6240", "\u533b\u7597"])) return "medical";
+  if (includesAny(text, ["shop", "store", "merchant", "seller", "baker", "breakfast", "cashier", "owner", "\u5e97\u4e3b", "\u8001\u677f", "\u5e97\u5458", "\u5c0f\u5356\u90e8", "\u65e9\u9910", "\u5546\u8d29", "\u552e\u8d27", "\u6536\u94f6", "\u9762\u5305"])) return "merchant";
+  if (includesAny(text, ["teacher", "school", "class", "\u8001\u5e08", "\u6559\u5e08", "\u5b66\u6821"])) return "teacher";
+  if (includesAny(text, ["student", "pupil", "\u5b66\u751f", "\u5c0f\u5b66\u751f", "\u4e2d\u5b66\u751f"])) return "student";
+  if (includesAny(text, ["guard", "security", "police", "\u4fdd\u5b89", "\u8b66\u5bdf", "\u5de1\u903b"])) return "security";
+  if (includesAny(text, ["detective", "investigator", "\u4fa6\u63a2", "\u8c03\u67e5"])) return "investigator";
+  if (includesAny(text, ["artist", "writer", "painter", "\u827a\u672f", "\u753b\u5bb6", "\u4f5c\u5bb6", "\u8bb0\u5f55"])) return "artist";
+  return "resident";
+}
+
+function runtimeContextProjection(agent = {}, context = {}) {
+  const plan = context.plan || null;
+  const interruption = context.interruption || null;
+  const currentTask = String(agent.currentTask || "").slice(0, 120);
+  const history = Array.isArray(agent.actionHistory) ? agent.actionHistory.slice(0, 12) : [];
+  const ids = history.map(item => String(item.actionId || item.id || item.type || item.action || "")).filter(Boolean);
+  const counts = ids.reduce((map, id) => map.set(id, (map.get(id) || 0) + 1), new Map());
+  const repeatRate = ids.length >= 4 && counts.size ? Math.max(...counts.values()) / Math.max(1, ids.length) : 0;
+  const curiosity = scale01(agent.cognitiveProfile?.curiosity, 0.5);
+  const novelty = scale01(agent.cognitiveProfile?.noveltySeeking ?? agent.cognitiveProfile?.curiosity, curiosity);
+  const uncertainty = scale01(context.uncertainty ?? interruption?.priority, 0);
+  return {
+    stage: stageFromAgent(agent),
+    profession: professionFromAgent(agent),
+    currentPlace: agent.position || agent.place || "",
+    activeProcess: Boolean(agent.activeProcess),
+    lifeStatus: agent.lifeStatus || "alive",
+    terminalDead: Boolean(agent.terminalState?.dead),
+    profile: {
+      curiosity,
+      riskTolerance: scale01(agent.cognitiveProfile?.riskTolerance, 0.5)
+    },
+    taskState: {
+      currentTask,
+      medicalDuty: includesAny(currentTask, ["clinic", "medical", "doctor", "诊所", "医院", "问诊", "看诊"]),
+      businessDuty: includesAny(currentTask, ["shop", "store", "business", "customer", "店", "顾客", "补货"])
+    },
+    behavioralEntropy: {
+      repeatRate: Number(repeatRate.toFixed(4)),
+      unique: counts.size,
+      total: ids.length
+    },
+    explorationPressure: {
+      base: scale01(agent.explorationRate, 0.05),
+      threshold: scale01(context.behaviorEntropyThreshold ?? context.explorationThreshold, 0.75),
+      curiosityDrive: curiosity,
+      uncertainty,
+      noveltyPressure: novelty
+    },
+    relationship: {
+      dependent: relationshipSignals(agent).dependency >= 70
+    },
+    plan: plan ? {
+      title: String(plan.title || "").slice(0, 120),
+      place: String(plan.place || "").slice(0, 80),
+      localAction: String(plan.localAction || "").slice(0, 80),
+      fixed: Boolean(plan.fixed)
+    } : null,
+    interruption: interruption ? {
+      type: String(interruption.type || ""),
+      priority: num(interruption.priority, 0),
+      canOverridePlan: Boolean(interruption.canOverridePlan),
+      reason: String(interruption.reason || "").slice(0, 120)
+    } : null
+  };
 }
 
 function normalizeWeights(weights = {}) {
@@ -757,6 +847,7 @@ function cognitiveState(world = {}, agent = {}, context = {}) {
   const activeMemories = config.enabled ? activateMemories(world, agent, context, driveVector, emotions, goalRuntime) : [];
   const activeBeliefs = config.enabled ? activeBeliefsFromMemories(agent, activeMemories) : [];
   const activeGoals = config.enabled ? activeGoalsFromRuntime(goalRuntime, context) : [];
+  const runtimeContext = runtimeContextProjection(agent, context);
   const beliefActivationRaw = activeBeliefs.length ? activeBeliefs.reduce((sum, item) => sum + item.activation, 0) / activeBeliefs.length : 0;
   const memoryActivation = activeMemories.length ? activeMemories.reduce((sum, item) => sum + item.activation, 0) / activeMemories.length : 0;
   const goalActivation = activeGoals.length ? activeGoals[0].activation : 0;
@@ -840,6 +931,7 @@ function cognitiveState(world = {}, agent = {}, context = {}) {
     agentId: agent.id || "",
     timestamp: num(world.clock, 0),
     version: "3.2",
+    stabilityLayerVersion: "3.4.2",
     causalLayerVersion: "3.3.7",
     enabled: config.enabled,
     decisionWeights,
@@ -855,6 +947,7 @@ function cognitiveState(world = {}, agent = {}, context = {}) {
     perceptionWeights,
     driveVector,
     biasVector,
+    runtimeContext,
     actionModifiers,
     needDynamicsState,
     needEmergencyFlag,
@@ -866,6 +959,7 @@ function cognitiveState(world = {}, agent = {}, context = {}) {
     cognitiveProfile: profileSignals,
     source: "cognitive-state-v3"
   };
+  result.psychologicalState = stabilizePsychologicalState(world, agent, result);
   agent.cognitiveState = result;
   agent.desireCandidates = desireCandidates;
   agent.activeBeliefs = activeBeliefs;
@@ -954,6 +1048,107 @@ function cognitiveTemperature(agent = {}, cognitive = {}) {
   return Number(clamp(temperature, 0.3, 1.0, 0.65).toFixed(3));
 }
 
+function psychologicalStateConfig(world = {}) {
+  const cfg = world.config?.psychologicalState || world.psychologicalState || {};
+  return {
+    enabled: cfg.enabled !== false,
+    alpha: clamp(cfg.alpha ?? world.config?.psychologicalStateAlpha, 0.7, 0.95, 0.85)
+  };
+}
+
+function buildPsychologicalInput(cognitive = {}, agent = {}, socialPressure = {}) {
+  const runtimeContext = cognitive.runtimeContext || runtimeContextProjection(agent, {});
+  return {
+    agentId: agent.id || "",
+    emotionVector: Object.fromEntries(Object.entries(agent.emotionVector || agent.emotions || {})
+      .map(([key, value]) => [key, Number(scale01(value, 0).toFixed(4))])),
+    needsVector: Object.fromEntries(Object.entries(agent.needs || {})
+      .map(([key, value]) => [key, Number(clamp((100 - num(value, 70)) / 100, 0, 1, 0).toFixed(4))])),
+    driveVector: { ...(cognitive.driveVector || {}) },
+    biasVector: { ...(cognitive.biasVector || {}) },
+    socialPressure: {
+      fear: scale01(socialPressure.fearLevel, 0),
+      curiosity: scale01(socialPressure.curiosityLevel, 0),
+      rumor: scale01(socialPressure.rumorDensity, 0),
+      tension: scale01(socialPressure.socialTension, 0),
+      information: scale01(socialPressure.informationPressure, 0)
+    },
+    projection: {
+      selfPressure: scale01(cognitive.selfPressure, 0),
+      socialNeed: scale01(cognitive.socialNeed, 0),
+      goalPressure: scale01(cognitive.responsibilityDrive, 0),
+      emotionalLoad: scale01(cognitive.emotionalLoad, 0),
+      beliefActivation: scale01(cognitive.beliefActivation, 0),
+      memoryActivation: Array.isArray(cognitive.activeMemories) && cognitive.activeMemories.length
+        ? cognitive.activeMemories.reduce((sum, item) => sum + scale01(item.activation, 0), 0) / cognitive.activeMemories.length
+        : 0,
+      causal: {
+        safetyBias: scale01(cognitive.causalBias?.safetyBias, 0),
+        socialBias: scale01(cognitive.causalBias?.socialBias, 0),
+        responsibilityBias: scale01(cognitive.causalBias?.responsibilityBias, 0)
+      },
+      runtimeContext,
+      taskState: runtimeContext.taskState || {},
+      behavioralEntropy: runtimeContext.behavioralEntropy || { repeatRate: 0, unique: 0, total: 0 },
+      explorationPressure: runtimeContext.explorationPressure || {},
+      perceptionWeights: { ...(cognitive.perceptionWeights || {}) }
+    }
+  };
+}
+
+function psychologicalStateVector(state = {}) {
+  return {
+    ...state.emotionVector,
+    ...Object.fromEntries(Object.entries(state.needsVector || {}).map(([key, value]) => [`need:${key}`, value])),
+    ...Object.fromEntries(Object.entries(state.driveVector || {}).map(([key, value]) => [`drive:${key}`, value])),
+    ...Object.fromEntries(Object.entries(state.biasVector || {}).map(([key, value]) => [`bias:${key}`, value])),
+    ...Object.fromEntries(Object.entries(state.socialPressure || {}).map(([key, value]) => [`social:${key}`, value]))
+  };
+}
+
+function stabilizePsychologicalState(world = {}, agent = {}, cognitive = {}) {
+  const config = psychologicalStateConfig(world);
+  const input = buildPsychologicalInput(cognitive, agent, world.socialField || {});
+  const previous = agent.psychologicalState || null;
+  const alpha = config.alpha;
+  const state = previous && config.enabled ? {
+    emotionVector: blendVector(previous.emotionVector, input.emotionVector, alpha),
+    needsVector: blendVector(previous.needsVector, input.needsVector, alpha),
+    driveVector: blendVector(previous.driveVector, input.driveVector, alpha),
+    biasVector: blendVector(previous.biasVector, input.biasVector, alpha),
+    socialPressure: blendVector(previous.socialPressure, input.socialPressure, alpha)
+    ,
+    projection: {
+      ...input.projection,
+      selfPressure: blendNumber(previous.projection?.selfPressure, input.projection.selfPressure, alpha),
+      socialNeed: blendNumber(previous.projection?.socialNeed, input.projection.socialNeed, alpha),
+      goalPressure: blendNumber(previous.projection?.goalPressure, input.projection.goalPressure, alpha),
+      emotionalLoad: blendNumber(previous.projection?.emotionalLoad, input.projection.emotionalLoad, alpha),
+      beliefActivation: blendNumber(previous.projection?.beliefActivation, input.projection.beliefActivation, alpha),
+      memoryActivation: blendNumber(previous.projection?.memoryActivation, input.projection.memoryActivation, alpha),
+      causal: blendVector(previous.projection?.causal, input.projection.causal, alpha),
+      runtimeContext: input.projection.runtimeContext,
+      taskState: input.projection.taskState,
+      behavioralEntropy: input.projection.behavioralEntropy,
+      explorationPressure: input.projection.explorationPressure,
+      perceptionWeights: blendVector(previous.projection?.perceptionWeights, input.projection.perceptionWeights, alpha)
+    }
+  } : input;
+  const result = {
+    agentId: agent.id || "",
+    version: "3.4.2",
+    timestamp: num(world.clock, 0),
+    alpha,
+    enabled: config.enabled,
+    ...state,
+    vector: psychologicalStateVector(state),
+    source: "unified-psychological-state"
+  };
+  agent.previousPsychologicalState = previous;
+  agent.psychologicalState = result;
+  return result;
+}
+
 module.exports = {
   ensureDecisionWeights,
   defaultDecisionWeights,
@@ -962,7 +1157,10 @@ module.exports = {
   activateMemories,
   activeBeliefsFromMemories,
   desireCandidatesFromState,
+  runtimeContextProjection,
   cognitiveState,
+  stabilizePsychologicalState,
+  psychologicalStateVector,
   actionVector,
   actionMatch,
   realityConstraint,

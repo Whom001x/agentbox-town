@@ -2,6 +2,7 @@
 
 const assert = require("node:assert/strict");
 const { recordLifeEvent, runDailyReflection } = require("../ai-town-memory-stream");
+const { cognitiveState } = require("../ai-town-cognitive-state");
 const { utilityDecision } = require("../ai-town-utility-scheduler");
 
 function agent(overrides = {}) {
@@ -78,6 +79,11 @@ function contactScore(decision) {
   return action.score;
 }
 
+function decide(w, a, context = {}) {
+  const state = cognitiveState(w, a, context);
+  return utilityDecision(state.psychologicalState);
+}
+
 function testImportantInteractionCreatesStructuredRelationshipMemory() {
   const a = agent();
   const w = world(a);
@@ -134,7 +140,7 @@ function testRelationshipMemoryAffectsContactFamiliarScore() {
   const positiveWorld = world(positive);
   recordLifeEvent(positiveWorld, positive, relationshipEvent());
   flushRelationshipMemory(positiveWorld);
-  const positiveScore = contactScore(utilityDecision(positiveWorld, positive));
+  const positiveScore = contactScore(decide(positiveWorld, positive));
 
   const negative = agent();
   const negativeWorld = world(negative);
@@ -145,7 +151,7 @@ function testRelationshipMemoryAffectsContactFamiliarScore() {
     emotionDelta: { angry: 35, anxious: 18 }
   }));
   flushRelationshipMemory(negativeWorld);
-  const negativeScore = contactScore(utilityDecision(negativeWorld, negative));
+  const negativeScore = contactScore(decide(negativeWorld, negative));
 
   assert.ok(positiveScore > negativeScore, `positive ${positiveScore} should exceed negative ${negativeScore}`);
 }

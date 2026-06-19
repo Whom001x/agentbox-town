@@ -1,5 +1,7 @@
 "use strict";
 
+const { cognitiveWrite, registerCognitiveWriteCommitter } = require("./ai-town-cognitive-integrity");
+
 const DEFAULT_DECAY_LAMBDA = 0.00035;
 const DEFAULT_CAUSAL_WEIGHT = 0.12;
 const MAX_CAUSAL_WEIGHT = 0.2;
@@ -96,6 +98,42 @@ function causalConfig(world = {}) {
     causalWeight: clamp(world.config?.causalWeight ?? cfg.causalWeight, 0, MAX_CAUSAL_WEIGHT, DEFAULT_CAUSAL_WEIGHT)
   };
 }
+
+registerCognitiveWriteCommitter("causalMemory", ({ world, agent, payload, source, confidence, timestamp }) => {
+  if (!agent?.id) return null;
+  const cfg = causalConfig(world);
+  const operation = payload?.operation || "create";
+  const stampOne = memory => ({
+    ...(memory || {}),
+    source: memory?.source || source || "causalLearning",
+    confidence: memory?.confidence == null ? confidence : memory.confidence,
+    tick: memory?.tick ?? memory?.timestamp ?? timestamp ?? world?.clock ?? 0,
+    kernelVersion: memory?.kernelVersion || payload?.kernelVersion || ""
+  });
+  if (operation === "decayBatch" || operation === "prune") {
+    agent.causalMemory = (Array.isArray(payload.memories) ? payload.memories : [])
+      .map(stampOne)
+      .slice(0, cfg.maxMemory);
+    return agent.causalMemory;
+  }
+  const memory = stampOne(payload.memory || payload);
+  const existingIndex = (agent.causalMemory || []).findIndex(item => (
+    (memory.id && item.id === memory.id)
+    || (memory.causalKey && item.causalKey === memory.causalKey)
+  ));
+  const next = Array.isArray(agent.causalMemory) ? agent.causalMemory.slice() : [];
+  if (existingIndex >= 0) next[existingIndex] = { ...next[existingIndex], ...memory };
+  else next.unshift(memory);
+  agent.causalMemory = next
+    .filter(item => clamp01(item.learning?.confidence ?? item.confidence, 0) >= 0.05)
+    .sort((a, b) => {
+      const ac = clamp01(a.learning?.confidence ?? a.confidence, 0);
+      const bc = clamp01(b.learning?.confidence ?? b.confidence, 0);
+      return bc - ac || num(b.lastConfirmed, 0) - num(a.lastConfirmed, 0);
+    })
+    .slice(0, cfg.maxMemory);
+  return memory;
+}, { module: "temporal-causal" });
 
 function collectAgentEvents(world = {}, agent = {}, extraEvent = null) {
   const rows = [];
@@ -306,8 +344,8 @@ function chainFromEvent(world = {}, agent = {}, events = [], index = 0, context 
         behaviorChange: compactText(event.type || event.actionType || "contact_familiar", "contact_familiar", 80)
       },
       learning: {
-        causalRule: "Long focused work periods can lower social and comfort state.",
-        causalBelief: "Contacting a familiar person can help me recover from social depletion.",
+        causalRule: "长时间专注工作会消耗我的社交和舒适状态。",
+        causalBelief: "在社交被消耗后，联系熟悉的人能帮助我恢复状态。",
         confidence
       },
       sourceEvents: [...workEvents.slice(-5).map(item => item.id).filter(Boolean), event.id].filter(Boolean),
@@ -340,8 +378,8 @@ function chainFromEvent(world = {}, agent = {}, events = [], index = 0, context 
           behaviorChange: compactText(event.type || event.actionType || "seek_care", "seek_care", 80)
         },
         learning: {
-          causalRule: "Repeated health pressure tends to disrupt ordinary plans.",
-          causalBelief: "Handling health concerns early is safer than ignoring them.",
+          causalRule: "反复出现健康压力时，我的普通计划更容易被打断。",
+          causalBelief: "身体不适时尽早处理，比一直忽视更安全。",
           confidence: clamp01(0.5 + state * 0.18, 0.55)
         },
         sourceEvents: [...healthEvents.slice(-4).map(item => item.id).filter(Boolean), event.id].filter(Boolean),
@@ -375,8 +413,8 @@ function chainFromEvent(world = {}, agent = {}, events = [], index = 0, context 
           behaviorChange: compactText(event.type || event.actionType || "seek_safety", "seek_safety", 80)
         },
         learning: {
-          causalRule: "Risk signals make careful checking more useful.",
-          causalBelief: "When I feel unsafe, confirming the environment helps me stay stable.",
+          causalRule: "出现风险信号时，先谨慎确认环境更有用。",
+          causalBelief: "当我感到不安全时，确认周围情况能让我更稳定。",
           confidence: clamp01(0.48 + state * 0.18, 0.55)
         },
         sourceEvents: [...safetyEvents.slice(-4).map(item => item.id).filter(Boolean), event.id].filter(Boolean),
@@ -409,8 +447,8 @@ function chainFromEvent(world = {}, agent = {}, events = [], index = 0, context 
           behaviorChange: compactText(event.type || event.actionType || "relationship_action", "relationship_action", 80)
         },
         learning: {
-          causalRule: "Meaningful help or conflict changes later relationship expectations.",
-          causalBelief: "People who repeatedly support me are more reliable to approach.",
+          causalRule: "重要的帮助或冲突会改变我之后对关系的预期。",
+          causalBelief: "反复支持过我的人，更值得我在需要时靠近。",
           confidence: clamp01(0.5 + relationshipImpact(agent, event, 0.35) * 0.18, 0.55)
         },
         sourceEvents: [event.id].filter(Boolean),
@@ -446,8 +484,8 @@ function chainFromEvent(world = {}, agent = {}, events = [], index = 0, context 
         behaviorChange: compactText(event.type || event.actionType || "response", "response", 80)
       },
       learning: {
-        causalRule: "Repeated high-impact events can predict similar state changes.",
-        causalBelief: "I should treat repeated high-impact patterns as useful caution.",
+        causalRule: "反复出现的高影响事件，会让我预判类似的状态变化。",
+        causalBelief: "我应该把反复出现的高影响模式当作提醒。",
         confidence: 0.55
       },
       sourceEvents: [event.id].filter(Boolean),
@@ -465,18 +503,20 @@ function decayCausalMemory(world = {}, agent = {}) {
   const memories = ensureCausalMemory(agent);
   const cfg = causalConfig(world);
   const clock = num(world.clock, 0);
-  memories.forEach(memory => {
+  const nextMemories = memories.map(memory => {
     const last = num(memory.lastDecayAt ?? memory.lastConfirmed ?? memory.timestamp, clock);
     const delta = Math.max(0, clock - last);
     const lambda = clamp(num(memory.decayRate, cfg.decayLambda), 0, 0.01, cfg.decayLambda);
     const current = clamp01(memory.learning?.confidence ?? memory.confidence, 0.5);
     const next = clamp01(current * Math.exp(-lambda * delta), current);
-    memory.learning ||= {};
-    memory.learning.confidence = Number(next.toFixed(3));
-    memory.confidence = memory.learning.confidence;
-    memory.lastDecayAt = clock;
-  });
-  agent.causalMemory = memories
+    const learning = { ...(memory.learning || {}), confidence: Number(next.toFixed(3)) };
+    return {
+      ...memory,
+      learning,
+      confidence: learning.confidence,
+      lastDecayAt: clock
+    };
+  })
     .filter(memory => clamp01(memory.learning?.confidence ?? memory.confidence, 0) >= 0.05)
     .sort((a, b) => {
       const ac = clamp01(a.learning?.confidence ?? a.confidence, 0);
@@ -484,7 +524,19 @@ function decayCausalMemory(world = {}, agent = {}) {
       return bc - ac || num(b.lastConfirmed, 0) - num(a.lastConfirmed, 0);
     })
     .slice(0, cfg.maxMemory);
-  return agent.causalMemory;
+  const write = cognitiveWrite({
+    world,
+    agent,
+    agentId: agent.id,
+    source: "causalLearning",
+    target: "causalMemory",
+    operation: "decayBatch",
+    payload: { operation: "decayBatch", memories: nextMemories },
+    reason: "causal memory confidence decay",
+    confidence: 0.7,
+    timestamp: clock
+  });
+  return write.ok ? write.applied : memories;
 }
 
 function upsertCausalMemory(world = {}, agent = {}, chain = {}, event = {}) {
@@ -506,27 +558,49 @@ function upsertCausalMemory(world = {}, agent = {}, chain = {}, event = {}) {
   const key = `${chain.category}:${chain.triggerKey}`;
   const existing = memories.find(item => item.causalKey === key);
   if (existing) {
-    existing.repeatCount = Math.max(1, num(existing.repeatCount, 1)) + 1;
-    existing.lastConfirmed = clock;
-    existing.sourceEvents = Array.from(new Set([...(existing.sourceEvents || []), ...(chain.sourceEvents || [])])).slice(-20);
-    existing.causalStrength = Number(Math.max(num(existing.causalStrength, 0), strengthResult.strength).toFixed(3));
-    existing.causalImportance = Number(Math.max(num(existing.causalImportance, 0), causalImportance).toFixed(3));
-    existing.learning ||= {};
-    existing.learning.causalRule = chain.learning.causalRule;
-    existing.learning.causalBelief = chain.learning.causalBelief;
+    const repeatCount = Math.max(1, num(existing.repeatCount, 1)) + 1;
     const reinforcement = 0.08
       + Math.sqrt(Math.max(0, strengthResult.strength)) * 0.18
-      + Math.min(0.1, existing.repeatCount * 0.008);
-    existing.learning.confidence = Number(clamp01(
-      clamp01(existing.learning.confidence, 0.5) + reinforcement,
+      + Math.min(0.1, repeatCount * 0.008);
+    const learning = {
+      ...(existing.learning || {}),
+      causalRule: chain.learning.causalRule,
+      causalBelief: chain.learning.causalBelief,
+      confidence: Number(clamp01(
+      clamp01(existing.learning?.confidence, 0.5) + reinforcement,
       0
-    ).toFixed(3));
-    existing.confidence = existing.learning.confidence;
-    existing.effect = chain.effect;
-    existing.cause = chain.cause;
-    existing.trigger = chain.trigger;
-    existing.lastDecayAt = clock;
-    return { memory: existing, updated: true, causalImportance, strength: strengthResult };
+      ).toFixed(3))
+    };
+    const nextMemory = {
+      ...existing,
+      repeatCount,
+      lastConfirmed: clock,
+      sourceEvents: Array.from(new Set([...(existing.sourceEvents || []), ...(chain.sourceEvents || [])])).slice(-20),
+      causalStrength: Number(Math.max(num(existing.causalStrength, 0), strengthResult.strength).toFixed(3)),
+      causalImportance: Number(Math.max(num(existing.causalImportance, 0), causalImportance).toFixed(3)),
+      learning,
+      confidence: learning.confidence,
+      confidenceDelta: Number((learning.confidence - clamp01(existing.learning?.confidence ?? existing.confidence, 0.5)).toFixed(3)),
+      personalCausalWeight: Number(clamp01(num(existing.personalCausalWeight, 0.2) * 0.92 + strengthResult.strength * 0.08, 0.2).toFixed(3)),
+      effect: chain.effect,
+      cause: chain.cause,
+      trigger: chain.trigger,
+      lastDecayAt: clock
+    };
+    const write = cognitiveWrite({
+      world,
+      agent,
+      agentId: agent.id,
+      source: "causalLearning",
+      target: "causalMemory",
+      operation: "reinforce",
+      payload: { operation: "reinforce", memory: nextMemory, confidenceDelta: nextMemory.confidenceDelta },
+      reason: "reinforced personal causal pattern",
+      confidence: nextMemory.confidence,
+      timestamp: clock
+    });
+    if (!write.ok) return { memory: null, skipped: true, reason: write.reason, causalImportance, strength: strengthResult };
+    return { memory: write.applied, updated: true, causalImportance, strength: strengthResult };
   }
 
   const confidence = Number(clamp01(chain.learning.confidence, 0.55).toFixed(3));
@@ -547,6 +621,7 @@ function upsertCausalMemory(world = {}, agent = {}, chain = {}, event = {}) {
     causalStrength: strengthResult.strength,
     causalImportance: Number(causalImportance.toFixed(3)),
     repeatCount: Math.max(1, num(chain.repeatCount, 1)),
+    personalCausalWeight: Number(clamp01(confidence * 0.8, 0.1).toFixed(3)),
     lastConfirmed: clock,
     lastDecayAt: clock,
     decayRate: causalConfig(world).decayLambda,
@@ -554,9 +629,20 @@ function upsertCausalMemory(world = {}, agent = {}, chain = {}, event = {}) {
     factAuthority: false,
     rule: "Causal memory is a soft learned tendency; it cannot directly choose actions or settle facts."
   };
-  memories.unshift(memory);
-  agent.causalMemory = memories.slice(0, causalConfig(world).maxMemory);
-  return { memory, created: true, causalImportance, strength: strengthResult };
+  const write = cognitiveWrite({
+    world,
+    agent,
+    agentId: agent.id,
+    source: "causalLearning",
+    target: "causalMemory",
+    operation: "create",
+    payload: { operation: "create", memory },
+    reason: "new personal causal pattern",
+    confidence,
+    timestamp: clock
+  });
+  if (!write.ok) return { memory: null, skipped: true, reason: write.reason, causalImportance, strength: strengthResult };
+  return { memory: write.applied, created: true, causalImportance, strength: strengthResult };
 }
 
 function updateTemporalCausalMemory(world = {}, agent = {}, context = {}) {

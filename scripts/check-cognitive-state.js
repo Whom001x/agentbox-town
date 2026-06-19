@@ -94,6 +94,11 @@ function world(agents) {
   };
 }
 
+function decide(w, subject, context = {}) {
+  const state = cognitiveState(w, subject, context);
+  return utilityDecision(state.psychologicalState);
+}
+
 function assertStateShape(state, subject) {
   assert.ok(state, `${subject.id} missing cognitiveState`);
   assert.equal(state.version, "3.2");
@@ -131,11 +136,14 @@ function testCognitiveStateForAllAgents() {
 function testUtilityCarriesCognitiveFields() {
   const subject = agent("worker", { needs: { responsibility: 42 }, cognitiveProfile: { ambition: 0.8, routinePreference: 0.7 } });
   const w = world([subject]);
-  const decision = utilityDecision(w, subject, { eventText: "work responsibility after a tiring evening" });
+  const decision = decide(w, subject, { eventText: "work responsibility after a tiring evening" });
   assert.ok(decision.cognitiveState);
-  assert.ok(decision.desireCandidates.length >= 1);
-  assert.ok(decision.activeBeliefs.length >= 1);
-  assert.ok(decision.candidateActions.some(action => typeof action.components?.cognitiveFit === "number"));
+  assert.ok(decision.psychologicalState);
+  assert.equal(decision.desireCandidates.length, 0);
+  assert.equal(decision.activeBeliefs.length, 0);
+  assert.ok(subject.desireCandidates.length >= 1);
+  assert.ok(subject.activeBeliefs.length >= 1);
+  assert.ok(decision.candidateActions.some(action => action.cognitiveState?.source === "psychologicalState-only"));
   assert.equal(typeof decision.decisionTrace.scoreBreakdown.cognitiveFit, "number");
 }
 

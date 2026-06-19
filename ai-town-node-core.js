@@ -4,6 +4,8 @@ const {
   applyNeedDynamicsForWorld,
   applyNeedActivity
 } = require("./ai-town-need-dynamics");
+const { cognitiveWrite, requestNeedUpdate, requestEmotionUpdate } = require("./ai-town-cognitive-integrity");
+require("./ai-town-memory-stream");
 
 const START_DATE = new Date(2026, 5, 9);
 const solarTerms = ["小寒", "大寒", "立春", "雨水", "惊蛰", "春分", "清明", "谷雨", "立夏", "小满", "芒种", "夏至", "小暑", "大暑", "立秋", "处暑", "白露", "秋分", "寒露", "霜降", "立冬", "小雪", "大雪", "冬至"];
@@ -101,21 +103,20 @@ function ensureAgentShape(agent) {
   return agent;
 }
 
-function adjustNeeds(agent, changes) {
+function adjustNeeds(world, agent, changes, source = "node-core") {
   ensureAgentShape(agent);
-  Object.entries(changes || {}).forEach(([key, delta]) => {
-    if (!needKeys.includes(key)) return;
-    agent.needs[key] = clamp(Number(agent.needs[key] ?? 70) + Number(delta || 0), 0, 100);
-  });
+  return requestNeedUpdate(world || { clock: 0, agents: agent?.id ? [agent] : [] }, agent, changes || {}, source, "node core needs update", 0.9);
 }
 
-function adjustEmotion(agent, changes) {
+function adjustEmotion(world, agent, changes, source = "node-core") {
   ensureAgentShape(agent);
+  const filtered = {};
   Object.entries(changes || {}).forEach(([key, delta]) => {
     if (!Object.prototype.hasOwnProperty.call(emotionDefaults, key)) return;
-    agent.emotionVector[key] = clamp(Number(agent.emotionVector[key] ?? emotionDefaults[key]) + Number(delta || 0), 0, 100);
+    filtered[key] = delta;
   });
-  agent.emotions = agent.emotionVector;
+  if (!Object.keys(filtered).length) return null;
+  return requestEmotionUpdate(world || { clock: 0, agents: [agent] }, agent, filtered, source, "node core emotion update", 0.9);
 }
 
 function decayMultiplier(currentValue, strength = 1.5) {
@@ -153,12 +154,12 @@ function updateSleepStates(world, minutesPassed) {
     if (agent.isSleeping) {
       agent.energy = clamp(agent.energy + minutesPassed * 0.18, 0, 100);
       agent.sleepQuality = clamp(agent.sleepQuality + minutesPassed * 0.08, 0, 100);
-      adjustEmotion(agent, { calm: minutesPassed * 0.025, tired: -minutesPassed * 0.05 });
+      adjustEmotion(world, agent, { calm: minutesPassed * 0.025, tired: -minutesPassed * 0.05 }, "node-core-sleep");
       agent.currentTask = "睡眠休息";
     } else {
       agent.energy = clamp(agent.energy - minutesPassed * 0.035, 0, 100);
       if (tooHungryToSleep && foodAvailableAt(agent, world.clock || 0)) {
-        applyNeedActivity(agent, "emergency_food", { maximum: { hunger: 28, health: 4, stress: 5, comfort: 4 } });
+        applyNeedActivity(agent, "emergency_food", { world, source: "node-core-night-food", maximum: { hunger: 28, health: 4, stress: 5, comfort: 4 } });
         agent.currentTask = "半夜醒来简单吃点东西";
       }
     }
@@ -196,7 +197,7 @@ function applyTimeDecay(world, minutesPassed) {
     const socialPressure = needPressure(agent.needs.social, 45);
     const healthPressure = needPressure(agent.needs.health, 50);
     const safetyPressure = needPressure(agent.needs.safety, 55);
-    adjustEmotion(agent, {
+    adjustEmotion(world, agent, {
       tired: hungerPressure * 3 + healthPressure * 2,
       angry: hungerPressure * 1.5,
       calm: -(hungerPressure * 2 + stressPressure * 2 + safetyPressure * 2.5),
@@ -204,7 +205,7 @@ function applyTimeDecay(world, minutesPassed) {
       hopeful: -(stressPressure * 1.5 + healthPressure * 1.5),
       lonely: socialPressure * 2.5,
       sad: socialPressure * 1.2
-    });
+    }, "node-core-time-decay");
   });
   return state;
 }
@@ -243,7 +244,7 @@ function applyPassiveNeedRecovery(world, minutesPassed) {
       changes.safety = Math.max(changes.safety || 0, hours * 2);
       changes.stress = Math.max(changes.stress || 0, hours * 2);
     }
-    if (Object.keys(changes).length) adjustNeeds(agent, changes);
+    if (Object.keys(changes).length) adjustNeeds(world, agent, changes, "node-core-time-decay");
   });
 }
 
@@ -466,7 +467,7 @@ function applyRecoveryTimeline(world) {
     }
     const amount = Number(timeline.steps.shift() || 0);
     if (amount > 0) {
-      adjustNeeds(agent, { health: amount, comfort: 2, stress: 2 });
+      adjustNeeds(world, agent, { health: amount, comfort: 2, stress: 2 }, "node-core-recovery");
       agent.currentTask = "按医嘱恢复身体";
     }
     timeline.lastAppliedDay = day;
@@ -572,14 +573,31 @@ function addEvent(agent, event) {
   return true;
 }
 
-function addMemory(agent, text, importance = 3, layer = "short", clock = 0, dedupeKey = "") {
+function addMemory(world, agent, text, importance = 3, layer = "short", clock = 0, dedupeKey = "") {
   ensureAgentShape(agent);
   agent.memoryDedupe ||= {};
   if (dedupeKey && agent.memoryDedupe[dedupeKey]) return;
-  agent.memory[layer] ||= [];
-  if (agent.memory[layer].some(item => item?.text === text || (dedupeKey && item?.dedupeKey === dedupeKey))) return;
-  agent.memory[layer].unshift({ text, importance, at: clock, source: "node-medical-escalation", dedupeKey: dedupeKey || undefined });
-  agent.memory[layer] = agent.memory[layer].slice(0, 30);
+  const existing = Array.isArray(agent.memory?.[layer]) ? agent.memory[layer] : [];
+  if (existing.some(item => item?.text === text || (dedupeKey && item?.dedupeKey === dedupeKey))) return;
+  cognitiveWrite({
+    world: world || { clock, agents: [agent] },
+    agent,
+    agentId: agent.id,
+    source: "nodeRuntime",
+    target: "memory",
+    payload: {
+      text,
+      importance,
+      layer,
+      at: clock,
+      tick: clock,
+      source: "nodeRuntime",
+      dedupeKey: dedupeKey || undefined
+    },
+    confidence: 0.75,
+    reason: "node medical notification memory",
+    timestamp: clock
+  });
   if (dedupeKey) {
     agent.memoryDedupe[dedupeKey] = clock || 0;
     const entries = Object.entries(agent.memoryDedupe);
@@ -609,7 +627,7 @@ function notifyNearbyForMedicalHelp(world, patient, level) {
           ? `${patient.name}出现${level}级健康状况，需要医护尽快回到诊所或安排救助。`
           : `${patient.name}出现健康状况，关系网络中有人把消息传到了这里，需要确认是否能帮忙。`
     });
-    addMemory(observer, isNearby
+    addMemory(world, observer, isNearby
       ? `${minutesToClock(clock).text}，在${placeId(patient)}看到${patient.name}身体不适，需要帮助。`
       : `${minutesToClock(clock).text}，得知${patient.name}身体不适，需要医疗或熟人帮助。`, level === "critical" ? 5 : 4, "short", clock, `medical:${patient.id}:${level}:${Math.floor(clock / 360)}`);
     if (isDoctor && placeId(observer) !== "clinic" && (level === "critical" || level === "urgent")) {
@@ -698,13 +716,13 @@ function applyMedicalEscalation(world, minutesPassed) {
           staffFactor: Math.min(1.2, 0.85 + staff.length * 0.08),
           timeFactor: clamp(Number(minutesPassed || 60) / 60, 0.5, 1.2)
         });
-        adjustNeeds(agent, {
+        adjustNeeds(world, agent, {
           health: effect,
           safety: level === "critical" ? 12 : 8,
           stress: level === "critical" ? 12 : 8,
           comfort: level === "critical" ? 8 : 5,
           hunger: agent.needs.hunger <= 5 ? 12 : 0
-        });
+        }, "node-core-medical-treatment");
         if (agent.needs.health > 20 && agent.lifeStatus === "critical") agent.lifeStatus = "alive";
         agent.currentTask = "在诊所接受治疗";
         agent.medicalState.treatedAt = world.clock || 0;
@@ -715,7 +733,7 @@ function applyMedicalEscalation(world, minutesPassed) {
         world.medicalCareCount = Number(world.medicalCareCount || 0) + 1;
         pushRecord(world, "医疗治疗", `${agent.name}在诊所完成${level}级健康处理，健康恢复${effect}。`, "medical", [agent.id, ...staff.slice(0, 3).map(item => item.id)]);
       } else if (!staff.length) {
-        adjustNeeds(agent, { safety: 2, stress: 2, comfort: 1, health: level === "critical" ? 1.5 : 0.5 });
+        adjustNeeds(world, agent, { safety: 2, stress: 2, comfort: 1, health: level === "critical" ? 1.5 : 0.5 }, "node-core-clinic-wait");
         agent.currentTask = "在诊所候诊观察";
         const waitKey = `medical-wait-${slot}-${agent.id}`;
         if (!world.basicLifeDone[waitKey]) {
@@ -723,7 +741,7 @@ function applyMedicalEscalation(world, minutesPassed) {
           world.basicLifeDone[waitKey] = true;
         }
       } else {
-        adjustNeeds(agent, { safety: 1, stress: 1, comfort: 1, health: 0.5 });
+        adjustNeeds(world, agent, { safety: 1, stress: 1, comfort: 1, health: 0.5 }, "node-core-clinic-queue");
         agent.currentTask = "在诊所排队候诊";
       }
       return;
@@ -814,6 +832,8 @@ function applyBasicLifeMaintenance(world) {
     const shouldEatEmergency = canEatHere && beforeHunger <= 20 && !world.basicLifeDone[emergencyFoodKey];
     if (shouldEatMeal || shouldEatOpportunity || shouldEatEmergency) {
       applyNeedActivity(agent, shouldEatEmergency || beforeHunger <= 20 ? "emergency_food" : "meal", {
+        world,
+        source: "node-core-food",
         maximum: { hunger: beforeHunger <= 8 ? 50 : beforeHunger < 25 ? 38 : beforeHunger < 45 ? 28 : 18, comfort: 5, stress: 5, health: 4 }
       });
       if (beforeHunger < 35 || !agent.currentTask || ["维持当前生活安排", "开始一天的日常安排"].includes(agent.currentTask)) {
@@ -825,14 +845,14 @@ function applyBasicLifeMaintenance(world) {
       }
     }
     if (clinicCareAvailableFor(world, agent) && (agent.needs.hunger <= 5 || agent.needs.stress <= 5) && !world.basicLifeDone[`clinic-${slot}`]) {
-      if (agent.needs.hunger <= 5) applyNeedActivity(agent, "emergency_food", { maximum: { hunger: 28, health: 3, stress: 4, comfort: 3 } });
-      applyNeedActivity(agent, "clinic_care", { maximum: { health: 12, safety: 10, stress: 8, comfort: 5 } });
+      if (agent.needs.hunger <= 5) applyNeedActivity(agent, "emergency_food", { world, source: "node-core-clinic-food", maximum: { hunger: 28, health: 3, stress: 4, comfort: 3 } });
+      applyNeedActivity(agent, "clinic_care", { world, source: "node-core-clinic-care", maximum: { health: 12, safety: 10, stress: 8, comfort: 5 } });
       agent.currentTask = "基础急救";
       world.basicLifeDone[`clinic-${slot}`] = true;
       pushRecord(world, "基础救治", `${agent.name}在诊所有医护在场，获得最低限度照护。`, "survival", [agent.id]);
     }
     if (placeId(agent) === "apartment" && Number(agent.needs.hygiene || 0) < 45 && !world.basicLifeDone[`hygiene-${hygieneSlot}-${agent.id}`]) {
-      applyNeedActivity(agent, "clean", { maximum: { hygiene: 30, comfort: 8, social: 3 } });
+      applyNeedActivity(agent, "clean", { world, source: "node-core-clean", maximum: { hygiene: 30, comfort: 8, social: 3 } });
       if (Number(agent.needs.hygiene || 0) < 35) agent.currentTask = "鏁寸悊涓庢竻娲?";
       world.basicLifeDone[`hygiene-${hygieneSlot}-${agent.id}`] = true;
     }

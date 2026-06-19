@@ -1,5 +1,7 @@
 "use strict";
 
+const { requestNeedUpdate } = require("./ai-town-cognitive-integrity");
+
 const NEED_KEYS = ["hunger", "hygiene", "health", "social", "responsibility", "stress", "comfort", "safety"];
 
 const DEFAULT_NEEDS = {
@@ -95,12 +97,12 @@ function round(value, digits = 3) {
 }
 
 function currentNeeds(agent = {}) {
-  agent.needs ||= {};
+  const needs = agent.needs && typeof agent.needs === "object" ? agent.needs : {};
+  const normalized = {};
   NEED_KEYS.forEach(key => {
-    if (!Number.isFinite(Number(agent.needs[key]))) agent.needs[key] = DEFAULT_NEEDS[key];
-    agent.needs[key] = clamp(agent.needs[key], 0, 100, DEFAULT_NEEDS[key]);
+    normalized[key] = clamp(needs[key], 0, 100, DEFAULT_NEEDS[key]);
   });
-  return agent.needs;
+  return normalized;
 }
 
 function agentAgeStage(agent = {}) {
@@ -333,7 +335,7 @@ function adjustedBaseDynamics(key, needs = {}, ctx = {}) {
 }
 
 function activityDelta(agent = {}, kind = "", options = {}) {
-  currentNeeds(agent);
+  const needs = currentNeeds(agent);
   const profile = lifeStageProfile(agent);
   const activityFactor = clamp(options.activityFactor ?? profile.activity, 0.4, 1.4, 1);
   const efficiencies = {
@@ -349,7 +351,7 @@ function activityDelta(agent = {}, kind = "", options = {}) {
   const result = {};
   Object.entries(efficiencies).forEach(([key, efficiency]) => {
     if (!NEED_KEYS.includes(key)) return;
-    const before = Number(agent.needs[key] ?? DEFAULT_NEEDS[key]);
+    const before = Number(needs[key] ?? DEFAULT_NEEDS[key]);
     const missing = Math.max(0, 100 - before);
     const gain = missing * Number(efficiency || 0) * activityFactor;
     result[key] = (result[key] || 0) + gain;
@@ -372,18 +374,28 @@ function activityDelta(agent = {}, kind = "", options = {}) {
   return result;
 }
 
-function applyNeedDelta(agent = {}, delta = {}) {
-  currentNeeds(agent);
-  Object.entries(delta || {}).forEach(([key, value]) => {
-    if (!NEED_KEYS.includes(key)) return;
-    agent.needs[key] = clamp(Number(agent.needs[key] ?? DEFAULT_NEEDS[key]) + Number(value || 0), 0, 100, DEFAULT_NEEDS[key]);
-  });
-  return agent.needs;
+function applyNeedDelta(agent = {}, delta = {}, options = {}) {
+  const world = options.world || { clock: Number(options.clock || 0), agents: agent?.id ? [agent] : [] };
+  const write = requestNeedUpdate(
+    world,
+    agent,
+    delta,
+    options.source || "need-dynamics",
+    options.reason || "need dynamics update",
+    options.confidence ?? 0.9
+  );
+  return write.ok ? write.applied : currentNeeds(agent);
 }
 
 function applyNeedActivity(agent = {}, kind = "", options = {}) {
   const delta = activityDelta(agent, kind, options);
-  applyNeedDelta(agent, delta);
+  applyNeedDelta(agent, delta, {
+    world: options.world,
+    clock: options.clock,
+    source: options.source || "need-activity",
+    reason: `need activity ${kind}`,
+    confidence: options.confidence ?? 0.9
+  });
   return delta;
 }
 
@@ -477,7 +489,12 @@ function computeNeedDynamics(world = {}, agent = {}, options = {}) {
 
 function applyNeedDynamics(world = {}, agent = {}, options = {}) {
   const state = computeNeedDynamics(world, agent, options);
-  applyNeedDelta(agent, state.delta);
+  applyNeedDelta(agent, state.delta, {
+    world,
+    source: "need-dynamics",
+    reason: "base need dynamics settlement",
+    confidence: 0.92
+  });
   agent.needDynamicsState = state;
   agent.needHomeostasisState = state.homeostasis;
   agent.needEmergencyFlag = state.needEmergencyFlag;

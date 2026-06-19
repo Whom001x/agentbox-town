@@ -40,17 +40,59 @@ function findPlace(world, candidates, fallback = "apartment") {
   return found?.id || (placeExists(world, fallback) ? fallback : places[0]?.id || fallback);
 }
 
+function roleText(input = {}) {
+  const occupationHistory = Array.isArray(input.occupationHistory)
+    ? input.occupationHistory.join(" ")
+    : String(input.occupationHistory || "");
+  return [
+    input.occupation,
+    input.job,
+    input.profession,
+    input.role,
+    input.currentStatus,
+    occupationHistory
+  ].filter(Boolean).join(" ");
+}
+
+function resolveRole(input = {}) {
+  const age = Number(input.age ?? input.ageYears ?? 0);
+  const lifeStage = String(input.lifeStage || input.ageStage || "");
+  const text = roleText(input);
+  const candidates = [];
+  const add = (role, keywordMatch, ageCompatibility, lifeStageCompatibility, reason) => {
+    candidates.push({
+      role,
+      score: keywordMatch + ageCompatibility + lifeStageCompatibility,
+      reason
+    });
+  };
+
+  if ((age >= 60 || lifeStage === "elder") && /retired|退休/.test(text)) {
+    add("elder", 80, 30, 20, "retired elder status");
+  }
+  if (age > 0 && age < 18 || lifeStage === "child" || lifeStage === "teen") {
+    add("student", 75, 30, 20, "minor life stage");
+  }
+  if (/student|school|pupil|kid|学生|小学|中学|高中/.test(text)) add("student", 55, age > 0 && age < 25 ? 20 : -20, lifeStage === "child" || lifeStage === "teen" ? 15 : 0, "student keyword");
+  if (/teacher|school|老师|教师|校工/.test(text)) add("teacher", 45, age >= 18 && age < 70 ? 10 : -10, lifeStage === "adult" ? 8 : 0, "education occupation");
+  if (/doctor|nurse|medical|clinic|医生|护士|医护|药房|诊所/.test(text)) add("medical", 45, age >= 18 && age < 75 ? 10 : -10, lifeStage === "adult" ? 8 : 0, "medical occupation");
+  if (/shop|store|vendor|breakfast|restaurant|owner|merchant|店|摊|餐|小卖部|早餐|商人|店主/.test(text)) add("merchant", 45, age >= 18 && age < 75 ? 10 : -10, lifeStage === "adult" ? 8 : 0, "merchant occupation");
+  if (/government|public|office|公务|政府|镇务|公共服务|办事|工作人员/.test(text)) add("government", 45, age >= 18 && age < 65 ? 12 : -12, lifeStage === "adult" ? 8 : 0, "government occupation");
+  if (/guard|police|security|保安|警/.test(text)) add("service", 45, age >= 18 && age < 65 ? 10 : -12, lifeStage === "adult" ? 8 : 0, "service occupation");
+  if (/worker|factory|staff|employee|commuter|work|工人|上班|职员|通勤|外出|零工|工坊/.test(text)) add("worker", 40, age >= 18 && age < 65 ? 10 : -15, lifeStage === "adult" ? 8 : 0, "worker occupation");
+  if (/elder|retired|老人|退休/.test(text) || age >= 65 || lifeStage === "elder") add("elder", 35, age >= 60 ? 25 : -20, lifeStage === "elder" ? 15 : 0, "elder age/status");
+
+  candidates.sort((a, b) => b.score - a.score);
+  const best = candidates[0] || { role: "resident", score: 20, reason: "fallback resident" };
+  return {
+    role: best.role,
+    confidence: clamp(Math.round(best.score), 0, 100, 20) / 100,
+    reason: best.reason
+  };
+}
+
 function inferRole(agent = {}) {
-  const job = String(agent.job || "");
-  const age = Number(agent.ageYears ?? agent.age ?? 0);
-  if (/student|school|pupil|kid/i.test(job) || /学生|小学|中学|高中/.test(job) || agent.ageStage === "child" || agent.ageStage === "teen" || (age > 0 && age < 18)) return "student";
-  if (/teacher|school/i.test(job) || /老师|教师|校工/.test(job)) return "teacher";
-  if (/doctor|nurse|medical|clinic/i.test(job) || /医生|护士|医护|药房|诊所/.test(job)) return "medical";
-  if (/shop|store|vendor|breakfast|restaurant|owner/i.test(job) || /店|摊|餐|小卖部|早餐/.test(job)) return "shop";
-  if (/guard|police|security/i.test(job) || /保安|警/.test(job)) return "service";
-  if (/worker|office|factory|staff|employee|commuter/i.test(job) || /工人|上班|职员|镇务/.test(job)) return "worker";
-  if (/elder|retired/i.test(job) || /老人|退休/.test(job) || age >= 65 || agent.ageStage === "elder") return "elder";
-  return "resident";
+  return resolveRole(agent).role;
 }
 
 function block(start, end, place, title, options = {}) {
@@ -111,7 +153,7 @@ function fallbackDailyPlan(world, agent = {}) {
       block("23:00", "06:30", home, "sleep", { fixed: true, priority: 90, localAction: "sleep", interruptible: false })
     ];
   }
-  if (role === "shop") {
+  if (role === "merchant") {
     return [
       block("05:30", "06:30", home, "early breakfast and prepare", { fixed: true, priority: 70, localAction: "meal" }),
       block("06:30", "07:00", store, "open shop", { fixed: true, priority: 85, localAction: "commute" }),
@@ -122,7 +164,7 @@ function fallbackDailyPlan(world, agent = {}) {
       block("21:30", "05:30", home, "sleep", { fixed: true, priority: 90, localAction: "sleep", interruptible: false })
     ];
   }
-  if (role === "worker" || role === "service") {
+  if (role === "worker" || role === "service" || role === "government") {
     return [
       block("06:30", "07:30", home, "morning routine and breakfast", { fixed: true, priority: 70, localAction: "meal" }),
       block("07:30", "08:30", office, "go to work", { fixed: true, priority: 80, localAction: "commute" }),
@@ -189,16 +231,21 @@ function ensureDailyPlans(world, options = {}) {
   const refreshed = [];
   (world?.agents || []).forEach(agent => {
     if (!agent?.id || agent.lifeStatus === "dead") return;
+    const role = inferRole(agent);
     const existing = normalizeDailyPlan(agent.dailyPlan || [], world, agent);
-    const stale = agent.dailyPlanDay !== today || existing.length < 4 || options.force;
+    const hasResidentTemplate = existing.some(item => item.title === "daily errands" || item.title === "ordinary afternoon");
+    const roleChanged = agent.dailyPlanRole && agent.dailyPlanRole !== role;
+    const stale = agent.dailyPlanDay !== today || existing.length < 4 || roleChanged || (!agent.dailyPlanRole && role !== "resident" && hasResidentTemplate) || options.force;
     if (stale) {
       agent.dailyPlan = fallbackDailyPlan(world, agent);
       agent.dailyPlanDay = today;
+      agent.dailyPlanRole = role;
       agent.planGeneratedAt = world.clock || 0;
       refreshed.push(agent.id);
     } else {
       agent.dailyPlan = existing;
       agent.dailyPlanDay = today;
+      agent.dailyPlanRole = role;
     }
   });
   return refreshed;
@@ -225,5 +272,6 @@ module.exports = {
   ensureDailyPlans,
   currentPlanItem,
   inferRole,
+  resolveRole,
   findPlace
 };

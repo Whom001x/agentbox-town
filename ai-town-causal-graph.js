@@ -1,5 +1,7 @@
 "use strict";
 
+const { cognitiveWrite, registerCognitiveWriteCommitter } = require("./ai-town-cognitive-integrity");
+
 const nodeTypes = new Set(["event", "stateChange", "action", "belief", "goal", "relationship"]);
 const edgeRelations = new Set(["caused", "reinforced", "weakened", "triggered", "prevented"]);
 
@@ -138,10 +140,15 @@ function ensureCausalGraph(world = {}) {
   if (!Array.isArray(world.causalGraph.edges)) world.causalGraph.edges = [];
   if (!Array.isArray(world.causalGraph.patterns)) world.causalGraph.patterns = [];
   world.causalGraph.version ||= "3.3.4";
+  Object.defineProperty(world.causalGraph, "__world", {
+    value: world,
+    enumerable: false,
+    configurable: true
+  });
   return world.causalGraph;
 }
 
-function upsertNode(graph, node = {}) {
+function _addNode(graph, node = {}) {
   if (!graph || !node.id || !nodeTypes.has(node.type)) return null;
   const timestamp = Number(node.timestamp);
   const normalized = {
@@ -155,8 +162,31 @@ function upsertNode(graph, node = {}) {
     Object.assign(existing, { ...normalized, firstSeen: existing.firstSeen ?? normalized.timestamp });
     return existing;
   }
-  graph.nodes.push(normalized);
+  graph.nodes = graph.nodes.concat(normalized);
   return normalized;
+}
+
+function upsertNode(graph, node = {}) {
+  if (!graph || !node.id || !nodeTypes.has(node.type)) return null;
+  const world = graph.__world || {};
+  const timestamp = Number(node.timestamp);
+  const normalized = {
+    ...node,
+    timestamp: Number.isFinite(timestamp) ? timestamp : 0,
+    label: compactString(node.label || node.summary || node.id, node.id, 180),
+    causalCategory: compactString(node.causalCategory || "", "", 40)
+  };
+  const result = cognitiveWrite({
+    world,
+    agentId: normalized.agentId || "",
+    source: "causal-graph",
+    target: "causalGraph",
+    payload: { node: normalized },
+    confidence: normalizeRatio(normalized.confidence, 0.7),
+    reason: "causal graph node upsert",
+    timestamp: normalized.timestamp
+  });
+  return result.ok ? result.applied : null;
 }
 
 function nodeById(graph, id) {
@@ -187,7 +217,7 @@ function reinforcePattern(graph, edge, fromNode, toNode) {
       lastSeen: edge.timestamp,
       examples: []
     };
-    graph.patterns.push(pattern);
+    graph.patterns = graph.patterns.concat(pattern);
   }
   pattern.count += 1;
   pattern.lastSeen = edge.timestamp;
@@ -205,7 +235,7 @@ function reinforcePattern(graph, edge, fromNode, toNode) {
   return pattern;
 }
 
-function addEdge(graph, edge = {}) {
+function _addEdge(graph, edge = {}) {
   if (!graph || !edge.from || !edge.to || !edgeRelations.has(edge.relation)) return null;
   const fromNode = nodeById(graph, edge.from);
   const toNode = nodeById(graph, edge.to);
@@ -236,8 +266,33 @@ function addEdge(graph, edge = {}) {
     return existing;
   }
   reinforcePattern(graph, normalized, fromNode, toNode);
-  graph.edges.push(normalized);
+  graph.edges = graph.edges.concat(normalized);
   return normalized;
+}
+
+registerCognitiveWriteCommitter("causalGraph", ({ world, payload }) => {
+  const graph = ensureCausalGraph(world);
+  if (payload?.node) return _addNode(graph, payload.node);
+  if (payload?.edge) return _addEdge(graph, payload.edge);
+  return null;
+}, { module: "causal-graph" });
+
+function addEdge(graph, edge = {}) {
+  if (!graph || !edge.from || !edge.to || !edgeRelations.has(edge.relation)) return null;
+  const fromNode = nodeById(graph, edge.from);
+  const toNode = nodeById(graph, edge.to);
+  if (!fromNode || !toNode) return null;
+  const result = cognitiveWrite({
+    world: graph.__world || {},
+    agentId: edge.agentId || fromNode.agentId || toNode.agentId || "",
+    source: "causal-graph",
+    target: "causalGraph",
+    payload: { edge },
+    confidence: normalizeRatio(edge.confidence, 0.65),
+    reason: "causal graph edge upsert",
+    timestamp: edge.timestamp || toNode.timestamp
+  });
+  return result.ok ? result.applied : null;
 }
 
 function pruneGraph(world = {}) {
@@ -260,9 +315,12 @@ function actionName(event = {}) {
 
 function stateChangeNodesForEvent(event = {}, agent = {}, baseTime = 0, strength = 0) {
   const category = causalCategory(event);
-  const nodes = [];
+  let nodes = [];
+  const addNode = node => {
+    nodes = nodes.concat(node);
+  };
   if (event.interruption?.type) {
-    nodes.push({
+    addNode({
       type: "stateChange",
       kind: `${event.interruption.type}_pressure`,
       label: `${event.interruption.type} pressure changed`,
@@ -270,7 +328,7 @@ function stateChangeNodesForEvent(event = {}, agent = {}, baseTime = 0, strength
     });
   }
   if (rawMagnitude(event.emotionDelta, 0) > 0 || Number(event.emotionalIntensity || 0) > 0) {
-    nodes.push({
+    addNode({
       type: "stateChange",
       kind: "emotion",
       label: "emotion state changed",
@@ -278,7 +336,7 @@ function stateChangeNodesForEvent(event = {}, agent = {}, baseTime = 0, strength
     });
   }
   if (rawMagnitude(event.goalDelta, 0) > 0 || Number(event.goalImpact || 0) > 0) {
-    nodes.push({
+    addNode({
       type: "goal",
       kind: "goalImpact",
       label: "goal pressure changed",
@@ -286,7 +344,7 @@ function stateChangeNodesForEvent(event = {}, agent = {}, baseTime = 0, strength
     });
   }
   if (rawMagnitude(event.relationshipDelta ?? event.relationDelta, 0) > 0 || Number(event.relationImpact || 0) > 0 || event.targetAgentId) {
-    nodes.push({
+    addNode({
       type: "relationship",
       kind: "relationshipImpact",
       label: "relationship interpretation changed",
@@ -294,7 +352,7 @@ function stateChangeNodesForEvent(event = {}, agent = {}, baseTime = 0, strength
     });
   }
   if (!nodes.length && strength >= 0.45) {
-    nodes.push({
+    addNode({
       type: "stateChange",
       kind: category,
       label: `${category} state changed`,
@@ -557,8 +615,8 @@ function causalReflectionAnchors(world = {}, agent = {}, limit = 3) {
       current.strength = Math.max(current.strength, Number(edge.strength || 0));
       current.timestamp = Math.max(current.timestamp, Number(edge.timestamp || 0));
       current.category = current.category === "general" ? (to.causalCategory || from.causalCategory || "general") : current.category;
-      current.nodes.push(from, to);
-      current.edges.push(edge);
+      current.nodes = current.nodes.concat([from, to]);
+      current.edges = current.edges.concat(edge);
       chains.set(key, current);
     });
   return [...chains.values()]

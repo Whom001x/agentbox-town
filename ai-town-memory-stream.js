@@ -6,6 +6,15 @@ const {
   causalReflectionAnchors
 } = require("./ai-town-causal-graph");
 const { updateTemporalCausalMemory } = require("./ai-town-temporal-causal");
+const {
+  cognitiveWrite,
+  registerCognitiveWriteCommitter,
+  ensurePriorCausalGraph,
+  eventHashFor,
+  isEventRejectedRecently,
+  rememberRejectedEvent,
+  stampCognitivePayload
+} = require("./ai-town-cognitive-integrity");
 
 const legacyLayers = ["short", "long", "emotional", "secret", "rumor"];
 const semanticTypes = ["habit", "experience", "episodic", "belief", "relationship", "social", "preference", "goal"];
@@ -804,24 +813,36 @@ function ensureEmotionCauses(agent = {}) {
   return agent.emotionCause;
 }
 
-function recordEmotionCause(agent = {}, detail = {}) {
+function recordEmotionCause(...args) {
+  const hasWorld = args[0] && typeof args[0] === "object" && (Array.isArray(args[0].agents) || args[0].clock != null) && args[1]?.id;
+  const world = hasWorld ? args[0] : (args[1]?.world || { clock: Number(args[1]?.at || args[1]?.tick || 0), agents: args[0]?.id ? [args[0]] : [] });
+  const agent = hasWorld ? args[1] : args[0];
+  const detail = hasWorld ? (args[2] || {}) : (args[1] || {});
   if (!agent?.id) return null;
-  ensureEmotionCauses(agent);
   const emotion = compactString(detail.emotion || "", "", 30);
   if (!emotion) return null;
   const causes = uniqueStrings(detail.causes || detail.cause || [], 5);
   if (!causes.length) return null;
-  const item = {
+  const result = cognitiveWrite({
+    world,
+    agent,
+    agentId: agent.id,
+    source: detail.source || "runtime",
+    target: "emotionCause",
+    payload: {
     emotion,
     intensity: normalizeRatio(detail.intensity, 0.35),
     causes,
-    source: detail.source || "runtime",
-    at: Number(detail.at || 0),
+      cause: causes[0],
+      at: Number(detail.at ?? detail.tick ?? world.clock ?? 0),
+      tick: Number(detail.tick ?? detail.at ?? world.clock ?? 0),
     eventId: detail.eventId || ""
-  };
-  agent.emotionCause.unshift(item);
-  agent.emotionCause = agent.emotionCause.slice(0, 40);
-  return item;
+    },
+    confidence: Number.isFinite(Number(detail.confidence)) ? Number(detail.confidence) : 0.65,
+    reason: detail.reason || "emotion cause update",
+    timestamp: Number(detail.tick ?? detail.at ?? world.clock ?? 0)
+  });
+  return result.ok ? result.applied : null;
 }
 
 function syncLongTermMemoryViews(agent = {}) {
@@ -845,6 +866,9 @@ function syncLongTermMemoryViews(agent = {}) {
     emotionalImpact: item.emotionalImpact || emotionalImpact(item),
     importance: normalizeRatio(item.importance, 0.4),
     at: item.at || 0,
+    tick: item.tick ?? item.at ?? 0,
+    source: item.source || "memory-stream",
+    confidence: normalizeRatio(item.confidence, 0.5),
     evidenceIds: Array.isArray(item.evidenceIds) ? item.evidenceIds.slice(0, 8) : []
   });
   }).filter(item => item.event || item.meaning).slice(0, 30);
@@ -859,7 +883,9 @@ function syncLongTermMemoryViews(agent = {}) {
     createdAt: item.createdAt || item.at || 0,
     lastConfirmed: item.lastConfirmed || item.lastSeenAt || item.at || 0,
     importance: normalizeRatio(item.importance, 0.4),
-    at: item.at || 0
+    at: item.at || 0,
+    tick: item.tick ?? item.at ?? 0,
+    source: item.source || "memory-stream"
   });
   }).filter(item => item.belief).slice(0, 30);
   agent.habitMemory = (structured.habit || []).map(raw => {
@@ -875,7 +901,10 @@ function syncLongTermMemoryViews(agent = {}) {
     lastConfirmed: item.lastConfirmed || item.lastSeenAt || item.at || 0,
     strength: normalizeRatio(item.strength, 0.45),
     importance: normalizeRatio(item.importance, 0.3),
-    at: item.at || 0
+    at: item.at || 0,
+    tick: item.tick ?? item.at ?? 0,
+    confidence: normalizeRatio(item.confidence, 0.5),
+    source: item.source || "memory-stream"
   });
   }).filter(item => item.habit).slice(0, 30);
   agent.preferenceMemory = (structured.preference || []).map(raw => {
@@ -891,7 +920,10 @@ function syncLongTermMemoryViews(agent = {}) {
       sourceEvents: Array.isArray(item.sourceEvents) ? item.sourceEvents.slice(0, 8) : (Array.isArray(item.evidenceIds) ? item.evidenceIds.slice(0, 8) : []),
       createdAt: item.createdAt || item.at || 0,
       lastConfirmed: item.lastConfirmed || item.lastSeenAt || item.at || 0,
-      at: item.at || 0
+      at: item.at || 0,
+      tick: item.tick ?? item.at ?? 0,
+      confidence: normalizeRatio(item.confidence, 0.5),
+      source: item.source || "memory-stream"
     };
   }).filter(item => item.like.length || item.dislike.length).slice(0, 30);
   agent.relationshipMemory = (structured.social || []).map(raw => {
@@ -918,6 +950,9 @@ function syncLongTermMemoryViews(agent = {}) {
     impact: Number(item.valence || 0) > 5 ? "positive" : Number(item.valence || 0) < -5 ? "negative" : "mixed",
     importance: normalizeRatio(item.importance, 0.4),
     at: item.at || 0,
+    tick: item.tick ?? item.at ?? 0,
+    confidence: normalizeRatio(item.confidence, 0.5),
+    source: item.source || "memory-stream",
     evidenceIds: Array.isArray(item.evidenceIds) ? item.evidenceIds.slice(0, 8) : []
   });
   }).filter(item => item.targetAgentId && (item.relation || item.event || item.myView)).slice(0, 40);
@@ -1017,6 +1052,9 @@ function syncStructuredMemory(agent, item = {}) {
     importance: item.importance || 3,
     strength: item.strength || 50,
     confidence: normalizeRatio(item.confidence, 0.5),
+    source: item.source || "memory-stream",
+    tick: item.tick ?? item.at ?? 0,
+    kernelVersion: item.kernelVersion || "",
     sourceEvents: Array.isArray(item.sourceEvents) ? item.sourceEvents.slice(0, 8) : (Array.isArray(item.evidenceIds) ? item.evidenceIds.slice(0, 8) : []),
     createdAt: item.createdAt || item.at || 0,
     lastConfirmed: item.lastConfirmed || item.lastSeenAt || item.at || 0,
@@ -1217,7 +1255,7 @@ function ensureEventLog(world, agent = null) {
   }
 }
 
-function appendLegacyMemory(agent, memory = {}) {
+function _internalAppendLegacyMemory(agent, memory = {}) {
   if (!agent?.id) return null;
   ensureMemory(agent);
   const layer = legacyLayers.includes(memory.layer) ? memory.layer : "short";
@@ -1229,10 +1267,13 @@ function appendLegacyMemory(agent, memory = {}) {
   const item = {
     id: memory.id || `mem_${agent.id}_${at}_${Math.random().toString(36).slice(2, 8)}`,
     at,
+    tick: memory.tick ?? at,
     layer,
     text: text.slice(0, 220),
     importance: clampNumber(memory.importance, 1, 5, 3),
+    confidence: normalizeRatio(memory.confidence, 0.5),
     source: memory.source || "memory-stream",
+    kernelVersion: memory.kernelVersion || "",
     visibility: memory.visibility || "self",
     tags: Array.isArray(memory.tags) ? memory.tags.slice(0, 8) : [],
     dedupeKey
@@ -1242,7 +1283,7 @@ function appendLegacyMemory(agent, memory = {}) {
   return item;
 }
 
-function appendSemanticMemory(agent, memory = {}) {
+function _internalAppendSemanticMemory(agent, memory = {}) {
   if (!agent?.id) return null;
   const store = ensureSemanticMemory(agent);
   const type = semanticTypes.includes(memory.type) ? memory.type : "experience";
@@ -1302,6 +1343,7 @@ function appendSemanticMemory(agent, memory = {}) {
     id: memory.id || `sem_${agent.id}_${type}_${at}_${Math.random().toString(36).slice(2, 8)}`,
     type,
     at,
+    tick: memory.tick ?? at,
     lastSeenAt: at,
     text: text.slice(0, 260),
     meaning: String(memory.meaning || text).slice(0, 260),
@@ -1327,6 +1369,7 @@ function appendSemanticMemory(agent, memory = {}) {
     relationshipCause: memory.relationshipCause || null,
     relationshipCauses: uniqueRelationshipCauses([memory.relationshipCause || null, memory.relationshipCauses || []], 8),
     source: memory.source || "memory-consolidator",
+    kernelVersion: memory.kernelVersion || "",
     sourceCausalChain: memory.sourceCausalChain || memory.causalChainId || "",
     evidenceIds: Array.isArray(memory.evidenceIds) ? memory.evidenceIds.slice(0, 8) : [],
     tags: Array.isArray(memory.tags) ? memory.tags.slice(0, 8) : [],
@@ -1349,11 +1392,269 @@ function appendSemanticMemory(agent, memory = {}) {
   return item;
 }
 
-function appendMemory(agent, memory = {}) {
+function _internalAppendMemory(agent, memory = {}) {
   if (semanticTypes.includes(memory.type) || memory.semantic === true) {
-    return appendSemanticMemory(agent, memory);
+    return _internalAppendSemanticMemory(agent, memory);
   }
-  return appendLegacyMemory(agent, memory);
+  return _internalAppendLegacyMemory(agent, memory);
+}
+
+function legacyMemoryWorld(agent = {}, memory = {}, world = null) {
+  return world || memory.world || memory._world || { clock: Number(memory.at || 0), agents: agent?.id ? [agent] : [] };
+}
+
+function warnLegacyMemoryWrite(agent = {}, name = "appendMemory") {
+  const warning = `${name} is a legacy wrapper; use cognitiveWrite({target:"memory"})`;
+  if (agent && typeof agent === "object") {
+    agent.cognitiveWriteWarnings ||= [];
+    agent.cognitiveWriteWarnings.unshift({ warning, at: Date.now() });
+    agent.cognitiveWriteWarnings = agent.cognitiveWriteWarnings.slice(0, 20);
+  }
+  if (process.env.AI_TOWN_WARN_LEGACY_MEMORY === "1") console.warn(`[cognitiveWrite] ${warning}`);
+}
+
+function legacyMemoryWrite(agent, memory = {}, world = null, name = "appendMemory") {
+  if (!agent?.id) return null;
+  warnLegacyMemoryWrite(agent, name);
+  const payload = { ...(memory || {}) };
+  delete payload.world;
+  delete payload._world;
+  const result = cognitiveWrite({
+    world: legacyMemoryWorld(agent, memory, world),
+    agent,
+    agentId: agent.id,
+    source: "legacy",
+    target: "memory",
+    payload,
+    confidence: Number.isFinite(Number(memory.confidence)) ? Number(memory.confidence) : 0.3,
+    reason: `${name} legacy wrapper`,
+    timestamp: memory.at
+  });
+  return result.ok ? result.applied : null;
+}
+
+function appendLegacyMemory(agent, memory = {}, world = null) {
+  return legacyMemoryWrite(agent, memory, world, "appendLegacyMemory");
+}
+
+function appendSemanticMemory(agent, memory = {}, world = null) {
+  return legacyMemoryWrite(agent, { ...memory, semantic: true }, world, "appendSemanticMemory");
+}
+
+function appendMemory(agent, memory = {}, world = null) {
+  return legacyMemoryWrite(agent, memory, world, "appendMemory");
+}
+
+const memoryTargetTypes = {
+  memory: "",
+  beliefMemory: "belief",
+  habitMemory: "habit",
+  preferenceMemory: "preference",
+  episodicMemory: "episodic",
+  relationshipMemory: "relationship"
+};
+
+Object.entries(memoryTargetTypes).forEach(([target, type]) => {
+  registerCognitiveWriteCommitter(target, ({ agent, payload }) => {
+    const memory = { ...(payload || {}) };
+    if (type && !memory.type) memory.type = type;
+    if (target !== "memory") memory.semantic = true;
+    return _internalAppendMemory(agent, memory);
+  }, { module: "memory-stream" });
+});
+
+registerCognitiveWriteCommitter("longMemory", ({ agent, payload }) => (
+  _internalAppendMemory(agent, { ...(payload || {}), layer: "long" })
+), { module: "memory-stream" });
+
+registerCognitiveWriteCommitter("emotionCause", ({ agent, payload, source, confidence, timestamp, world }) => {
+  ensureEmotionCauses(agent);
+  const causes = uniqueStrings(payload.causes || payload.cause || [], 5);
+  if (!causes.length) return null;
+  const tick = Number(payload.tick ?? payload.at ?? timestamp ?? world?.clock ?? 0);
+  const item = {
+    emotion: compactString(payload.emotion || "", "", 30),
+    intensity: normalizeRatio(payload.intensity, 0.35),
+    cause: causes[0],
+    causes,
+    source: payload.source || source || "runtime",
+    confidence: normalizeRatio(payload.confidence ?? confidence, 0.65),
+    tick,
+    at: Number(payload.at ?? tick),
+    eventId: payload.eventId || "",
+    kernelVersion: payload.kernelVersion || ""
+  };
+  if (!item.emotion) return null;
+  agent.emotionCause.unshift(item);
+  agent.emotionCause = agent.emotionCause.slice(0, 40);
+  return item;
+}, { module: "memory-stream" });
+
+registerCognitiveWriteCommitter("identity", ({ world, agent, payload, source, confidence, timestamp }) => {
+  if (!agent?.id) return null;
+  agent.selfModel ||= {};
+  const selfUpdate = payload.selfModel || payload.selfModelUpdate || payload;
+  const mergeArray = (key, limit = 12) => {
+    if (!Array.isArray(selfUpdate[key]) || !selfUpdate[key].length) return;
+    agent.selfModel[key] = uniqueStrings([agent.selfModel[key], selfUpdate[key]], limit);
+  };
+  ["identity", "currentSelfView", "selfImage", "lifeNarrative"].forEach(key => {
+    if (selfUpdate[key] != null && String(selfUpdate[key]).trim()) {
+      agent.selfModel[key] = compactString(selfUpdate[key], agent.selfModel[key] || "", key === "lifeNarrative" ? 260 : 220);
+    }
+  });
+  mergeArray("values", 8);
+  mergeArray("fears", 8);
+  mergeArray("selfBeliefs", 12);
+  mergeArray("competenceBeliefs", 8);
+  if (selfUpdate.narrativeHash && typeof selfUpdate.narrativeHash === "object") {
+    agent.selfModel.narrativeHash = {
+      ...(agent.selfModel.narrativeHash && typeof agent.selfModel.narrativeHash === "object" ? agent.selfModel.narrativeHash : {}),
+      ...selfUpdate.narrativeHash
+    };
+  }
+  if (payload.identityCore && typeof payload.identityCore === "object") {
+    agent.identityCore ||= {};
+    Object.entries(payload.identityCore).forEach(([key, value]) => {
+      if (Array.isArray(value)) agent.identityCore[key] = uniqueStrings([agent.identityCore[key], value], 12);
+      else if (value && typeof value === "object") agent.identityCore[key] = { ...(agent.identityCore[key] && typeof agent.identityCore[key] === "object" ? agent.identityCore[key] : {}), ...value };
+      else if (value != null && typeof value !== "object") agent.identityCore[key] = value;
+    });
+  }
+  agent.selfModel.audit ||= {};
+  agent.selfModel.audit.lastSource = source || payload.source || "identity";
+  agent.selfModel.audit.lastConfidence = normalizeRatio(confidence ?? payload.confidence, 0.65);
+  agent.selfModel.audit.lastTick = Number(payload.tick ?? timestamp ?? world?.clock ?? 0);
+  agent.selfModel.audit.kernelVersion = payload.kernelVersion || "";
+  sanitizeSelfModel(agent);
+  return { selfModel: agent.selfModel, identityCore: agent.identityCore || null };
+}, { module: "memory-stream" });
+
+registerCognitiveWriteCommitter("beliefValidation", ({ agent, payload }) => {
+  const eventType = String(payload?.eventType || "");
+  if (!eventType) return null;
+  agent.beliefValidation ||= {};
+  agent.beliefValidation[eventType] = {
+    ...(agent.beliefValidation[eventType] || {}),
+    belief: payload.belief || agent.beliefValidation[eventType]?.belief || "",
+    confidence: clampNumber(payload.confidence, 0, 1, 0),
+    sourceEvent: payload.sourceEvent || agent.beliefValidation[eventType]?.sourceEvent || "",
+    lastChecked: payload.lastChecked ?? Date.now()
+  };
+  return agent.beliefValidation[eventType];
+});
+
+registerCognitiveWriteCommitter("decisionBias", ({ agent, payload }) => {
+  const eventType = String(payload?.eventType || "");
+  if (!eventType) return null;
+  agent.decisionBias ||= {};
+  agent.decisionBias[eventType] = Number(clampNumber(payload.value, -1, 1, 0).toFixed(3));
+  return { eventType, value: agent.decisionBias[eventType] };
+});
+
+registerCognitiveWriteCommitter("expectationMemory", ({ agent, payload, timestamp, world }) => {
+  ensureReflectionLearning(agent);
+  const item = payload?.item || payload || {};
+  if (!item.eventType) return null;
+  const next = {
+    eventType: compactString(item.eventType, "", 80),
+    expectedOutcome: compactString(item.expectedOutcome || "expected outcome", "", 80),
+    probability: normalizeRatio(item.probability, 0.5),
+    source: item.source || "rule",
+    confidence: normalizeRatio(item.confidence, 0.65),
+    tick: Number(item.tick ?? timestamp ?? world?.clock ?? 0),
+    lastConfirmed: Number(item.lastConfirmed ?? timestamp ?? world?.clock ?? 0)
+  };
+  const existing = agent.expectationMemory.find(entry => entry.eventType === next.eventType && entry.expectedOutcome === next.expectedOutcome);
+  if (existing) {
+    existing.probability = Number((Number(existing.probability || 0.5) * 0.8 + next.probability * 0.2).toFixed(3));
+    existing.lastConfirmed = next.lastConfirmed;
+    existing.source = next.source;
+    existing.confidence = next.confidence;
+    existing.tick = next.tick;
+    return existing;
+  }
+  agent.expectationMemory.unshift(next);
+  agent.expectationMemory = agent.expectationMemory.slice(0, 40);
+  return next;
+}, { module: "memory-stream" });
+
+registerCognitiveWriteCommitter("causalCandidate", ({ agent, payload, timestamp, world }) => {
+  if (!agent?.id) return null;
+  const quality = memoryQualityConfig(world || {});
+  const operation = payload?.operation || "upsert";
+  agent.causalCandidates = Array.isArray(agent.causalCandidates) ? agent.causalCandidates : [];
+  const trim = () => {
+    const clock = Number(payload?.clock ?? timestamp ?? world?.clock ?? 0);
+    const staleTicks = Number(quality.causalCandidateStaleTicks || 50);
+    agent.causalCandidates = agent.causalCandidates
+      .filter(candidate => {
+        const lastSeen = Number(candidate.lastSeen ?? candidate.lastSeenAt ?? 0);
+        const stale = clock - lastSeen > staleTicks && Number(candidate.confidence || 0) < 0.3;
+        return !stale;
+      })
+      .map(candidate => {
+        const lastSeen = Number(candidate.lastSeen ?? candidate.lastSeenAt ?? clock);
+        const recencyFactor = 1 / (1 + Math.max(0, clock - lastSeen) / Math.max(staleTicks, 1));
+        const repeatCount = Number(candidate.repeatCount || candidate.count || 1);
+        const score = Number(candidate.confidence || 0) * Math.log1p(repeatCount) * recencyFactor;
+        return { ...candidate, score: Number(score.toFixed(3)) };
+      })
+      .sort((a, b) => Number(b.score || 0) - Number(a.score || 0))
+      .slice(0, quality.maxCausalCandidates);
+    return agent.causalCandidates;
+  };
+  if (operation === "trim") return trim();
+  const item = payload?.item || {};
+  if (!item.key) return trim();
+  let existing = agent.causalCandidates.find(candidate => candidate.key === item.key);
+  if (!existing) {
+    existing = {
+      id: item.id || `cc_${agent.id}_${String(item.key).replace(/[^a-zA-Z0-9_]+/g, "_").slice(0, 80)}`,
+      key: item.key,
+      A: item.A || item.trigger || "",
+      B: item.B || item.effect || "",
+      trigger: item.trigger || item.A || "",
+      effect: item.effect || item.B || "",
+      confidence: 0,
+      count: 0,
+      repeatCount: 0,
+      firstSeenAt: Number(item.firstSeenAt ?? timestamp ?? world?.clock ?? 0),
+      lastSeenAt: Number(item.lastSeenAt ?? timestamp ?? world?.clock ?? 0),
+      lastSeen: Number(item.lastSeen ?? timestamp ?? world?.clock ?? 0),
+      sourceEvents: [],
+      source: item.source || "causalCandidate",
+      tick: Number(item.tick ?? timestamp ?? world?.clock ?? 0)
+    };
+    agent.causalCandidates.unshift(existing);
+  }
+  existing.count = Number(existing.count || 0) + 1;
+  existing.repeatCount = existing.count;
+  existing.lastSeenAt = Number(item.lastSeenAt ?? timestamp ?? world?.clock ?? 0);
+  existing.lastSeen = existing.lastSeenAt;
+  existing.confidence = Number(clampNumber(Math.max(Number(existing.confidence || 0), Number(item.confidence || 0)) + Math.min(0.08, Number(item.confidence || 0) * 0.08), 0, 0.95, Number(item.confidence || 0)).toFixed(3));
+  existing.sourceEvents = uniqueStrings([existing.sourceEvents, item.sourceEvent || item.eventId || ""], 8);
+  existing.source = item.source || existing.source || "causalCandidate";
+  existing.tick = Number(item.tick ?? existing.tick ?? timestamp ?? world?.clock ?? 0);
+  trim();
+  return agent.causalCandidates.find(candidate => candidate.key === item.key) || existing;
+}, { module: "memory-stream" });
+
+function writeMemoryViaKernel(world = null, agent = {}, target = "memory", payload = {}, reason = "memory write") {
+  const writeWorld = world || { clock: Number(payload.at || 0), agents: agent?.id ? [agent] : [] };
+  const confidence = Number.isFinite(Number(payload.confidence)) ? Number(payload.confidence) : 0.65;
+  const result = cognitiveWrite({
+    world: writeWorld,
+    agent,
+    agentId: agent.id || payload.agentId || "",
+    source: payload.source || "memory-consolidator",
+    target,
+    payload,
+    confidence,
+    reason,
+    timestamp: payload.at
+  });
+  return result.ok ? result.applied : null;
 }
 
 function cleanReflectionText(text = "") {
@@ -1757,40 +2058,72 @@ function emotionVectorDistance(expected = null, actual = null) {
   return Number(clampNumber(Math.sqrt(sum / keys.length) / 100, 0, 1, 0).toFixed(3));
 }
 
-function upsertExpectationMemory(agent = {}, expectation = {}, clock = 0) {
-  ensureReflectionLearning(agent);
+function upsertExpectationMemory(world = {}, agent = {}, expectation = {}, clock = 0) {
   if (!expectation?.eventType) return null;
   const item = {
     eventType: expectation.eventType,
     expectedOutcome: compactString(expectation.expectedOutcome || "expected outcome", "", 80),
     probability: normalizeRatio(expectation.probability, 0.5),
     source: expectation.source || "rule",
+    confidence: normalizeRatio(expectation.confidence, 0.65),
+    tick: clock,
     lastConfirmed: clock
   };
-  const existing = agent.expectationMemory.find(entry => entry.eventType === item.eventType && entry.expectedOutcome === item.expectedOutcome);
-  if (existing) {
-    existing.probability = Number((Number(existing.probability || 0.5) * 0.8 + item.probability * 0.2).toFixed(3));
-    existing.lastConfirmed = clock;
-    existing.source = item.source;
-    return existing;
-  }
-  agent.expectationMemory.unshift(item);
-  agent.expectationMemory = agent.expectationMemory.slice(0, 40);
-  return item;
+  const write = cognitiveWrite({
+    world,
+    agent,
+    agentId: agent.id,
+    source: item.source,
+    target: "expectationMemory",
+    payload: item,
+    confidence: item.confidence,
+    reason: "prediction expectation memory update",
+    timestamp: clock
+  });
+  return write.ok ? write.applied : null;
 }
 
-function decayInvalidatedBelief(agent = {}, eventType = "", predictionError = 0) {
+function decayInvalidatedBelief(world = {}, agent = {}, eventType = "", predictionError = 0) {
   ensureReflectionLearning(agent);
   const validation = agent.beliefValidation[eventType];
   if (!validation || predictionError > 0.25) return null;
-  validation.confidence = Number(clampNumber(Number(validation.confidence || 0) * 0.8, 0, 1, 0).toFixed(3));
-  validation.lastChecked = Date.now();
+  const nextConfidence = Number(clampNumber(Number(validation.confidence || 0) * 0.8, 0, 1, 0).toFixed(3));
+  const lastChecked = Number(world.clock || Date.now());
+  const validationWrite = cognitiveWrite({
+    world,
+    agent,
+    agentId: agent.id,
+    source: "reflection",
+    target: "beliefValidation",
+    payload: {
+      eventType,
+      belief: validation.belief,
+      confidence: nextConfidence,
+      sourceEvent: validation.sourceEvent,
+      lastChecked
+    },
+    confidence: 0.75,
+    reason: "belief validation decay",
+    timestamp: Number(world.clock || 0)
+  });
+  if (!validationWrite.ok) return null;
   if (agent.decisionBias[eventType] != null) {
-    agent.decisionBias[eventType] = validation.confidence < 0.2
+    const nextBias = nextConfidence < 0.2
       ? 0
       : Number((Number(agent.decisionBias[eventType] || 0) * 0.8).toFixed(3));
+    cognitiveWrite({
+      world,
+      agent,
+      agentId: agent.id,
+      source: "reflection",
+      target: "decisionBias",
+      payload: { eventType, value: nextBias },
+      confidence: 0.75,
+      reason: "belief validation adjusted decision bias",
+      timestamp: Number(world.clock || 0)
+    });
   }
-  return validation;
+  return validationWrite.applied;
 }
 
 function predictionErrorEngine(world = {}, agent = {}, event = {}) {
@@ -1808,12 +2141,12 @@ function predictionErrorEngine(world = {}, agent = {}, event = {}) {
   const expectation = explicitExpectation
     || agent.expectationMemory.find(item => item.eventType === eventType)
     || inferExpectation(event);
-  const storedExpectation = expectation ? upsertExpectationMemory(agent, expectation, clock) : null;
+  const storedExpectation = expectation ? upsertExpectationMemory(world, agent, expectation, clock) : null;
   const actualOutcome = normalizeOutcome(event.actualOutcome ?? event.outcome ?? event.result ?? event.summary, 0.5);
   const ruleError = storedExpectation ? Math.abs(Number(storedExpectation.probability || 0.5) - actualOutcome) : 0;
   const emotionError = emotionVectorDistance(expectedEmotionVectorFromEvent(event), actualEmotionVectorFromEvent(agent, event));
   const predictionError = Number(Math.max(ruleError, emotionError).toFixed(3));
-  decayInvalidatedBelief(agent, eventType, predictionError);
+  decayInvalidatedBelief(world, agent, eventType, predictionError);
   const config = reflectionLearningConfig(world);
   const emotionDelta = normalizedDeltaValue(event.emotionDelta, 0);
   const result = {
@@ -1872,12 +2205,23 @@ function reflectionImportanceForEvent(world = {}, agent = {}, event = {}, predic
   };
 }
 
-function updateDecisionBiasFromReflection(agent = {}, eventType = "", deltaBias = 0) {
+function updateDecisionBiasFromReflection(world = {}, agent = {}, eventType = "", deltaBias = 0) {
   ensureReflectionLearning(agent);
   const oldBias = Number(agent.decisionBias[eventType] || 0);
   const next = oldBias * 0.8 + Number(deltaBias || 0) * 0.2;
-  agent.decisionBias[eventType] = Number(clampNumber(next, -1, 1, 0).toFixed(3));
-  return agent.decisionBias[eventType];
+  const value = Number(clampNumber(next, -1, 1, 0).toFixed(3));
+  const write = cognitiveWrite({
+    world,
+    agent,
+    agentId: agent.id,
+    source: "reflection",
+    target: "decisionBias",
+    payload: { eventType, value },
+    confidence: 0.75,
+    reason: "reflection decision bias ema",
+    timestamp: Number(world.clock || 0)
+  });
+  return write.ok ? write.applied?.value : oldBias;
 }
 
 function reflectionTextForEvent(event = {}, prediction = {}, importance = {}) {
@@ -1931,16 +2275,37 @@ function applyReflectionLearning(world = {}, agent = {}, event = {}) {
     source: "adaptive-reflection",
     at: Number(world.clock || event.clock || 0)
   };
-  agent.reflectionMemory.unshift(memory);
-  agent.reflectionMemory = agent.reflectionMemory.slice(0, 40);
-  agent.beliefValidation[memory.eventType] = {
-    belief: memory.beliefChange,
+  const reflectionWrite = cognitiveWrite({
+    world,
+    agent,
+    agentId: agent.id,
+    source: "reflection",
+    target: "reflectionMemory",
+    payload: memory,
+    reason: "adaptive reflection changed judgement",
     confidence: memory.confidence,
-    sourceEvent: memory.eventId,
-    lastChecked: memory.at
-  };
-  updateDecisionBiasFromReflection(agent, memory.eventType, prediction.actualOutcome < Number(prediction.expected?.probability ?? 0.5) ? -confidence : confidence);
-  appendSemanticMemory(agent, {
+    timestamp: memory.at
+  });
+  if (!reflectionWrite.ok) return null;
+  cognitiveWrite({
+    world,
+    agent,
+    agentId: agent.id,
+    source: "reflection",
+    target: "beliefValidation",
+    payload: {
+      eventType: memory.eventType,
+      belief: memory.beliefChange,
+      confidence: memory.confidence,
+      sourceEvent: memory.eventId,
+      lastChecked: memory.at
+    },
+    confidence: memory.confidence,
+    reason: "reflection belief validation update",
+    timestamp: memory.at
+  });
+  updateDecisionBiasFromReflection(world, agent, memory.eventType, prediction.actualOutcome < Number(prediction.expected?.probability ?? 0.5) ? -confidence : confidence);
+  writeMemoryViaKernel(world, agent, "beliefMemory", {
     type: "belief",
     text: memory.beliefChange,
     meaning: memory.interpretation,
@@ -1953,7 +2318,7 @@ function applyReflectionLearning(world = {}, agent = {}, event = {}) {
     sourceEvents: [memory.eventId].filter(Boolean),
     tags: ["reflection", memory.eventType],
     dedupeKey: `reflection-belief:${agent.id}:${memory.eventType}`
-  });
+  }, "reflection belief update");
   syncLongTermMemoryViews(agent);
   agent.reflectionLearningState.lastRunClock = Number(world.clock || event.clock || 0);
   return memory;
@@ -2082,25 +2447,19 @@ function causalTriggerForEvent(event = {}) {
 }
 
 function trimCausalCandidatePool(world = {}, agent = {}, quality = memoryQualityConfig(world)) {
-  if (!Array.isArray(agent.causalCandidates)) return [];
-  const clock = Number(world.clock || 0);
-  const staleTicks = Number(quality.causalCandidateStaleTicks || 50);
-  agent.causalCandidates = agent.causalCandidates
-    .filter(candidate => {
-      const lastSeen = Number(candidate.lastSeen ?? candidate.lastSeenAt ?? 0);
-      const stale = clock - lastSeen > staleTicks && Number(candidate.confidence || 0) < 0.3;
-      return !stale;
-    })
-    .map(candidate => {
-      const lastSeen = Number(candidate.lastSeen ?? candidate.lastSeenAt ?? clock);
-      const recencyFactor = 1 / (1 + Math.max(0, clock - lastSeen) / Math.max(staleTicks, 1));
-      const repeatCount = Number(candidate.repeatCount || candidate.count || 1);
-      const score = Number(candidate.confidence || 0) * Math.log1p(repeatCount) * recencyFactor;
-      return { ...candidate, score: Number(score.toFixed(3)) };
-    })
-    .sort((a, b) => Number(b.score || 0) - Number(a.score || 0))
-    .slice(0, quality.maxCausalCandidates);
-  return agent.causalCandidates;
+  const write = cognitiveWrite({
+    world,
+    agent,
+    agentId: agent.id || "",
+    source: "causalCandidate",
+    target: "causalCandidate",
+    operation: "trim",
+    payload: { operation: "trim", clock: Number(world.clock || 0), quality },
+    confidence: 0.7,
+    reason: "causal candidate pool trim",
+    timestamp: Number(world.clock || 0)
+  });
+  return write.ok ? write.applied : (Array.isArray(agent.causalCandidates) ? agent.causalCandidates : []);
 }
 
 function upsertCausalCandidate(world = {}, agent = {}, event = {}, gate = {}) {
@@ -2115,35 +2474,41 @@ function upsertCausalCandidate(world = {}, agent = {}, event = {}, gate = {}) {
     normalizeRatio(event.causalGraph?.strength, 0)
   );
   if (!cause || !effect || confidence < quality.causalCandidateThreshold) return null;
-  if (!Array.isArray(agent.causalCandidates)) agent.causalCandidates = [];
   const key = `${cause}->${effect}`;
-  let item = agent.causalCandidates.find(candidate => candidate.key === key);
   const clock = Number(event.clock || world.clock || 0);
-  if (!item) {
-    item = {
-      id: `cc_${agent.id}_${key.replace(/[^a-zA-Z0-9_]+/g, "_").slice(0, 80)}`,
-      key,
-      A: cause,
-      B: effect,
-      trigger: cause,
-      effect,
-      confidence: 0,
-      count: 0,
-      repeatCount: 0,
-      firstSeenAt: clock,
-      lastSeenAt: clock,
-      lastSeen: clock,
-      sourceEvents: []
-    };
-    agent.causalCandidates.unshift(item);
-  }
-  item.count = Number(item.count || 0) + 1;
-  item.repeatCount = item.count;
-  item.lastSeenAt = clock;
-  item.lastSeen = clock;
-  item.confidence = Number(clampNumber(Math.max(Number(item.confidence || 0), confidence) + Math.min(0.08, confidence * 0.08), 0, 0.95, confidence).toFixed(3));
-  item.sourceEvents = uniqueStrings([item.sourceEvents, event.id], 8);
-  trimCausalCandidatePool(world, agent, quality);
+  const write = cognitiveWrite({
+    world,
+    agent,
+    agentId: agent.id,
+    source: "causalCandidate",
+    target: "causalCandidate",
+    operation: "upsert",
+    payload: {
+      operation: "upsert",
+      item: {
+        id: `cc_${agent.id}_${key.replace(/[^a-zA-Z0-9_]+/g, "_").slice(0, 80)}`,
+        key,
+        A: cause,
+        B: effect,
+        trigger: cause,
+        effect,
+        confidence,
+        firstSeenAt: clock,
+        lastSeenAt: clock,
+        lastSeen: clock,
+        sourceEvent: event.id,
+        sourceEvents: [event.id],
+        source: "causalCandidate",
+        tick: clock
+      },
+      quality
+    },
+    confidence: Math.max(0.55, confidence),
+    reason: "causal candidate update",
+    timestamp: clock
+  });
+  const item = write.ok ? write.applied : null;
+  if (!item) return null;
   event.causalCandidate = {
     A: item.A,
     B: item.B,
@@ -2257,7 +2622,7 @@ function updateHabit(agent, event = {}, gate = null) {
   profile.habits[key] = current;
   const stable = gate?.habitTemporal?.stable || candidate.stable;
   if (!gate?.shouldRemember || !stable) return null;
-  return appendSemanticMemory(agent, {
+  return writeMemoryViaKernel(null, agent, "habitMemory", {
     type: "habit",
     text: current.text,
     meaning: current.text,
@@ -2276,7 +2641,7 @@ function updateHabit(agent, event = {}, gate = null) {
     count: current.count,
     firstTime: current.firstSeenAt,
     lastTime: current.lastSeenAt
-  });
+  }, "stable routine habit crossed threshold");
 }
 
 function habitMemoryText(memory = {}) {
@@ -2556,7 +2921,7 @@ function consolidateRelationshipBuffer(world = {}, agent = {}, options = {}) {
     const relationshipType = withinCooldown ? (recent.relationshipType || item.relationshipType) : item.relationshipType;
     const averageImportance = Number(item.importanceTotal || 0) / Math.max(1, Number(item.interactionCount || 1));
     const importance = clampNumber(Math.ceil(Math.max(item.importanceMax || 0, averageImportance || 0.2) * 5), 1, 5, 3);
-    const memory = appendSemanticMemory(agent, {
+    const memory = writeMemoryViaKernel(world, agent, "relationshipMemory", {
       type: "relationship",
       text: item.text,
       meaning: item.meaning || item.text,
@@ -2583,7 +2948,7 @@ function consolidateRelationshipBuffer(world = {}, agent = {}, options = {}) {
       dedupeKey: `relationship:${agent.id}:${targetAgentId}:${relationshipType}`,
       compressionKey: `relationship:${targetAgentId}:${relationshipType}`,
       count: Number(item.interactionCount || 1)
-    });
+    }, "daily relationship consolidation");
     if (memory) written.push(memory);
     agent.dailyRelationshipSummary.unshift({
       person: targetAgentId,
@@ -2625,7 +2990,7 @@ function consolidateEvent(world, agent, event = {}) {
   if (semanticType === "relationship") {
     return relationshipMemoryFromEvent(world, agent, event, gate, meaning);
   }
-  const experience = appendSemanticMemory(agent, {
+  const experience = writeMemoryViaKernel(world, agent, "episodicMemory", {
     type: semanticType,
     text: meaning,
     meaning,
@@ -2638,10 +3003,10 @@ function consolidateEvent(world, agent, event = {}) {
     evidenceIds: [event.id],
     tags: [semanticType, event.interruption?.type, event.actionType].filter(Boolean),
     dedupeKey: `${semanticType}:${agent.id}:${event.interruption?.type || event.actionType || event.type}`
-  });
+  }, "event memory consolidation");
   const belief = gate.memoryType === "belief" || gate.personalityImpact || importance >= 4 ? beliefFromEvent(agent, event) : "";
   if (belief) {
-    appendSemanticMemory(agent, {
+    writeMemoryViaKernel(world, agent, "beliefMemory", {
       type: "belief",
       text: belief,
       meaning: belief,
@@ -2653,7 +3018,7 @@ function consolidateEvent(world, agent, event = {}) {
       evidenceIds: [event.id],
       tags: ["belief", event.interruption?.type].filter(Boolean),
       dedupeKey: `belief:${agent.id}:${event.interruption?.type || event.actionType || event.type}`
-    });
+    }, "event belief consolidation");
   }
   return experience;
 }
@@ -2673,8 +3038,10 @@ function emotionCauseFromEvent(event = {}) {
 
 function recordLifeEvent(world, agent, detail = {}) {
   if (!world || !agent?.id) return null;
+  if (isEventRejectedRecently(world, agent, detail)) return null;
   ensureEventLog(world, agent);
   ensureMemory(agent);
+  ensurePriorCausalGraph(world);
   const summaryText = String(detail.summary || "");
   const sourceType = String(detail.sourceType || detail.actionSourceType || detail.action?.sourceType || detail.plan?.sourceType || "");
   if (sourceType === "system_error" || /AI\s*返回格式错误|AI\s*杩斿洖|AI returned invalid JSON|invalid JSON|JSON\s*修复兜底|JSON\s*淇|system_error|system error|停下整理思路|停在原地整理思路|鍋滀笅鏁寸悊/i.test(summaryText)) {
@@ -2685,6 +3052,7 @@ function recordLifeEvent(world, agent, detail = {}) {
   const clock = Number(world.clock || 0);
   const event = {
     id: detail.id || `evt_${agent.id}_${clock}_${Math.random().toString(36).slice(2, 8)}`,
+    eventHash: eventHashFor(agent, detail, clock),
     clock,
     agentId: agent.id,
     agentName: agent.name || agent.id,
@@ -2724,33 +3092,47 @@ function recordLifeEvent(world, agent, detail = {}) {
   };
   const predictionError = predictionErrorEngine(world, agent, event);
   event.predictionError = predictionError.predictionError;
-  world.eventLog.unshift(event);
-  world.eventLog = world.eventLog.slice(0, 2000);
-  agent.eventLog.unshift(event);
-  agent.eventLog = agent.eventLog.slice(0, 120);
-  const causalGraph = analyzeEventImpact(world, agent, event);
-  const memory = consolidateEvent(world, agent, event);
-  const memoryCausalGraph = connectMemoryCause(world, agent, event, memory);
+  const eventWrite = cognitiveWrite({
+    world,
+    agent,
+    agentId: agent.id,
+    source: event.sourceType,
+    target: "eventLog",
+    payload: event,
+    reason: "life event reached memory pipeline",
+    confidence: event.sourceType === "llm" ? 0.55 : 0.9,
+    timestamp: event.timestamp
+  });
+  if (!eventWrite.ok) return null;
+  const storedEvent = eventWrite.applied || event;
+  const causalGraph = analyzeEventImpact(world, agent, storedEvent);
+  const memory = consolidateEvent(world, agent, storedEvent);
+  const emotionIntensity = Number(storedEvent.emotionalIntensity || 0);
+  const normalizedEmotion = emotionIntensity > 1 ? emotionIntensity / 100 : emotionIntensity;
+  if (!memory && normalizedEmotion <= 0.25) {
+    rememberRejectedEvent(world, agent, storedEvent);
+  }
+  const memoryCausalGraph = connectMemoryCause(world, agent, storedEvent, memory);
   const temporalCausal = updateTemporalCausalMemory(world, agent, {
-    event,
+    event: storedEvent,
     memory,
     source: "record-life-event"
   });
-  const cause = emotionCauseFromEvent(event);
+  const cause = emotionCauseFromEvent(storedEvent);
   if (cause) {
     recordEmotionCause(agent, {
       ...cause,
-      causes: [event.summary || event.planTitle || event.actionType || event.type],
+      causes: [storedEvent.summary || storedEvent.planTitle || storedEvent.actionType || storedEvent.type],
       source: "event-log",
       at: clock,
-      eventId: event.id
+      eventId: storedEvent.id
     });
   }
   syncLongTermMemoryViews(agent);
   normalizeGoalRuntime(agent, world);
   agent.memoryProfile.lastConsolidatedAt = clock;
   agent.memorySummary = buildMemorySummary(agent, world);
-  return { event, memory, causalGraph: memoryCausalGraph || causalGraph || null, temporalCausal };
+  return { event: storedEvent, memory, causalGraph: memoryCausalGraph || causalGraph || null, temporalCausal };
 }
 
 function recordPlanMemory(world, agent, detail = {}) {
@@ -2975,14 +3357,27 @@ function runDailyReflection(world, options = {}) {
       selfViewUpdate,
       source: "local-reflection"
     };
-    agent.selfModel.currentSelfView = selfViewUpdate;
     const cleanSelfViewUpdate = compactString(reflectionSelfViewText(agent, learnedBeliefs, meaningfulEvents), "", 220);
     agent.reflection.mainTheme = compactString(ensureFirstPersonText(agent, agent.reflection.mainTheme || "我今天没有形成新的强烈经验。", "episodic"), "", 180);
     agent.reflection.anchors = (agent.reflection.anchors || []).map(text => compactString(ensureFirstPersonText(agent, text, "episodic"), "", 140));
     agent.reflection.eventAnchors = (agent.reflection.eventAnchors || []).map(text => compactString(ensureFirstPersonText(agent, text, "episodic"), "", 140));
     agent.reflection.selfViewUpdate = cleanSelfViewUpdate;
-    agent.selfModel.currentSelfView = cleanSelfViewUpdate;
-    agent.selfModel.selfBeliefs = uniqueStrings([agent.selfModel.selfBeliefs, learnedBeliefs.slice(0, 2)], 10);
+    cognitiveWrite({
+      world,
+      agent,
+      agentId: agent.id,
+      source: "reflection",
+      target: "identity",
+      payload: {
+        selfModel: {
+          currentSelfView: cleanSelfViewUpdate,
+          selfBeliefs: learnedBeliefs.slice(0, 2)
+        }
+      },
+      confidence: 0.7,
+      reason: "daily reflection self model update",
+      timestamp: clock
+    });
     agent.memorySummary = buildMemorySummary(agent, world);
     updated.push(agent.id);
   });
@@ -3039,7 +3434,7 @@ function backfillEpisodicMemoryFromEvents(agent = {}) {
     .slice(0, 3);
   events.forEach(({ event, significance }, index) => {
     const meaning = eventMeaning(agent, event);
-    appendSemanticMemory(agent, {
+    writeMemoryViaKernel(null, agent, "episodicMemory", {
       type: "episodic",
       text: meaning,
       meaning,
@@ -3053,7 +3448,7 @@ function backfillEpisodicMemoryFromEvents(agent = {}) {
       evidenceIds: [event.id].filter(Boolean),
       tags: ["episodic", "migration", event.interruption?.type || event.actionType || event.type].filter(Boolean),
       dedupeKey: `memory-perspective-migration:episodic:${agent.id}:${event.id || index}`
-    });
+    }, "episodic migration backfill");
   });
   if (events.length) return events.length;
 
@@ -3080,7 +3475,7 @@ function backfillEpisodicMemoryFromEvents(agent = {}) {
   fallbackEvents.forEach((item, index) => {
     const eventText = ensureFirstPersonText(agent, item.event || item.summary || item, "episodic");
     const meaning = ensureFirstPersonText(agent, item.impact || item.lesson || item.event || item.summary || "这段经历影响了我之后的判断。", "episodic");
-    appendSemanticMemory(agent, {
+    writeMemoryViaKernel(null, agent, "episodicMemory", {
       type: "episodic",
       text: eventText,
       meaning,
@@ -3094,7 +3489,7 @@ function backfillEpisodicMemoryFromEvents(agent = {}) {
       evidenceIds: [`lifeHistory:${agent.id}:${index + 1}`],
       tags: ["episodic", "migration", item.section || "lifeHistory"],
       dedupeKey: `life-history-migration:episodic:${agent.id}:${index + 1}`
-    });
+    }, "life history migration backfill");
   });
   return fallbackEvents.length;
 }
@@ -3159,6 +3554,80 @@ function migrateMemoryPerspectiveForAgent(agent = {}, world = {}) {
   return before !== after;
 }
 
+function auditTickFromItem(item = {}, fallback = 0) {
+  const candidates = [item.tick, item.at, item.timestamp, item.createdAt, item.lastConfirmed, item.lastSeenAt, item.lastUpdate, item.time, fallback];
+  for (const candidate of candidates) {
+    const number = Number(candidate);
+    if (Number.isFinite(number)) return number;
+  }
+  return 0;
+}
+
+function backfillCognitiveAuditItem(item = {}, fallbackTick = 0) {
+  if (!item || typeof item !== "object") return 0;
+  let changed = 0;
+  if (!item.source) {
+    item.source = "migration";
+    changed += 1;
+  }
+  if (item.confidence == null || !Number.isFinite(Number(item.confidence))) {
+    item.confidence = 0.5;
+    changed += 1;
+  }
+  if (item.tick == null || !Number.isFinite(Number(item.tick))) {
+    const tick = auditTickFromItem(item, fallbackTick);
+    item.tick = tick;
+    if (!tick) item.legacyTickUnknown = true;
+    changed += 1;
+  }
+  item.kernelVersion ||= "legacy-audit-backfill";
+  return changed;
+}
+
+function migrateLegacyCognitiveAuditFields(world = {}) {
+  if (!world || !Array.isArray(world.agents)) return { changed: false, updatedItems: 0, agents: 0 };
+  let updatedItems = 0;
+  let agents = 0;
+  const touch = (item, fallbackTick) => {
+    const changed = backfillCognitiveAuditItem(item, fallbackTick);
+    if (changed) updatedItems += 1;
+    return changed;
+  };
+  world.agents.forEach(agent => {
+    let agentChanged = 0;
+    const fallbackTick = Number(world.clock || 0);
+    ["short", "long", "emotional", "secret", "rumor"].forEach(layer => {
+      (Array.isArray(agent.memory?.[layer]) ? agent.memory[layer] : []).forEach(item => { agentChanged += touch(item, fallbackTick); });
+    });
+    Object.values(agent.semanticMemory || {}).forEach(list => {
+      (Array.isArray(list) ? list : []).forEach(item => { agentChanged += touch(item, fallbackTick); });
+    });
+    Object.values(agent.structuredMemory || {}).forEach(list => {
+      (Array.isArray(list) ? list : []).forEach(item => { agentChanged += touch(item, fallbackTick); });
+    });
+    [
+      "episodicMemory",
+      "beliefMemory",
+      "habitMemory",
+      "preferenceMemory",
+      "relationshipMemory",
+      "causalMemory",
+      "reflectionMemory",
+      "emotionCause"
+    ].forEach(field => {
+      (Array.isArray(agent[field]) ? agent[field] : []).forEach(item => { agentChanged += touch(item, fallbackTick); });
+    });
+    if (agentChanged) agents += 1;
+  });
+  world.cognitiveAuditMigration ||= {};
+  world.cognitiveAuditMigration.version = "3.4.1-A.3";
+  world.cognitiveAuditMigration.updatedItems = updatedItems;
+  world.cognitiveAuditMigration.updatedAgents = agents;
+  world.cognitiveAuditMigration.lastRunClock = Number(world.clock || 0);
+  world.cognitiveAuditMigration.rule = "Backfills source/confidence/tick metadata only; it does not rewrite memory content or create experiences.";
+  return { changed: updatedItems > 0, updatedItems, agents };
+}
+
 module.exports = {
   ensureMemory,
   ensureSemanticMemory,
@@ -3187,6 +3656,7 @@ module.exports = {
   ensureFirstPersonText,
   isFirstPersonMemoryText,
   migrateMemoryPerspectiveForAgent,
+  migrateLegacyCognitiveAuditFields,
   habitTemporalValidator,
   cleanHabitMemory,
   consolidateRelationshipBuffer,

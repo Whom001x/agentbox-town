@@ -11,6 +11,9 @@ AgentBox Town 是一个多 Agent 虚拟小镇模拟器。它把多个 AI 角色�
 ## 核心能力
 
 - 支持 100+ 角色的小镇模拟。
+- V3.4.2.1 认知闭包硬化：Candidate、Eligibility、Utility 和 Scheduler 运行时只读取统一心理状态 `S(t)` / `psychologicalState`，禁止 raw memory、raw needs、raw emotion、raw social 和 raw causal 旁路进入决策。
+- V3.4.2 人格稳定化：把情绪、需求、认知驱动、社交压力和投影信息融合为 `S(t)`，并通过惯性核保持状态连续，避免角色每轮“变人”。
+- V3.4.1 认知写入边界：长期记忆、因果、关系、身份和情绪写入统一经过 `cognitiveWrite`、RealityGuard 和 committer 审计，阻断运行时直接 mutation。
 - V3.3.7.5a 自适应反思与预测误差：Reflection 先用规则和向量误差判断预期是否失败，只在高重要性/高误差事件上形成 `reflectionMemory`、`decisionBias` 和 belief 修正。
 - V3.3.7.4a 记忆稳定层：habit 必须来自时间稳定的重复模式，关系事件先进入 buffer 再每日合并，`causalCandidates` 限制容量并淘汰低分项。
 - V3.3.7.3 记忆门控精炼：routine 默认只进 `EventLog`，重复日常只压缩成一个 habit，关系/危机/学习事件才进入长期记忆。
@@ -301,6 +304,10 @@ Vector Model: text-embedding-bge-m3@q8_0
 ## 检查命令
 
 ```bash
+npm run check:cognitive-closure
+npm run check:cognitive-hard-seal
+npm run check:cognitive-integrity
+npm run check:personality-stability
 npm run check:cognitive-decision
 npm run check:cognitive-loop
 npm run check:memory-gate
@@ -316,7 +323,19 @@ npm run check:all
 
 完整更新记录：[CHANGELOG.md](CHANGELOG.md)
 
-**V3.3.7.5a Adaptive Reflection + V3.3.7.4a Memory Stability + V3.3.7.3 Memory Gate Refinement + V3.3.6 Memory Self-Experience + V3.3.5 Relationship Memory Formation + V3.3.4 Temporal Causal Graph + V3.3.3.1 Memory Importance Calibration + V3.3.3 Memory Gate + V3.3.2.1 Medical Recovery + V3.3.2 Context Boundary + V3.3.1 Social Feedback**
+**V3.4.2.1 Closure Hardening + V3.4.2 Stabilized Personality Emergence + V3.4.1 Cognitive Kernel Integrity + V3.3.7.5a Adaptive Reflection + V3.3.7.4a Memory Stability + V3.3.7.3 Memory Gate Refinement + V3.3.6 Memory Self-Experience + V3.3.5 Relationship Memory Formation + V3.3.4 Temporal Causal Graph + V3.3.3.1 Memory Importance Calibration + V3.3.3 Memory Gate + V3.3.2.1 Medical Recovery + V3.3.2 Context Boundary + V3.3.1 Social Feedback**
+
+### V3.4.2.1 Closure Hardening
+
+决策链路已收口为 Single-State Mediated Cognition：`utilityDecision`、`candidateActions`、`scoreAction` 和 `actionEligibility` 运行时只接收 `S(t)` / `psychologicalState`。所有需要的任务状态、行为熵、探索压力、地点和职业上下文先投影进 `S(t).projection`，再进入 Candidate、Eligibility 和 Utility；fallback 只允许诊断和记录，不再生成动作或重建认知状态。
+
+### V3.4.2 Stabilized Personality Emergence
+
+新增统一心理状态 `psychologicalState`，将 emotion、needs、drive、bias、socialPressure 和 projection 合并为唯一认知接口，并通过惯性核 `S(t) = alpha * S(t-1) + (1 - alpha) * input` 限制跳变。Candidate 生成、探索率和 Utility 评分都从 `S(t)` 派生，避免 raw memory、raw needs、raw emotion 或 socialField 直接影响决策。
+
+### V3.4.1 Cognitive Kernel Integrity
+
+认知写入边界统一为 request -> `cognitiveWrite` -> RealityGuard -> Commit。长期记忆、因果图、关系、身份、自我模型和情绪解释写入都带 source、confidence、tick 审计字段；旧存档通过迁移补齐审计字段，运行时版本锁会检查 memory、emotion、causal 和 relationship committer 是否注册。
 
 ### V3.3.7.5a Adaptive Reflection & Prediction Error
 

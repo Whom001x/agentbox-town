@@ -5,22 +5,14 @@ const { detectInterruption } = require("./ai-town-interruptions");
 const { recordLifeEvent } = require("./ai-town-memory-stream");
 const { clamp, placeId, isAlive } = require("./ai-town-sim-utils");
 const { applyNeedActivity } = require("./ai-town-need-dynamics");
+const { requestNeedUpdate, requestEmotionUpdate } = require("./ai-town-cognitive-integrity");
 
-function adjustNeeds(agent, delta = {}) {
-  agent.needs ||= {};
-  Object.entries(delta).forEach(([key, value]) => {
-    const before = Number(agent.needs[key] ?? 70);
-    agent.needs[key] = clamp(before + Number(value || 0), 0, 100, before);
-  });
+function adjustNeeds(world, agent, delta = {}, source = "life-engine") {
+  return requestNeedUpdate(world || { clock: 0, agents: agent?.id ? [agent] : [] }, agent, delta, source, "life engine needs update", 0.9);
 }
 
-function adjustEmotion(agent, delta = {}) {
-  agent.emotionVector ||= agent.emotions || {};
-  Object.entries(delta).forEach(([key, value]) => {
-    const before = Number(agent.emotionVector[key] ?? 50);
-    agent.emotionVector[key] = clamp(before + Number(value || 0), 0, 100, before);
-  });
-  agent.emotions = agent.emotionVector;
+function adjustEmotion(world, agent, delta = {}, source = "life-engine") {
+  return requestEmotionUpdate(world || { clock: 0, agents: [agent] }, agent, delta, source, "life engine emotion update", 0.85);
 }
 
 function startMovement(world, agent, to, reason, minutes = 30) {
@@ -74,8 +66,8 @@ function executeInterruption(world, agent, interruption) {
       agent.currentTask = "去吃点东西";
       action = { type: "move_for_food", summary: localSummary(agent, `去${placeName(world, food)}吃点东西`) };
     } else {
-      applyNeedActivity(agent, "eat");
-      adjustEmotion(agent, { angry: -2, tired: -1, calm: 1 });
+      applyNeedActivity(agent, "eat", { world, source: "life-engine-eat" });
+      adjustEmotion(world, agent, { angry: -2, tired: -1, calm: 1 }, "life-engine-eat");
       agent.currentTask = "简单吃点东西";
       action = { type: "eat", summary: localSummary(agent, "简单吃点东西") };
     }
@@ -85,7 +77,7 @@ function executeInterruption(world, agent, interruption) {
       agent.currentTask = "去诊所看看";
       action = { type: "move_for_health", summary: localSummary(agent, `去${placeName(world, clinic)}看看身体状况`) };
     } else {
-      applyNeedActivity(agent, "health_rest");
+      applyNeedActivity(agent, "health_rest", { world, source: "life-engine-health" });
       agent.currentTask = "休息观察身体";
       action = { type: "health_rest", summary: localSummary(agent, "停下来休息，观察身体状况") };
     }
@@ -95,7 +87,7 @@ function executeInterruption(world, agent, interruption) {
       agent.currentTask = "去更安全的地方";
       action = { type: "move_for_safety", summary: localSummary(agent, `去${placeName(world, safePlace)}避开风险`) };
     } else {
-      applyNeedActivity(agent, "safety");
+      applyNeedActivity(agent, "safety", { world, source: "life-engine-safety" });
       agent.currentTask = "留在原地避开风险";
       action = { type: "stay_safe", summary: localSummary(agent, "留在原地，避开明显风险") };
     }
@@ -106,8 +98,8 @@ function executeInterruption(world, agent, interruption) {
       action = { type: "move_for_rest", summary: localSummary(agent, "回家休息") };
     } else {
       agent.energy = clamp(Number(agent.energy ?? 50) + 10, 0, 100, 50);
-      applyNeedActivity(agent, "rest");
-      adjustEmotion(agent, { tired: -4, calm: 2 });
+      applyNeedActivity(agent, "rest", { world, source: "life-engine-rest" });
+      adjustEmotion(world, agent, { tired: -4, calm: 2 }, "life-engine-rest");
       agent.currentTask = "短暂休息";
       action = { type: "rest", summary: localSummary(agent, "短暂休息一下") };
     }
@@ -117,7 +109,7 @@ function executeInterruption(world, agent, interruption) {
       agent.currentTask = "回家收拾一下";
       action = { type: "move_for_hygiene", summary: localSummary(agent, "回家洗漱整理") };
     } else {
-      applyNeedActivity(agent, "clean");
+      applyNeedActivity(agent, "clean", { world, source: "life-engine-clean" });
       agent.currentTask = "洗漱整理";
       action = { type: "clean_up", summary: localSummary(agent, "简单洗漱整理") };
     }
@@ -153,16 +145,18 @@ function executePlan(world, agent, plan) {
 
   const localAction = String(plan.localAction || "maintain");
   if (localAction === "meal" && canEatAt(world, agent)) {
-    applyNeedActivity(agent, "meal");
+    applyNeedActivity(agent, "meal", { world, source: "life-engine-meal" });
   } else if (localAction === "sleep") {
     agent.isSleeping = true;
     agent.energy = clamp(Number(agent.energy ?? 60) + 8, 0, 100, 60);
-    applyNeedActivity(agent, "sleep");
+    applyNeedActivity(agent, "sleep", { world, source: "life-engine-sleep" });
   } else if (localAction === "rest") {
     agent.energy = clamp(Number(agent.energy ?? 60) + 5, 0, 100, 60);
-    applyNeedActivity(agent, "rest");
+    applyNeedActivity(agent, "rest", { world, source: "life-engine-rest" });
   } else if (["work", "study", "homework", "maintain"].includes(localAction)) {
     applyNeedActivity(agent, localAction === "study" || localAction === "homework" ? "study" : "work", {
+      world,
+      source: "life-engine-plan",
       minimum: { responsibility: plan.fixed ? 2 : 1 }
     });
   }

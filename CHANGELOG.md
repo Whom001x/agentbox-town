@@ -1,5 +1,56 @@
 # 更新记录
 
+## 2026-06-19 - V3.4.2.1 Closure Hardening
+
+- 将运行时决策链路收口为 Single-State Mediated Cognition：`utilityDecision()`、`candidateActions()`、`scoreAction()` 和 `actionEligibility()` 只读取 `S(t)` / `psychologicalState`。
+- `ai-town-v2-server.js` 运行时改为调用 `utilityDecision(state.psychologicalState)`，不再把完整 agent/world 作为 Scheduler 决策输入。
+- `S(t).projection` 增加 `runtimeContext`、`taskState`、`behavioralEntropy` 和 `explorationPressure`，让地点、职业、任务、行为重复率和探索压力先进入统一状态，再进入决策。
+- `Utility Scheduler` 移除 raw memory、raw needs、raw emotion、raw social、raw causal、`agent.currentTask`、`agent.actionHistory` 和 `world.config` 的直接决策读取。
+- Candidate Generator、Eligibility、Utility 和 Exploration 统一改为 S-first 接口；旧 4 参数兼容路径必须显式提供 `psychologicalState`，否则直接报错。
+- 无候选时返回 `NO_VALID_CANDIDATE` 诊断结果，不再生成 fallback action；AgentAction fallback 保持 diagnostic-only，禁止系统错误污染世界行为。
+- 新增/强化 `check:cognitive-closure`、`check:cognitive-hard-seal`、`check:cognitive-integrity` 和 `check:personality-stability`，用于验证 S(t) 唯一入口、写入边界、人格稳定和无旁路。
+
+验证：
+- `npm run check:cognitive-closure`
+- `npm run check:cognitive-hard-seal`
+- `npm run check:action-eligibility`
+- `npm run check:cognitive-decision`
+- `npm run check:cognitive-state`
+- `npm run check:personality-stability`
+- `npm run check:personality-runtime`
+- `npm run check:personality-loop`
+- `npm run check:utility-scheduler`
+- `npm run check:relationship-memory`
+- `npm run check:temporal-causal`
+- `npm run check:cognitive-integrity`
+- `npm run check:all`
+
+## 2026-06-19 - V3.4.2 Stabilized Personality Emergence
+
+- 新增统一心理状态 `psychologicalState`，将 emotion、needs、drive、bias、socialPressure 和 projection 作为所有决策的唯一认知接口。
+- 启用惯性核：`S(t) = alpha * S(t-1) + (1 - alpha) * input`，默认 alpha 限制在 0.7-0.95，避免状态跳变。
+- Candidate 生成、探索率和 Utility 评分从 `S(t)` 派生，禁止 raw memory、raw needs、raw emotion 或 socialField 直接进入决策。
+- `S(t).vector` 输出稳定状态向量，用于状态连续性、人格稳定性和后续审计。
+
+验证：
+- `npm run check:personality-stability`
+- `npm run check:personality-runtime`
+- `npm run check:personality-loop`
+- `npm run check:cognitive-state`
+
+## 2026-06-19 - V3.4.1 Cognitive Kernel Integrity Layer
+
+- 建立认知写入边界：runtime mutation 必须走 request -> `cognitiveWrite` -> RealityGuard -> Commit。
+- 新增 `ai-town-cognitive-integrity.js`，集中处理 memory、emotion、causal、relationship、identity 等写入请求与 committer 注册。
+- `CognitiveKernelRuntimeCheck` 在启动时验证 committer 版本和注册状态，版本不匹配时阻止运行。
+- 旧存档长期状态缺少 `source`、`confidence`、`tick` 时通过迁移补齐为 `source:"migration"`、`confidence:0.5`，不伪装成新经历。
+- 增加 RealityGuard 对英文模板、第三人称污染、低置信写入、未来时间戳和非法状态范围的拒绝检查。
+
+验证：
+- `npm run check:cognitive-integrity`
+- `npm run check:cognitive-hard-seal`
+- `npm run check:cognitive-closure`
+
 ## 2026-06-19 - V3.3.7.5a Adaptive Reflection & Prediction Error Layer
 
 - 新增 `predictionErrorEngine`，Reflection 优先使用本地规则和向量误差，不再每次调用 LLM 做归因。

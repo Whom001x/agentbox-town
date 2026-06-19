@@ -141,6 +141,11 @@ function tenseWorld(agent) {
   });
 }
 
+function decide(world, agent, context = {}) {
+  const state = cognitiveState(world, agent, context);
+  return utilityDecision(state.psychologicalState);
+}
+
 function testSocialFieldCanAffectCognitiveState() {
   const calmAgent = baseAgent("agent_a");
   const calm = baseWorld(calmAgent);
@@ -220,16 +225,16 @@ function testSchedulerScoreChanges() {
   const calmAgent = baseAgent("agent_a", { identityCore: { socialSensitivity: 1.2 } });
   const calm = baseWorld(calmAgent);
   updateSocialFeedback(calm);
-  const calmDecision = utilityDecision(calm, calmAgent);
+  const calmDecision = decide(calm, calmAgent);
   const calmSafety = calmDecision.candidateActions.find(item => item.id === "seek_safety");
 
   const tenseAgent = baseAgent("agent_a", { identityCore: { socialSensitivity: 1.2 } });
   const tense = tenseWorld(tenseAgent);
   updateSocialFeedback(tense);
-  const tenseDecision = utilityDecision(tense, tenseAgent);
+  const tenseDecision = decide(tense, tenseAgent);
   const tenseSafety = tenseDecision.candidateActions.find(item => item.id === "seek_safety");
 
-  assert.ok(tenseSafety.components.socialFeedbackWeighted > calmSafety.components.socialFeedbackWeighted, "social feedback weighted score should rise");
+  assert.ok(tenseSafety.components.socialValue > calmSafety.components.socialValue, "social value should rise through S(t)");
   assert.ok(tenseSafety.score > calmSafety.score, "scheduler score should visibly change");
   const direct = socialFeedbackBiasForAction(tense, tenseAgent, { id: "seek_safety", tags: ["safety"] });
   assert.ok(direct.score > 0, "direct social feedback bias should be positive for safety action");

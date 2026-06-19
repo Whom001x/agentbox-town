@@ -1,6 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const { cognitiveState } = require("../ai-town-cognitive-state");
 const {
   candidateActions,
   filterEligibleActions,
@@ -88,19 +89,25 @@ function ids(items) {
 }
 
 function eligibleIds(w, a, extras = {}) {
-  const raw = candidateActions(w, a, extras);
+  const cognitive = cognitiveState(w, a, extras);
+  const raw = candidateActions(cognitive.psychologicalState);
   return {
     raw,
-    filtered: filterEligibleActions(w, a, raw, extras)
+    filtered: filterEligibleActions(cognitive.psychologicalState, raw, { runtimeContext: cognitive.psychologicalState.projection.runtimeContext })
   };
 }
 
 function assertAllScoredEligible(decision) {
-  const extras = { plan: decision.plan, interruption: decision.interruption };
+  const runtimeContext = decision.psychologicalState?.projection?.runtimeContext;
   for (const action of decision.candidateActions || []) {
-    const check = actionEligibility({ clock: 0, config: { vectorMemoryEnabled: false } }, { id: decision.agentId, ...(decision._agent || {}) }, action, extras);
+    const check = actionEligibility(decision.psychologicalState, action, { runtimeContext });
     assert.equal(check.allowed, true, `${decision.agentId} has invalid scored action ${action.id}: ${check.reason}`);
   }
+}
+
+function decide(w, a, extras = {}) {
+  const cognitive = cognitiveState(w, a, extras);
+  return utilityDecision(cognitive.psychologicalState);
 }
 
 function testFixedEligibilityRules() {
@@ -163,15 +170,15 @@ function testRandomThousandInvalidActionRate() {
   for (let i = 0; i < 1000; i += 1) {
     const { agent: subject, plan, interruption } = scenario(i);
     const w = world(subject, { clock: (8 * 60) + (i % 12) * 30 });
-    const decision = utilityDecision(w, subject, { plan, interruption, eventText: `eligibility test ${i}` });
+    const decision = decide(w, subject, { plan, interruption, eventText: `eligibility test ${i}` });
     decision._agent = subject;
     assert.ok(decision.selectedAction, `missing selected action at ${i}`);
-    const extras = { plan: decision.plan, interruption: decision.interruption };
-    const selectedCheck = actionEligibility(w, subject, decision.selectedAction, extras);
+    const runtimeContext = decision.psychologicalState?.projection?.runtimeContext;
+    const selectedCheck = actionEligibility(decision.psychologicalState, decision.selectedAction, { runtimeContext });
     if (!selectedCheck.allowed) invalid += 1;
     for (const action of decision.candidateActions || []) {
       total += 1;
-      const check = actionEligibility(w, subject, action, extras);
+      const check = actionEligibility(decision.psychologicalState, action, { runtimeContext });
       if (!check.allowed) invalid += 1;
     }
     assert.equal(decision.actionEligibility.invalidActionRate, 0);
@@ -182,11 +189,12 @@ function testRandomThousandInvalidActionRate() {
 }
 
 function testClassifierSmoke() {
-  assert.equal(lifeStageOf(agent({ ageYears: 9 })), "child");
-  assert.equal(lifeStageOf(agent({ ageYears: 17 })), "teen");
-  assert.equal(lifeStageOf(agent({ ageYears: 70 })), "elder");
-  assert.equal(professionKind(agent({ job: "doctor" })), "medical");
-  assert.equal(professionKind(agent({ job: "shop owner" })), "merchant");
+  const stageOf = subject => cognitiveState(world(subject), subject).psychologicalState;
+  assert.equal(lifeStageOf(stageOf(agent({ ageYears: 9 }))), "child");
+  assert.equal(lifeStageOf(stageOf(agent({ ageYears: 17 }))), "teen");
+  assert.equal(lifeStageOf(stageOf(agent({ ageYears: 70 }))), "elder");
+  assert.equal(professionKind(stageOf(agent({ job: "doctor" }))), "medical");
+  assert.equal(professionKind(stageOf(agent({ job: "shop owner" }))), "merchant");
 }
 
 [

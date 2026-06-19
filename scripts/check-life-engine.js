@@ -1,7 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
-const { ensureDailyPlans, currentPlanItem } = require("../ai-town-planner");
+const { ensureDailyPlans, currentPlanItem, resolveRole } = require("../ai-town-planner");
 const { detectInterruption } = require("../ai-town-interruptions");
 const { runLifeEngine } = require("../ai-town-life-engine");
 
@@ -52,6 +52,29 @@ function testDailyPlanGenerated() {
   assert.deepEqual(ids, ["agent_1"]);
   assert.ok(a.dailyPlan.length >= 4);
   assert.ok(currentPlanItem(world, a));
+}
+
+function testRolePriorityResolution() {
+  assert.equal(resolveRole({ age: 65, occupation: "退休政府工作人员" }).role, "elder");
+  assert.equal(resolveRole({ age: 35, occupation: "政府工作人员", lifeStage: "adult" }).role, "government");
+  assert.equal(resolveRole({ age: 16, occupation: "兼职店员", lifeStage: "teen" }).role, "student");
+
+  const a = agent({ job: "政府工作人员", ageYears: 35, ageStage: "adult" });
+  const world = worldWith(a, 13 * 60);
+  ensureDailyPlans(world, { force: true });
+  assert.equal(currentPlanItem(world, a).place, "office");
+
+  const stale = agent({ job: "政府工作人员", ageYears: 35, ageStage: "adult" });
+  stale.dailyPlan = [
+    { start: "09:00", end: "11:30", place: "square", title: "daily errands", localAction: "commute" },
+    { start: "14:00", end: "17:30", place: "apartment", title: "ordinary afternoon", localAction: "maintain" },
+    { start: "18:00", end: "20:00", place: "apartment", title: "dinner and rest", localAction: "meal" },
+    { start: "23:00", end: "07:00", place: "apartment", title: "sleep", localAction: "sleep" }
+  ];
+  stale.dailyPlanDay = 0;
+  const staleWorld = worldWith(stale, 13 * 60);
+  assert.deepEqual(ensureDailyPlans(staleWorld), ["agent_1"]);
+  assert.equal(currentPlanItem(staleWorld, stale).place, "office");
 }
 
 function testHungerInterruptionHandledLocally() {
@@ -119,6 +142,7 @@ function testComplexPlanStaysForAi() {
 
 const tests = [
   testDailyPlanGenerated,
+  testRolePriorityResolution,
   testHungerInterruptionHandledLocally,
   testModerateSafetyDoesNotOverridePlan,
   testCriticalSafetyOverridesPlan,

@@ -1,27 +1,11 @@
 "use strict";
 
-const { currentPlanItem } = require("./ai-town-planner");
-const { detectInterruption } = require("./ai-town-interruptions");
 const {
-  structuredMemoryForAgent,
-  retrieveVectorMemories,
-  ensureSelfModel,
-  normalizeGoalRuntime
-} = require("./ai-town-memory-stream");
-const {
-  personalityRuntime,
-  personalityRuntimeBias
-} = require("./ai-town-personality-runtime");
-const {
-  cognitiveState,
   actionVector,
-  actionMatch,
   realityConstraint,
-  cognitiveTemperature
+  dotProduct
 } = require("./ai-town-cognitive-state");
-const { socialFieldBiasForAction } = require("./ai-town-social-field");
-const { socialFeedbackBiasForAction } = require("./ai-town-social-feedback");
-const { causalBiasForAction, causalWeight } = require("./ai-town-temporal-causal");
+const { pickWithExploration } = require("./ai-town-cognitive-integrity");
 
 function num(value, fallback = 0) {
   const number = Number(value);
@@ -44,140 +28,64 @@ function includesAny(text, words) {
   return words.some(word => value.includes(String(word).toLowerCase()));
 }
 
-function ageWeights(agent = {}) {
-  const age = num(agent.ageYears ?? agent.age, 35);
-  const stage = String(agent.ageStage || "");
-  const child = age <= 12 || /儿童|小学生|child/.test(stage);
-  const teen = (age > 12 && age <= 18) || /青少年|学生|teen/.test(stage);
-  const elder = age >= 65 || /老人|老年|elder/.test(stage);
-  return {
-    hunger: child ? 1.35 : teen ? 1.2 : 1,
-    safety: child || elder ? 1.35 : 1,
-    health: elder ? 1.45 : child ? 1.15 : 1,
-    responsibility: teen ? 1.25 : 1,
-    comfort: elder ? 1.2 : 1,
-    social: teen ? 1.15 : 1,
-    stress: 1,
-    hygiene: 1
-  };
+function psychologicalStateFrom(value = {}, extras = {}) {
+  if (extras?.psychologicalState) return extras.psychologicalState;
+  if (extras?.cognitiveState?.psychologicalState) return extras.cognitiveState.psychologicalState;
+  if (value?.psychologicalState) return value.psychologicalState;
+  if (value?.projection && (value.driveVector || value.needsVector || value.biasVector)) return value;
+  return null;
 }
 
-function needPressure(agent = {}) {
-  const needs = agent.needs || {};
-  const weights = ageWeights(agent);
-  const keys = ["hunger", "hygiene", "health", "social", "responsibility", "stress", "comfort", "safety"];
-  return keys.reduce((sum, key) => {
-    const drive = clamp((100 - num(needs[key], 75)) / 100, 0, 1, 0);
-    return sum + drive * 30 * (weights[key] || 1);
-  }, 0);
+function requirePsychologicalState(name, value = {}, extras = {}) {
+  const state = psychologicalStateFrom(value, extras);
+  if (!state) throw new Error("V3.4.2.1 " + name + " requires psychologicalState");
+  return state;
 }
 
-function emotionalInstability(agent = {}) {
-  const e = agent.emotionVector || agent.emotions || {};
-  return (
-    clamp(num(e.anxious, 0) - 45, 0, 55, 0) * 0.35
-    + clamp(num(e.angry, 0) - 45, 0, 55, 0) * 0.32
-    + clamp(num(e.sad, 0) - 45, 0, 55, 0) * 0.25
-    + clamp(num(e.tired, 0) - 50, 0, 50, 0) * 0.25
-    + clamp(num(e.lonely, 0) - 50, 0, 50, 0) * 0.2
-  );
+function runtimeContextFromState(state = {}) {
+  return state.projection?.runtimeContext || {};
 }
 
-function obligationPressure(agent = {}) {
-  const obligations = [
-    ...(Array.isArray(agent.activeObligations) ? agent.activeObligations : []),
-    ...(Array.isArray(agent.obligations) ? agent.obligations : [])
-  ];
-  return obligations.slice(0, 5).reduce((sum, item) => sum + clamp(item.pressure || item.priority || 20, 0, 100, 20) * 0.12, 0);
+function agentIdFromState(state = {}) {
+  return String(state.agentId || state.projection?.runtimeContext?.agentId || "");
 }
 
-function crisisPressure(agent = {}, interruption = null) {
-  if (!interruption) return 0;
-  return clamp(interruption.priority, 0, 100, 60) * (interruption.canOverridePlan ? 1.1 : 0.65);
+function maxVectorValue(vector = {}) {
+  return Object.values(vector || {}).reduce((max, value) => Math.max(max, clamp(value, 0, 1.5, 0)), 0);
 }
 
-function unfinishedProcessPressure(agent = {}) {
-  if (!agent.activeProcess) return 0;
-  const progress = clamp(agent.activeProcess.progress, 0, 100, 0);
-  return 18 + (100 - progress) * 0.12;
-}
-
-function agentPriority(world, agent, extras = {}) {
-  if (!agent?.id || agent.lifeStatus === "dead" || agent.terminalState?.dead) {
-    return { priority: 0, components: {}, reason: "dead" };
-  }
-  const interruption = extras.interruption || detectInterruption(world, agent);
+function agentPriority(state = {}, _agent = {}, extras = {}) {
+  const psychologicalState = requirePsychologicalState("agentPriority", state, extras);
+  const projection = psychologicalState.projection || {};
+  const runtimeContext = runtimeContextFromState(psychologicalState);
   const components = {
-    crisis: crisisPressure(agent, interruption),
-    needPressure: needPressure(agent),
-    activeObligation: obligationPressure(agent),
-    emotionalInstability: emotionalInstability(agent),
-    unfinishedProcess: unfinishedProcessPressure(agent)
+    need: maxVectorValue(psychologicalState.needsVector || {}) * 38,
+    drive: maxVectorValue(psychologicalState.driveVector || {}) * 30,
+    emotion: clamp(num(projection.emotionalLoad, 0), 0, 1, 0) * 18,
+    social: clamp(num(projection.socialNeed, 0), 0, 1, 0) * 10,
+    goal: clamp(num(projection.goalPressure, 0), 0, 1, 0) * 12,
+    crisis: runtimeContext.interruption?.canOverridePlan ? clamp(num(runtimeContext.interruption.priority, 0), 0, 100, 0) * 0.55 : 0
   };
-  const priority = Object.values(components).reduce((sum, value) => sum + value, 0);
-  const reason = Object.entries(components).sort((a, b) => b[1] - a[1])[0]?.[0] || "low_pressure";
-  return { priority: Math.round(priority), components, reason, interruption };
+  const priority = Math.round(Object.values(components).reduce((sum, value) => sum + value, 0));
+  const reason = Object.entries(components).sort((a, b) => b[1] - a[1])[0]?.[0] || "psychologicalState";
+  return { priority, components, reason, interruption: runtimeContext.interruption || null, source: "psychologicalState" };
 }
 
-function legacyCandidateActions(world, agent, extras = {}) {
-  const plan = extras.plan || currentPlanItem(world, agent);
-  const interruption = extras.interruption || detectInterruption(world, agent);
-  const needs = agent.needs || {};
-  const actions = [];
-  const push = action => actions.push({
-    id: action.id,
-    label: action.label,
-    type: action.type || "observe",
-    targetNeed: action.targetNeed || "",
-    targetPlace: action.targetPlace || "",
-    tags: action.tags || [],
-    base: num(action.base, 0),
-    cost: num(action.cost, 0),
-    risk: num(action.risk, 0),
-    reason: action.reason || ""
-  });
-  if (agent.activeProcess) push({ id: "continue_process", label: "继续未完成过程", type: "react", tags: ["process", "responsibility"], base: 28, reason: "activeProcess" });
-  if (interruption?.type === "health" || num(needs.health, 100) < 45) push({ id: "seek_care", label: "处理健康问题", type: "move", targetNeed: "health", targetPlace: "clinic", tags: ["health", "care", "help"], base: 32, cost: 12, risk: 6, reason: "health" });
-  if (interruption?.type === "safety" || num(needs.safety, 100) < 45) push({ id: "seek_safety", label: "寻找安全地点", type: "move", targetNeed: "safety", targetPlace: "apartment", tags: ["safety", "home"], base: 32, cost: 10, risk: 4, reason: "safety" });
-  if (interruption?.type === "hunger" || num(needs.hunger, 100) < 48) push({ id: "eat_or_buy_food", label: "找机会吃饭", type: "move", targetNeed: "hunger", targetPlace: "breakfast", tags: ["hunger", "food"], base: 24, cost: 8, risk: 2, reason: "hunger" });
-  if (num(agent.energy, 70) < 35 || num((agent.emotionVector || agent.emotions || {}).tired, 0) > 65) push({ id: "rest", label: "休息恢复", type: "wait", targetNeed: "comfort", targetPlace: "apartment", tags: ["rest", "tired", "comfort"], base: 20, cost: 4, reason: "fatigue" });
-  if (num(needs.hygiene, 100) < 45) push({ id: "tidy_or_clean", label: "整理和清洁", type: "react", targetNeed: "hygiene", tags: ["clean", "tidy", "comfort"], base: 18, cost: 4, reason: "hygiene" });
-  if (num(needs.social, 100) < 50) push({ id: "contact_familiar", label: "联系熟悉的人", type: "talk", targetNeed: "social", tags: ["social", "relationship", "help"], base: 18, cost: 7, reason: "social" });
-  if (plan) push({ id: "follow_plan", label: plan.title || "继续今日计划", type: /move|commute/.test(plan.localAction || "") ? "move" : "work", targetPlace: plan.place || "", tags: ["plan", "responsibility", plan.localAction || ""], base: num(plan.priority, plan.fixed ? 30 : 18), cost: 5, reason: "dailyPlan" });
-  push({ id: "observe_environment", label: "观察环境", type: "observe", tags: ["observe", "low_risk"], base: 8, cost: 1, reason: "ordinary_life" });
-  push({ id: "think_and_plan", label: "思考和调整计划", type: "plan", tags: ["think", "goal"], base: 9, cost: 2, reason: "ordinary_life" });
-  push({ id: "walk_nearby", label: "小范围散步", type: "move", tags: ["walk", "comfort", "explore"], base: 7, cost: 6, risk: 3, reason: "ordinary_life" });
-  return dedupeActions(actions);
+function legacyCandidateActions(state = {}, _agent = {}, extras = {}) {
+  const psychologicalState = requirePsychologicalState("legacyCandidateActions", state, extras);
+  return candidateActions(psychologicalState);
 }
 
-function lifeStageOf(agent = {}) {
-  const age = num(agent.ageYears ?? agent.age, 35);
-  const text = `${agent.ageStage || ""} ${agent.job || ""} ${textOf(agent.identityCore)} ${textOf(agent.selfModel)}`.toLowerCase();
-  if (age <= 12 || /child|kid|儿童|孩子|小学生/.test(text)) return "child";
-  if (age <= 18 || /teen|student|少年|中学生|学生/.test(text)) return "teen";
-  if (age >= 65 || /elder|retired|老人|老年|退休/.test(text)) return "elder";
-  return "adult";
+function lifeStageOf(state = {}) {
+  return runtimeContextFromState(psychologicalStateFrom(state) || state).stage || "adult";
 }
 
-function professionKind(agent = {}) {
-  const text = `${agent.job || ""} ${agent.ageStage || ""} ${textOf(agent.identityCore)} ${textOf(agent.selfModel)}`.toLowerCase();
-  if (/doctor|nurse|clinic|medical|physician|医生|护士|医护|诊所|医疗/.test(text)) return "medical";
-  if (/shop|store|merchant|seller|baker|breakfast|cashier|owner|店主|老板|店员|小卖部|早餐|商贩|售货|收银|面包/.test(text)) return "merchant";
-  if (/teacher|school|class|老师|教师|学校/.test(text)) return "teacher";
-  if (/student|pupil|学生|小学生|中学生/.test(text)) return "student";
-  if (/guard|security|police|保安|警察|巡逻/.test(text)) return "security";
-  if (/detective|investigator|侦探|调查/.test(text)) return "investigator";
-  if (/artist|writer|painter|艺术|画家|作家|记录/.test(text)) return "artist";
-  return "resident";
+function professionKind(state = {}) {
+  return runtimeContextFromState(psychologicalStateFrom(state) || state).profession || "resident";
 }
 
-function isDependentAdult(agent = {}) {
-  const stage = lifeStageOf(agent);
-  if (stage !== "adult" && stage !== "elder") return false;
-  const text = `${textOf(agent.identityCore)} ${textOf(agent.selfModel)} ${agent.currentTask || ""}`.toLowerCase();
-  if (/dependent|needs help|requires care|依赖|需要照顾|被照顾|需要帮助|生活不能自理/.test(text)) return true;
-  const rels = Object.values(agent.relationshipMatrix || {});
-  return rels.some(rel => num(rel.dependency, 0) >= 70 && num(rel.trust, 0) >= 60);
+function isDependentAdult(state = {}) {
+  return Boolean(runtimeContextFromState(psychologicalStateFrom(state) || state).relationship?.dependent);
 }
 
 function businessPlaceId(place = "") {
@@ -192,13 +100,13 @@ function schoolPlaceId(place = "") {
   return /school|class|campus|学校|教室|课堂/.test(String(place || "").toLowerCase());
 }
 
-function emergencyState(agent = {}, interruption = null) {
-  const needs = agent.needs || {};
+function emergencyStateFromContext(context = {}) {
+  const interruption = context.interruption || null;
   return {
-    health: interruption?.type === "health" || num(needs.health, 100) <= 30,
-    safety: interruption?.type === "safety" || num(needs.safety, 100) <= 32,
-    hunger: interruption?.type === "hunger" || num(needs.hunger, 100) <= 30,
-    any: Boolean(interruption?.canOverridePlan) || num(needs.health, 100) <= 30 || num(needs.safety, 100) <= 32 || num(needs.hunger, 100) <= 30
+    health: interruption?.type === "health",
+    safety: interruption?.type === "safety",
+    hunger: interruption?.type === "hunger",
+    any: Boolean(interruption?.canOverridePlan)
   };
 }
 
@@ -227,15 +135,15 @@ function actionConstraintsFor(actionId = "") {
   return actionConstraintRegistry[actionId] || { ageRule: ["child", "teen", "adult", "elder"], identityRule: "all", locationRule: "any", relationshipRule: "none", emergencyRule: "none" };
 }
 
-function shouldAskGuardian(agent = {}) {
-  const stage = lifeStageOf(agent);
+function shouldAskGuardian(state = {}) {
+  const stage = lifeStageOf(state);
   if (stage === "child" || stage === "teen") return true;
-  return isDependentAdult(agent);
+  return isDependentAdult(state);
 }
 
-function professionEligibilityBias(agent = {}, action = {}, context = {}) {
-  const profession = context.profession || professionKind(agent);
-  const stage = context.stage || lifeStageOf(agent);
+function professionEligibilityBias(_state = {}, action = {}, context = {}) {
+  const profession = context.profession || "resident";
+  const stage = context.stage || "adult";
   let bias = 0;
   if (profession === "medical" && ["seek_care", "provide_care"].includes(action.id)) bias += 6;
   if (profession === "merchant" && ["serve_customers", "check_inventory"].includes(action.id)) bias += 8;
@@ -250,34 +158,52 @@ function professionEligibilityBias(agent = {}, action = {}, context = {}) {
   return bias;
 }
 
-function actionEligibility(world = {}, agent = {}, action = {}, extras = {}) {
+function actionEligibility(S = {}, candidate = {}) {
+  const legacy = arguments.length >= 4;
+  const action = legacy ? arguments[2] : candidate;
+  const extras = legacy ? (arguments[3] || {}) : (arguments[2] || {});
+  const state = psychologicalStateFrom(S, extras);
+  const runtimeContext = extras.runtimeContext || state?.projection?.runtimeContext || null;
+  if (!runtimeContext) {
+    return {
+      allowed: false,
+      reason: "missing S(t) runtimeContext",
+      reasons: ["missing S(t) runtimeContext"],
+      constraints: action.actionConstraints || actionConstraintsFor(action.id),
+      stage: "unknown",
+      profession: "unknown",
+      bias: 0
+    };
+  }
   const constraints = action.actionConstraints || actionConstraintsFor(action.id);
-  const stage = lifeStageOf(agent);
-  const profession = professionKind(agent);
-  const currentPlace = agent.position || agent.place || "";
-  const plan = extras.plan || null;
-  const interruption = extras.interruption || null;
-  const emergency = emergencyState(agent, interruption);
+  const stage = runtimeContext.stage || "adult";
+  const profession = runtimeContext.profession || "resident";
+  const currentPlace = runtimeContext.currentPlace || "";
+  const plan = runtimeContext.plan || null;
+  const interruption = runtimeContext.interruption || null;
+  const profile = runtimeContext.profile || {};
+  const taskState = runtimeContext.taskState || {};
+  const emergency = emergencyStateFromContext(runtimeContext);
   const reasons = [];
   const deny = reason => ({ allowed: false, reason, reasons: [reason], constraints, stage, profession, bias: 0 });
-  if (!agent?.id || agent.lifeStatus === "dead" || agent.terminalState?.dead) return deny("dead agent");
-  if (action.id === "continue_process" && !agent.activeProcess) return deny("no active process");
+  if (runtimeContext.lifeStatus === "dead" || runtimeContext.terminalDead) return deny("dead agent");
+  if (action.id === "continue_process" && !runtimeContext.activeProcess) return deny("no active process");
   if (action.id === "follow_plan" && !plan) return deny("no current plan");
-  if (action.id === "ask_guardian" && !shouldAskGuardianV321(agent)) return deny("not child, teen, or dependent adult");
+  if (action.id === "ask_guardian" && !(stage === "child" || stage === "teen" || runtimeContext.relationship?.dependent)) return deny("not child, teen, or dependent adult");
   if (action.id === "follow_stranger") {
     if (stage !== "adult") return deny("only independent adults may consider following a stranger");
-    if (!["investigator", "security", "artist"].includes(profession) && scaleProfile(agent, "curiosity", 0.5) < 0.78) return deny("identity is not investigator/security/observer");
+    if (!["investigator", "security", "artist"].includes(profession) && num(profile.curiosity, 0.5) < 0.78) return deny("identity is not investigator/security/observer");
     if (emergency.safety || num(interruption?.priority, 0) >= 75) return deny("safety crisis blocks following stranger");
   }
   if (action.id === "provide_care") {
     if (profession !== "medical") return deny("not medical profession");
-    if (!clinicPlaceId(currentPlace) && !clinicPlaceId(plan?.place || "") && !/clinic|medical|doctor|诊所|医院|问诊|看诊/.test(String(agent.currentTask || "").toLowerCase())) {
+    if (!clinicPlaceId(currentPlace) && !clinicPlaceId(plan?.place || "") && !taskState.medicalDuty) {
       return deny("not at clinic or medical duty context");
     }
   }
   if (["serve_customers", "check_inventory"].includes(action.id)) {
     if (profession !== "merchant") return deny("not merchant profession");
-    if (!businessPlaceId(currentPlace) && !businessPlaceId(plan?.place || "") && !/shop|store|business|customer|店|顾客|补货/.test(String(agent.currentTask || "").toLowerCase())) {
+    if (!businessPlaceId(currentPlace) && !businessPlaceId(plan?.place || "") && !taskState.businessDuty) {
       return deny("not at business place or business duty context");
     }
     if (emergency.health || emergency.safety) return deny("personal health or safety crisis blocks business duty");
@@ -299,8 +225,11 @@ function actionEligibility(world = {}, agent = {}, action = {}, extras = {}) {
     if (emergency.safety && !["investigator", "security"].includes(profession)) return deny("safety crisis blocks recording observation");
   }
   if (action.id === "tidy_or_clean" && stage === "child") return deny("child should not be assigned independent cleaning action");
+  if (action.id === "tidy_or_clean" && !/apartment|home|clinic|school|shop|store|breakfast|office|business/.test(String(currentPlace || "").toLowerCase())) {
+    return deny("current place does not support tidying or cleaning");
+  }
   reasons.push("eligible");
-  const bias = professionEligibilityBias(agent, action, { stage, profession });
+  const bias = professionEligibilityBias(null, action, { stage, profession });
   return {
     allowed: true,
     reason: reasons.join("; "),
@@ -313,19 +242,17 @@ function actionEligibility(world = {}, agent = {}, action = {}, extras = {}) {
   };
 }
 
-function scaleProfile(agent = {}, key, fallback = 0.5) {
-  const value = agent.cognitiveProfile?.[key];
-  if (value == null) return fallback;
-  const n = Number(value);
-  if (!Number.isFinite(n)) return fallback;
-  return n <= 1 && n >= 0 ? n : clamp(n / 100, 0, 1, fallback);
-}
-
-function filterEligibleActions(world = {}, agent = {}, actions = [], extras = {}) {
+function filterEligibleActions(S = {}, actions = []) {
+  const legacy = arguments.length >= 4;
+  const list = legacy ? arguments[2] : actions;
+  const extras = legacy ? (arguments[3] || {}) : (arguments[2] || {});
+  const state = psychologicalStateFrom(S, extras) || (extras.runtimeContext ? { projection: { runtimeContext: extras.runtimeContext } } : null);
+  const runtimeContext = extras.runtimeContext || state?.projection?.runtimeContext || null;
+  if (!runtimeContext) throw new Error("V3.4.2 action eligibility requires S(t) runtimeContext");
   const allowed = [];
   const removed = [];
-  actions.forEach(action => {
-    const check = actionEligibility(world, agent, action, extras);
+  list.forEach(action => {
+    const check = actionEligibility(state, action, { runtimeContext });
     if (check.allowed) {
       allowed.push({
         ...action,
@@ -347,16 +274,20 @@ function filterEligibleActions(world = {}, agent = {}, actions = [], extras = {}
   return {
     actions: dedupeActions(allowed),
     removed,
-    rawCount: actions.length,
+    rawCount: list.length,
     eligibleCount: allowed.length,
     invalidActionRate: 0,
     rule: "Invalid actions are removed before Cognitive Score and Softmax."
   };
 }
 
-function candidateActions(world, agent, extras = {}) {
-  const plan = extras.plan || currentPlanItem(world, agent);
-  const interruption = extras.interruption || detectInterruption(world, agent);
+function candidateActions(S = {}) {
+  const extras = arguments.length >= 3 ? (arguments[2] || {}) : (arguments[1] || {});
+  const state = psychologicalStateFrom(S, extras);
+  if (!state) throw new Error("V3.4.2 candidateActions requires psychologicalState");
+  const drives = state.driveVector || {};
+  const needs = state.needsVector || {};
+  const bias = state.biasVector || {};
   const actions = [];
   const push = action => {
     const item = {
@@ -372,49 +303,49 @@ function candidateActions(world, agent, extras = {}) {
       availability: action.availability,
       distance: action.distance,
       reason: action.reason || "",
+      source: ["S_state"],
+      features: action.features || {
+        urgency: num(action.urgency, 0),
+        relevance: num(action.relevance, 0),
+        feasibility: num(action.availability, 1)
+      },
       actionConstraints: action.actionConstraints || actionConstraintsFor(action.id)
     };
     item.actionVector = action.actionVector || actionVector(item);
     actions.push(item);
   };
-  if (agent.activeProcess) {
-    push({ id: "continue_process", label: "continue unfinished process", type: "react", tags: ["process", "responsibility"], base: 12, reason: "activeProcess" });
+  const urge = key => clamp(num(drives[key], 0), 0, 1.5, 0);
+  const need = key => clamp(num(needs[key], 0), 0, 1, 0);
+  const relevanceFrom = (...keys) => clamp(keys.reduce((max, key) => Math.max(max, urge(key), need(key)), 0), 0, 1, 0);
+  const maybePush = (condition, action) => {
+    if (condition) push({
+      ...action,
+      urgency: action.urgency ?? relevanceFrom(action.targetNeed, ...(action.tags || [])),
+      relevance: action.relevance ?? relevanceFrom(...(action.tags || []), action.targetNeed),
+      availability: action.availability ?? 1
+    });
+  };
+  if (urge("duty") > 0.12 || urge("order") > 0.12) {
+    push({ id: "continue_process", label: "continue unfinished process", type: "react", tags: ["process", "responsibility", "duty"], base: 12, urgency: urge("duty"), relevance: urge("duty"), reason: "S_state" });
   }
-  push({ id: "seek_care", label: "handle health condition", type: "move", targetNeed: "health", targetPlace: "clinic", tags: ["health", "care", "help"], base: 8, cost: 12, risk: 6, reason: "possible_action" });
-  push({ id: "seek_safety", label: "move to a safer place", type: "move", targetNeed: "safety", targetPlace: "apartment", tags: ["safety", "home"], base: 8, cost: 10, risk: 4, reason: "possible_action" });
-  push({ id: "eat_or_buy_food", label: "find food or eat", type: "move", targetNeed: "hunger", targetPlace: "breakfast", tags: ["hunger", "food"], base: 7, cost: 8, risk: 2, reason: "possible_action" });
-  push({ id: "rest", label: "rest and recover", type: "wait", targetNeed: "comfort", targetPlace: "apartment", tags: ["rest", "tired", "comfort"], base: 7, cost: 4, availability: (agent.position || agent.place) === "apartment" ? 1 : 0.48, reason: "possible_action" });
-  push({ id: "tidy_or_clean", label: "tidy and clean up", type: "react", targetNeed: "hygiene", tags: ["clean", "tidy", "comfort"], base: 5, cost: 4, reason: "possible_action" });
-  push({ id: "contact_familiar", label: "contact a familiar person", type: "talk", targetNeed: "social", tags: ["social", "relationship", "help"], base: 6, cost: 7, reason: "possible_action" });
-  if (plan) {
-    push({ id: "follow_plan", label: plan.title || "continue daily plan", type: /move|commute/.test(plan.localAction || "") ? "move" : "work", targetPlace: plan.place || "", tags: ["plan", "responsibility", plan.localAction || ""], base: num(plan.priority, plan.fixed ? 18 : 10), cost: 5, reason: "dailyPlan" });
-  }
-  push({ id: "observe_environment", label: "observe environment", type: "observe", tags: ["observe", "low_risk"], base: 6, cost: 1, reason: "possible_action" });
-  push({ id: "think_and_plan", label: "think and adjust plan", type: "plan", tags: ["think", "goal"], base: 6, cost: 2, reason: "possible_action" });
-  push({ id: "walk_nearby", label: "walk nearby", type: "move", tags: ["walk", "comfort", "explore"], base: 4, cost: 6, risk: 3, reason: "possible_action" });
-  push({ id: "return_home", label: "return home", type: "move", targetPlace: "apartment", tags: ["home", "safety", "comfort"], base: 9, cost: 5, risk: 2, reason: "possible_action" });
-  push({ id: "follow_stranger", label: "follow and observe from distance", type: "move", tags: ["observe", "novelty", "risk"], base: 3, cost: 9, risk: 16, availability: interruption?.type === "safety" ? 0.55 : 0.45, reason: "possible_action" });
-  push({ id: "ask_guardian", label: "ask a trusted guardian or familiar adult", type: "talk", tags: ["support", "social", "safety"], base: 7, cost: 5, risk: 2, reason: "dependent_role" });
-  push({ id: "record_observation", label: "record observation", type: "observe", tags: ["observe", "novelty", "art"], base: 4, cost: 3, risk: 4, reason: "possible_action" });
-  push({ id: "provide_care", label: "handle medical or care duty", type: "work", targetPlace: "clinic", tags: ["medical", "care", "work", "profession"], base: 6, cost: 6, risk: 4, availability: clinicPlaceId(agent.position || agent.place || plan?.place || "") ? 0.95 : 0.45, reason: "profession_candidate" });
-  push({ id: "serve_customers", label: "handle shop customers", type: "work", targetPlace: agent.position || agent.place || "", tags: ["business", "customer", "work", "profession"], base: 6, cost: 5, risk: 2, availability: businessPlaceId(agent.position || agent.place || plan?.place || "") ? 0.9 : 0.45, reason: "profession_candidate" });
-  push({ id: "check_inventory", label: "check stock and supplies", type: "react", targetPlace: agent.position || agent.place || "", tags: ["business", "restock", "order", "profession"], base: 5, cost: 4, risk: 1, availability: businessPlaceId(agent.position || agent.place || plan?.place || "") ? 0.9 : 0.45, reason: "profession_candidate" });
+  maybePush(urge("care") > 0.08 || need("health") > 0.15, { id: "seek_care", label: "handle health condition", type: "move", targetNeed: "health", targetPlace: "clinic", tags: ["health", "care", "help"], base: 8, cost: 12, risk: 6, reason: "S_state" });
+  maybePush(urge("safety") > 0.08 || need("safety") > 0.12, { id: "seek_safety", label: "move to a safer place", type: "move", targetNeed: "safety", targetPlace: "apartment", tags: ["safety", "home"], base: 8, cost: 10, risk: 4, reason: "S_state" });
+  maybePush(urge("food") > 0.08 || need("hunger") > 0.12, { id: "eat_or_buy_food", label: "find food or eat", type: "move", targetNeed: "hunger", targetPlace: "breakfast", tags: ["hunger", "food"], base: 7, cost: 8, risk: 2, reason: "S_state" });
+  maybePush(urge("comfort") > 0.08 || urge("recovery") > 0.08 || need("comfort") > 0.12, { id: "rest", label: "rest and recover", type: "wait", targetNeed: "comfort", targetPlace: "apartment", tags: ["rest", "tired", "comfort"], base: 7, cost: 4, reason: "S_state" });
+  maybePush(urge("order") > 0.08 || need("hygiene") > 0.12, { id: "tidy_or_clean", label: "tidy and clean up", type: "react", targetNeed: "hygiene", tags: ["clean", "tidy", "comfort"], base: 5, cost: 4, reason: "S_state" });
+  maybePush(urge("social") > 0.08 || urge("support") > 0.08 || need("social") > 0.12, { id: "contact_familiar", label: "contact a familiar person", type: "talk", targetNeed: "social", tags: ["social", "relationship", "help"], base: 6, cost: 7, reason: "S_state" });
+  maybePush(urge("duty") > 0.08 || urge("order") > 0.08, { id: "follow_plan", label: "continue daily plan", type: "work", tags: ["plan", "responsibility", "duty"], base: 10, cost: 5, reason: "S_state" });
+  maybePush(urge("observe") > 0.08 || urge("curiosity") > 0.08 || num(bias.noveltySeeking, 0) > 0.25, { id: "observe_environment", label: "observe environment", type: "observe", tags: ["observe", "low_risk"], base: 6, cost: 1, reason: "S_state" });
+  maybePush(urge("order") > 0.08 || urge("duty") > 0.08, { id: "think_and_plan", label: "think and adjust plan", type: "plan", tags: ["think", "goal", "order"], base: 6, cost: 2, reason: "S_state" });
+  maybePush(urge("curiosity") > 0.16 || num(bias.noveltySeeking, 0) > 0.42, { id: "walk_nearby", label: "walk nearby", type: "move", tags: ["walk", "comfort", "explore", "curiosity"], base: 4, cost: 6, risk: 3, reason: "S_state" });
+  maybePush(urge("home") > 0.08 || urge("safety") > 0.12 || urge("comfort") > 0.12, { id: "return_home", label: "return home", type: "move", targetPlace: "apartment", tags: ["home", "safety", "comfort"], base: 9, cost: 5, risk: 2, reason: "S_state" });
+  maybePush(urge("curiosity") > 0.3 && num(bias.riskTolerance, 0.5) > 0.45, { id: "follow_stranger", label: "follow and observe from distance", type: "move", tags: ["observe", "novelty", "risk", "curiosity"], base: 3, cost: 9, risk: 16, availability: 0.45, reason: "S_state" });
+  maybePush(urge("support") > 0.16 || num(bias.supportSeeking, 0) > 0.32, { id: "ask_guardian", label: "ask a trusted guardian or familiar adult", type: "talk", tags: ["support", "social", "safety"], base: 7, cost: 5, risk: 2, reason: "S_state" });
+  maybePush(urge("observe") > 0.16 || urge("curiosity") > 0.16, { id: "record_observation", label: "record observation", type: "observe", tags: ["observe", "novelty", "art", "curiosity"], base: 4, cost: 3, risk: 4, reason: "S_state" });
+  maybePush(urge("care") > 0.12 || urge("duty") > 0.12, { id: "provide_care", label: "handle medical or care duty", type: "work", targetPlace: "clinic", tags: ["medical", "care", "work", "profession", "duty"], base: 6, cost: 6, risk: 4, availability: 0.75, reason: "S_state" });
+  maybePush(urge("duty") > 0.12 || urge("social") > 0.12, { id: "serve_customers", label: "handle shop customers", type: "work", tags: ["business", "customer", "work", "profession", "duty", "social"], base: 6, cost: 5, risk: 2, availability: 0.72, reason: "S_state" });
+  maybePush(urge("order") > 0.12 || urge("duty") > 0.1, { id: "check_inventory", label: "check stock and supplies", type: "react", tags: ["business", "restock", "order", "profession"], base: 5, cost: 4, risk: 1, availability: 0.75, reason: "S_state" });
   return dedupeActions(actions);
-}
-
-function shouldAskGuardian(agent = {}) {
-  const age = num(agent.ageYears ?? agent.age, 35);
-  const text = `${agent.job || ""} ${agent.ageStage || ""} ${textOf(agent.identityCore)} ${textOf(agent.selfModel)}`.toLowerCase();
-  if (age <= 18) return true;
-  if (/child|kid|teen|student|guardian|dependent|学生|儿童|孩子|少年|监护/.test(text)) return true;
-  const rels = Object.values(agent.relationshipMatrix || {});
-  return rels.some(rel => num(rel.dependency, 0) >= 70 && num(rel.trust, 0) >= 60);
-}
-
-function shouldAskGuardianV321(agent = {}) {
-  const stage = lifeStageOf(agent);
-  if (stage === "child" || stage === "teen") return true;
-  return isDependentAdult(agent);
 }
 
 function dedupeActions(actions = []) {
@@ -449,138 +380,79 @@ function relevance(text, action) {
   return clamp(hits / Math.max(1, tags.length / 2), 0, 1, 0);
 }
 
-function structuredMemoryBias(agent, action, world = {}) {
-  const memories = structuredMemoryForAgent(agent, 10);
-  const clock = num(world.clock, 0);
-  let score = 0;
-  const details = [];
-  Object.entries(memories).forEach(([type, items]) => {
-    items.forEach(item => {
-      const rel = relevance(`${item.text || ""} ${item.meaning || ""} ${(item.tags || []).join(" ")}`, action);
-      if (!rel) return;
-      const ageDays = Math.max(0, Math.floor((clock - num(item.lastSeenAt || item.at, 0)) / 1440));
-      const halfLife = ["habit", "belief", "goal"].includes(type) ? 90 : type === "social" ? 45 : 21;
-      const decay = Math.exp(-ageDays / halfLife);
-      const emotionalStrength = clamp(Math.abs(num(item.valence, 0)) / 100 + num(item.strength, 50) / 100, 0.2, 1.8, 1);
-      const bias = num(item.importance, 3) * emotionalStrength * rel * decay;
-      score += bias;
-      details.push({ type, text: String(item.text || item.meaning || "").slice(0, 80), relevance: Number(rel.toFixed(2)), bias: Number(bias.toFixed(2)) });
-    });
-  });
-  return { score: Number(score.toFixed(2)), details: details.sort((a, b) => b.bias - a.bias).slice(0, 4) };
+function structuredMemoryBias(state = {}, action = {}, _world = {}) {
+  const psychologicalState = requirePsychologicalState("structuredMemoryBias", state);
+  const features = stateUtilityFeatures(psychologicalState, action);
+  return {
+    score: Number((features.MemoryBias * 10).toFixed(2)),
+    details: [{ source: "psychologicalState.projection.memoryActivation", bias: Number((features.MemoryBias * 10).toFixed(2)) }]
+  };
 }
 
-function personalityBias(agent, action) {
-  const text = `${textOf(agent.identityCore)} ${textOf(agent.personalityProfile)}`;
-  let score = 0;
-  if (includesAny(text, ["内向", "安静", "回避", "谨慎", "introvert"]) && includesAny(action.id, ["rest", "observe", "think"])) score += 9;
-  if (includesAny(text, ["内向", "安静", "回避", "谨慎", "introvert"]) && includesAny(action.id, ["contact", "walk"])) score -= 4;
-  if (includesAny(text, ["外向", "开朗", "社交", "热心", "extrovert"]) && includesAny(action.id, ["contact", "walk"])) score += 8;
-  if (includesAny(text, ["责任", "守时", "认真", "负责"]) && action.id === "follow_plan") score += 10;
-  if (includesAny(text, ["怕麻烦", "不求助", "独立"]) && includesAny(action.id, ["seek_care", "contact"])) score -= 5;
-  if (includesAny(text, ["家庭", "照顾", "牵挂"]) && action.id === "contact_familiar") score += 5;
-  return score;
+function personalityBias(state = {}, action = {}) {
+  const psychologicalState = requirePsychologicalState("personalityBias", state);
+  const vector = action.actionVector || actionVector(action);
+  const bias = psychologicalState.biasVector || {};
+  const value = clamp(
+    num(vector.curiosity, 0) * num(bias.noveltySeeking, 0)
+      + num(vector.safety, 0) * (1 - num(bias.riskTolerance, 0.5))
+      + num(vector.duty, 0) * num(bias.goalPersistence, 0.5),
+    0,
+    1.5,
+    0
+  );
+  return Number((value * 10).toFixed(2));
 }
 
-function emotionBias(agent, action) {
-  const e = agent.emotionVector || agent.emotions || {};
-  let score = 0;
-  if (num(e.tired, 0) > 60 && ["rest", "seek_care", "think_and_plan"].includes(action.id)) score += (num(e.tired, 0) - 55) * 0.35;
-  if (num(e.lonely, 0) > 55 && ["contact_familiar", "walk_nearby"].includes(action.id)) score += (num(e.lonely, 0) - 50) * 0.32;
-  if (num(e.anxious, 0) > 55 && ["seek_safety", "seek_care", "contact_familiar", "observe_environment"].includes(action.id)) score += (num(e.anxious, 0) - 50) * 0.25;
-  if (num(e.angry, 0) > 60 && action.id === "contact_familiar") score -= (num(e.angry, 0) - 55) * 0.18;
-  if (num(e.happy, 0) > 60 && ["walk_nearby", "contact_familiar"].includes(action.id)) score += (num(e.happy, 0) - 55) * 0.18;
-  if (num(e.hopeful, 0) > 60 && ["think_and_plan", "follow_plan", "walk_nearby"].includes(action.id)) score += (num(e.hopeful, 0) - 55) * 0.16;
-  return score;
+function emotionBias(state = {}, action = {}) {
+  const psychologicalState = requirePsychologicalState("emotionBias", state);
+  const vector = action.actionVector || actionVector(action);
+  const emotions = psychologicalState.emotionVector || {};
+  const value = clamp(
+    num(vector.recovery, 0) * num(emotions.tired, 0)
+      + num(vector.social, 0) * num(emotions.lonely, 0)
+      + num(vector.safety, 0) * num(emotions.anxious, 0),
+    0,
+    1.5,
+    0
+  );
+  return Number((value * 10).toFixed(2));
 }
 
-function socialBias(world, agent, action) {
-  if (!["contact_familiar", "seek_care", "follow_plan"].includes(action.id)) return 0;
-  const rels = Object.values(agent.relationshipMatrix || {});
-  if (!rels.length) return action.id === "contact_familiar" ? -4 : 0;
-  const best = rels.reduce((max, rel) => Math.max(max,
-    num(rel.trust, 0) * 0.2 + num(rel.intimacy, 0) * 0.18 + num(rel.dependency, 0) * 0.12 + num(rel.debt, 0) * 0.08 - num(rel.resentment, 0) * 0.2
-  ), 0);
-  return action.id === "contact_familiar" ? best : best * 0.25;
+function socialBias(state = {}, _agent = {}, action = {}) {
+  const psychologicalState = requirePsychologicalState("socialBias", state);
+  const features = stateUtilityFeatures(psychologicalState, action);
+  return Number((features.SocialField * 10).toFixed(2));
 }
 
-function relationshipMemoryBias(agent = {}, action = {}) {
-  const memories = Array.isArray(agent.relationshipMemory) ? agent.relationshipMemory : [];
-  if (!memories.length || !action?.id) return { score: 0, details: [] };
-  let score = 0;
-  const details = [];
-  memories.slice(0, 20).forEach(memory => {
-    const type = String(memory.relationshipType || memory.impact || "").toLowerCase();
-    const tag = String(memory.emotionalTag || memory.impact || "").toLowerCase();
-    const trust = clamp(num(memory.trust, 0.45), 0, 1, 0.45);
-    const familiarity = clamp(num(memory.familiarity, 0.35), 0, 1, 0.35);
-    const strength = clamp(num(memory.strength, memory.importance || 0.4), 0, 1, 0.4);
-    const interactions = Math.min(1.8, 0.85 + Math.log1p(num(memory.interactionCount, 1)) * 0.18);
-    const base = (trust * 0.55 + familiarity * 0.25 + strength * 0.2) * interactions * 12;
-    let delta = 0;
-    if (tag === "positive" || /help|cooperation|promise|repair/.test(type)) {
-      if (["contact_familiar", "ask_guardian"].includes(action.id)) delta += base;
-      if (["follow_plan", "continue_process"].includes(action.id) && /cooperation|promise/.test(type)) delta += base * 0.45;
-      if (action.id === "cooperate") delta += base * 1.2;
-    }
-    if (tag === "negative" || /conflict|crisis/.test(type)) {
-      if (["contact_familiar", "ask_guardian"].includes(action.id)) delta -= base * 0.65;
-      if (["seek_safety", "observe_environment", "think_and_plan"].includes(action.id)) delta += base * 0.35;
-      if (action.id === "avoid_person") delta += base;
-    }
-    if (!delta) return;
-    score += delta;
-    details.push({
-      targetAgentId: memory.targetAgentId || "",
-      type: memory.relationshipType || memory.impact || "",
-      tag: memory.emotionalTag || memory.impact || "",
-      bias: Number(delta.toFixed(2)),
-      reason: String(memory.effect || memory.relation || memory.event || "").slice(0, 80)
-    });
-  });
-  return { score: Number(score.toFixed(2)), details: details.sort((a, b) => Math.abs(b.bias) - Math.abs(a.bias)).slice(0, 4) };
+function relationshipMemoryBias(state = {}, action = {}) {
+  const psychologicalState = requirePsychologicalState("relationshipMemoryBias", state);
+  const features = stateUtilityFeatures(psychologicalState, action);
+  return {
+    score: Number((features.SocialField * 10).toFixed(2)),
+    details: [{ source: "psychologicalState.projection.socialNeed", bias: Number((features.SocialField * 10).toFixed(2)) }]
+  };
 }
 
-function needDrive(agent, action) {
-  const needs = agent.needs || {};
-  const weights = ageWeights(agent);
+function needDrive(state = {}, action = {}) {
+  const psychologicalState = requirePsychologicalState("needDrive", state);
   const need = action.targetNeed;
-  if (!need) return 0;
-  const drive = clamp((100 - num(needs[need], 75)) / 100, 0, 1, 0);
-  return drive * 55 * (weights[need] || 1);
+  const drive = need ? clamp(num(psychologicalState.needsVector?.[need], 0), 0, 1, 0) : maxVectorValue(psychologicalState.needsVector || {});
+  return Number((drive * 55).toFixed(2));
 }
 
-function contextFit(world, agent, action, extras = {}) {
-  const plan = extras.plan || currentPlanItem(world, agent);
-  const currentPlace = agent.position || agent.place || "";
+function contextFit(state = {}, _agent = {}, action = {}, _extras = {}) {
+  const psychologicalState = requirePsychologicalState("contextFit", state);
+  const runtimeContext = runtimeContextFromState(psychologicalState);
   let score = 0;
-  if (action.targetPlace && action.targetPlace === currentPlace) score += 8;
-  if (plan && action.id === "follow_plan") score += plan.fixed ? 26 : 14;
-  if (agent.activeProcess && action.id === "continue_process") score += 35;
-  if (action.id === "seek_care") {
-    const cooldownUntil = Number(agent.medicalState?.afterTreatmentCooldownUntil || 0);
-    const health = num(agent.needs?.health, 100);
-    if (cooldownUntil > Number(world?.clock || 0) && health > 20) {
-      score -= health >= 40 ? 24 : 10;
-    }
-  }
-  const job = `${agent.job || ""} ${agent.ageStage || ""}`;
-  if (/学生|小学生|中学生/.test(job) && plan?.localAction === "study" && !["follow_plan", "seek_care", "seek_safety"].includes(action.id)) score -= 12;
-  if (agent.isSleeping && !["seek_care", "seek_safety"].includes(action.id)) score -= 40;
+  if (action.targetPlace && action.targetPlace === runtimeContext.currentPlace) score += 8;
+  if (runtimeContext.plan && action.id === "follow_plan") score += runtimeContext.plan.fixed ? 26 : 14;
+  if (runtimeContext.activeProcess && action.id === "continue_process") score += 35;
   return score;
 }
 
-function vectorBonus(vectorRecall = [], action) {
-  let raw = 0;
-  const details = [];
-  vectorRecall.forEach(item => {
-    const rel = relevance(`${item.scene || ""} ${(item.tags || []).join(" ")}`, action);
-    if (!rel) return;
-    const bonus = num(item.similarity, 0) * num(item.importance, 3) * rel * 3;
-    raw += bonus;
-    details.push({ scene: String(item.scene || "").slice(0, 80), similarity: item.similarity, bonus: Number(bonus.toFixed(2)) });
-  });
-  return { raw, details: details.sort((a, b) => b.bonus - a.bonus).slice(0, 3) };
+function vectorBonus(_vectorRecall = [], _action = {}) {
+  return { raw: 0, details: [], source: "disabled-v3.4.2.1-closure" };
 }
 
 function cognitiveFitForAction(cognitive = {}, action = {}) {
@@ -599,74 +471,92 @@ function cognitiveFitForAction(cognitive = {}, action = {}) {
   return Number(clamp(max * 0.68 + (total / Math.max(1, desires.length)) * 0.32, 0, 1, 0).toFixed(3));
 }
 
-function addMemoryBias(memoryBias, action, weight, reason, sourceType = "memory") {
-  if (!action || !Number.isFinite(Number(weight))) return;
-  const existing = memoryBias.find(item => item.action === action);
-  if (existing) {
-    existing.weight = Number((existing.weight + Number(weight)).toFixed(2));
-    if (reason && !existing.reasons.includes(reason)) existing.reasons.push(reason);
-    return;
-  }
-  memoryBias.push({
-    action,
-    weight: Number(Number(weight).toFixed(2)),
-    reasons: reason ? [String(reason).slice(0, 120)] : [],
-    sourceType
-  });
+function unifiedUtilityWeights(cognitive = {}) {
+  return {
+    need: 0.8,
+    goal: 0.55,
+    memory: 0.55,
+    social: 0.35,
+    causal: 0.08
+  };
 }
 
-function memoryInfluenceAgent(world = {}, agent = {}) {
-  const structured = structuredMemoryForAgent(agent, 12);
-  const memoryBias = [];
-  Object.entries(structured).forEach(([type, items]) => {
-    items.forEach(item => {
-      const text = `${item.text || ""} ${item.meaning || ""} ${(item.tags || []).join(" ")}`.toLowerCase();
-      const importance = clamp(num(item.importance, 3), 1, 5, 3) / 5;
-      const strength = clamp(num(item.strength, 50), 0, 100, 50) / 100;
-      const ageDays = Math.max(0, Math.floor((num(world.clock, 0) - num(item.lastSeenAt || item.at, 0)) / 1440));
-      const halfLife = ["habit", "belief", "goal"].includes(type) ? 120 : type === "social" ? 60 : 30;
-      const decay = Math.exp(-ageDays / halfLife);
-      const base = 8 + importance * 18 + strength * 12;
-      const weight = base * decay;
-      const reason = item.meaning || item.text || type;
-      if (/health|clinic|doctor|medical|鍋ュ悍|韬綋|璇婃墍|鍖荤敓|鍖婚櫌/.test(text)) {
-        addMemoryBias(memoryBias, "seek_care", weight * 0.9, reason, type);
-        addMemoryBias(memoryBias, "ignore_health", -weight * 0.8, reason, type);
-      }
-      if (/safety|risk|danger|unsafe|瀹夊叏|椋庨櫓|鍗遍櫓|閬块櫓/.test(text)) {
-        addMemoryBias(memoryBias, "seek_safety", weight * 0.9, reason, type);
-        addMemoryBias(memoryBias, "walk_nearby", -weight * 0.35, reason, type);
-      }
-      if (/hunger|food|meal|eat|breakfast|楗|鍚冮キ|椋熺墿|鏃╅/.test(text)) {
-        addMemoryBias(memoryBias, "eat_or_buy_food", weight * 0.85, reason, type);
-      }
-      if (/family|friend|neighbor|trust|help|瀹朵汉|鏈嬪弸|閭诲眳|淇′换|甯姪|姹傚姪/.test(text)) {
-        addMemoryBias(memoryBias, "contact_familiar", weight * 0.75, reason, type);
-      }
-      if (/responsib|promise|work|study|class|守信|责任|承诺|宸ヤ綔|瀛︿範|涓婅|璐ｄ换|鎵胯/.test(text)) {
-        addMemoryBias(memoryBias, "follow_plan", weight * 0.8, reason, type);
-        addMemoryBias(memoryBias, "continue_process", weight * 0.45, reason, type);
-      }
-      if (/rest|sleep|quiet|calm|tired|浼戞伅|鐫¤|瀹夐潤|鐤叉儷|鎭㈠/.test(text)) {
-        addMemoryBias(memoryBias, "rest", weight * 0.65, reason, type);
-        addMemoryBias(memoryBias, "observe_environment", weight * 0.2, reason, type);
-      }
-      if (/goal|future|plan|鐩爣|鏈潵|璁″垝/.test(text)) {
-        addMemoryBias(memoryBias, "think_and_plan", weight * 0.6, reason, type);
-      }
-      if (type === "preference" && /explore|walk|curious|散步|探索|好奇/.test(text)) {
-        addMemoryBias(memoryBias, "walk_nearby", weight * 0.45, reason, type);
-      }
-    });
-  });
-  memoryBias.sort((a, b) => Math.abs(Number(b.weight || 0)) - Math.abs(Number(a.weight || 0)));
-  const result = {
-    agentId: agent.id || "",
-    memoryBias: memoryBias.slice(0, 24),
-    rule: "MemoryInfluence turns long-term memory into soft action bias. It is not a fact source and cannot settle world state."
+function explorationRateFromState(state = {}) {
+  const projection = state.projection || {};
+  const entropy = projection.behavioralEntropy || {};
+  const pressure = projection.explorationPressure || {};
+  const base = clamp(num(pressure.base, 0.05), 0, 0.25, 0.05);
+  const threshold = clamp(num(pressure.threshold, 0.75), 0.4, 1, 0.75);
+  const repeatRate = clamp(num(entropy.repeatRate, 0), 0, 1, 0);
+  const curiosity = clamp(num(pressure.curiosityDrive, 0), 0, 1, 0);
+  const uncertainty = clamp(num(pressure.uncertainty, 0), 0, 1, 0);
+  const novelty = clamp(num(pressure.noveltyPressure, 0), 0, 1, 0);
+  const entropyBoost = repeatRate > threshold ? (repeatRate - threshold) * 0.5 : 0;
+  const pressureBoost = curiosity * 0.015 + uncertainty * 0.02 + novelty * 0.015;
+  return Number(clamp(base + entropyBoost + pressureBoost, 0, 0.25, base).toFixed(4));
+}
+
+function stateUtilityFeatures(state = {}, action = {}) {
+  const vector = action.actionVector || actionVector(action);
+  const needs = state.needsVector || {};
+  const drives = state.driveVector || {};
+  const socialPressure = state.socialPressure || {};
+  const projection = state.projection || {};
+  const causal = projection.causal || {};
+  const driveMatch = clamp(dotProduct(drives, vector) / 2.5, 0, 1, 0);
+  const needScore = clamp(Math.max(
+    action.targetNeed ? num(needs[action.targetNeed], 0) : 0,
+    driveMatch
+  ), 0, 1, 0);
+  const goalAlignment = clamp(
+    (num(vector.goal, 0) + num(vector.duty, 0) + num(vector.order, 0))
+    * (num(projection.goalPressure, 0) * 0.55 + num(projection.selfPressure, 0) * 0.25 + 0.2),
+    0,
+    1,
+    0
+  );
+  const memoryBias = clamp(
+    (num(projection.memoryActivation, 0) * 0.5 + num(projection.beliefActivation, 0) * 0.35 + driveMatch * 0.15)
+    * (0.75 + num(projection.emotionalLoad, 0) * 0.25),
+    0,
+    1,
+    0
+  );
+  const socialField = clamp(
+    num(vector.social, 0) * num(projection.socialNeed, 0)
+    + num(vector.support, 0) * num(projection.socialNeed, 0) * 0.7
+    + num(vector.safety, 0) * (num(socialPressure.fear, 0) + num(socialPressure.tension, 0)) * 0.5
+    + (num(vector.observe, 0) + num(vector.curiosity, 0)) * (num(socialPressure.curiosity, 0) + num(socialPressure.information, 0)) * 0.35,
+    0,
+    1,
+    0
+  );
+  const causalScore = clamp(
+    num(vector.safety, 0) * num(causal.safetyBias, 0)
+    + (num(vector.social, 0) + num(vector.support, 0)) * num(causal.socialBias, 0)
+    + (num(vector.duty, 0) + num(vector.order, 0)) * num(causal.responsibilityBias, 0),
+    0,
+    1,
+    0
+  );
+  return {
+    Need: Number(needScore.toFixed(3)),
+    GoalAlignment: Number(goalAlignment.toFixed(3)),
+    MemoryBias: Number(memoryBias.toFixed(3)),
+    SocialField: Number(socialField.toFixed(3)),
+    CausalScore: Number(causalScore.toFixed(3))
   };
-  agent.memoryInfluence = result;
-  return result;
+}
+
+function memoryInfluenceAgent(state = {}, _agent = {}, extras = {}) {
+  const psychologicalState = requirePsychologicalState("memoryInfluenceAgent", state, extras);
+  const activation = clamp(num(psychologicalState.projection?.memoryActivation, 0), 0, 1, 0);
+  return {
+    agentId: agentIdFromState(psychologicalState),
+    memoryBias: [],
+    activation,
+    rule: "V3.4.2.1 memory influence is only available through S(t).projection.memoryActivation."
+  };
 }
 
 function memoryInfluenceBias(memoryInfluence = {}, action = {}) {
@@ -684,211 +574,119 @@ function memoryInfluenceBias(memoryInfluence = {}, action = {}) {
   };
 }
 
-function goalBias(world = {}, agent = {}, action = {}) {
-  const runtime = normalizeGoalRuntime(agent, world);
-  let score = 0;
-  const details = [];
-  (runtime.goals || []).forEach(goal => {
-    const text = `${goal.name || ""} ${goal.title || ""} ${(goal.blockedBy || []).join(" ")}`.toLowerCase();
-    let rel = relevance(text, action);
-    if (/health|鍋ュ悍|韬綋/.test(text) && action.id === "seek_care") rel = Math.max(rel, 0.9);
-    if (/family|瀹跺涵|瀹朵汉/.test(text) && action.id === "contact_familiar") rel = Math.max(rel, 0.75);
-    if (/work|study|class|责任|宸ヤ綔|瀛︿範|涓婅|璐ｄ换/.test(text) && ["follow_plan", "continue_process"].includes(action.id)) rel = Math.max(rel, 0.8);
-    if (/stable|stability|稳定|绋冲畾|生活/.test(text) && ["follow_plan", "rest", "think_and_plan"].includes(action.id)) rel = Math.max(rel, 0.45);
-    if (!rel && action.id === "think_and_plan" && num(goal.frustration, 0) > 0.35) rel = 0.35;
-    if (!rel) return;
-    const bias = clamp(num(goal.priority, 0.5), 0, 1, 0.5) * (0.75 + clamp(num(goal.frustration, 0), 0, 1, 0)) * rel * 28;
-    score += bias;
-    details.push({
-      goal: String(goal.name || goal.title || "").slice(0, 80),
-      relevance: Number(rel.toFixed(2)),
-      frustration: Number(num(goal.frustration, 0).toFixed(2)),
-      bias: Number(bias.toFixed(2))
-    });
-  });
-  return { score: Number(score.toFixed(2)), details: details.sort((a, b) => b.bias - a.bias).slice(0, 4), runtime };
-}
-
-function selfConsistencyBias(world = {}, agent = {}, action = {}, extras = {}) {
-  const selfModel = ensureSelfModel(agent);
-  const text = `${selfModel.identity || ""} ${(selfModel.values || []).join(" ")} ${(selfModel.fears || []).join(" ")} ${(selfModel.selfBeliefs || []).join(" ")} ${selfModel.currentSelfView || ""}`.toLowerCase();
-  const weight = clamp(num(selfModel.selfConsistencyWeight, 0.65), 0, 1, 0.65);
-  let score = 0;
-  const details = [];
-  const add = (value, reason) => {
-    const delta = value * weight;
-    score += delta;
-    details.push({ reason, bias: Number(delta.toFixed(2)) });
+function goalBias(state = {}, _agent = {}, action = {}) {
+  const psychologicalState = requirePsychologicalState("goalBias", state);
+  const features = stateUtilityFeatures(psychologicalState, action);
+  return {
+    score: Number((features.GoalAlignment * 10).toFixed(2)),
+    details: [{ source: "psychologicalState.projection.goalPressure", bias: Number((features.GoalAlignment * 10).toFixed(2)) }],
+    runtime: { source: "psychologicalState" }
   };
-  const hasDuty = extras.plan?.fixed || agent.activeProcess || obligationPressure(agent) > 6;
-  if (/reliable|responsib|promise|守信|可靠|责任|承诺|璐ｄ换|鎵胯/.test(text)) {
-    if (["follow_plan", "continue_process"].includes(action.id)) add(18, "self-belief: reliable/responsible");
-    if (hasDuty && ["walk_nearby", "observe_environment", "think_and_plan"].includes(action.id)) add(-10, "self-belief conflicts with drifting away from duty");
-  }
-  if (/family|care|瀹跺涵|瀹朵汉|照顾|鐓ч【/.test(text) && action.id === "contact_familiar") {
-    add(10, "self-value: family/care");
-  }
-  if (/health|身体|鍋ュ悍|韬綋/.test(text) && ["seek_care", "rest"].includes(action.id)) {
-    add(12, "self-belief: health matters");
-  }
-  if (/fear|risk|unsafe|失去|害怕|椋庨櫓|瀹夊叏/.test(text)) {
-    if (["seek_safety", "observe_environment"].includes(action.id)) add(8, "self-fear: avoid risk");
-    if (action.id === "walk_nearby") add(-5, "self-fear resists risky wandering");
-  }
-  if (/quiet|alone|introvert|安静|独处|瀹夐潤|鍐呭悜/.test(text) && ["rest", "observe_environment", "think_and_plan"].includes(action.id)) {
-    add(6, "self-preference: quiet");
-  }
-  return { score: Number(score.toFixed(2)), details: details.sort((a, b) => Math.abs(b.bias) - Math.abs(a.bias)).slice(0, 4), selfModel };
 }
 
-function scoreAction(world, agent, action, extras = {}) {
-  const vectorRecall = extras.vectorRecall || [];
-  const memory = structuredMemoryBias(agent, action, world);
-  const memoryInfluence = extras.memoryInfluence || memoryInfluenceAgent(world, agent);
-  const influence = memoryInfluenceBias(memoryInfluence, action);
-  const personalityState = extras.personalityRuntime || personalityRuntime(world, agent, extras);
-  const personality = personalityRuntimeBias(personalityState, action);
-  const cognitive = extras.cognitiveState || cognitiveState(world, agent, extras.context || {});
+function selfConsistencyBias(state = {}, _agent = {}, action = {}, _extras = {}) {
+  const psychologicalState = requirePsychologicalState("selfConsistencyBias", state);
+  const features = stateUtilityFeatures(psychologicalState, action);
+  const score = Number(((features.GoalAlignment * 0.55 + features.MemoryBias * 0.45) * 10).toFixed(2));
+  return {
+    score,
+    details: [{ source: "psychologicalState.projection", bias: score }],
+    selfModel: { source: "psychologicalState" }
+  };
+}
+
+function scoreAction(S = {}, candidate = {}) {
+  const legacy = arguments.length >= 4;
+  const action = legacy ? arguments[2] : candidate;
+  const extras = legacy ? (arguments[3] || {}) : (arguments[2] || {});
+  const state = psychologicalStateFrom(S, extras);
+  if (!state) throw new Error("V3.4.2 utility requires psychologicalState");
   const aVector = action.actionVector || actionVector(action);
-  const match = actionMatch(cognitive, { ...action, actionVector: aVector });
-  const cognitiveFit = cognitiveFitForAction(cognitive, action);
-  const constraint = realityConstraint(cognitive, { ...action, actionVector: aVector }, extras.context || {});
-  const goal = goalBias(world, agent, action);
-  const selfConsistency = selfConsistencyBias(world, agent, action, extras);
-  const vector = vectorBonus(vectorRecall, action);
-  const weights = cognitive.decisionWeights || {};
-  const emotion = emotionBias(agent, action);
-  const social = socialBias(world, agent, action);
-  const relationshipMemory = relationshipMemoryBias(agent, action);
-  const socialField = socialFieldBiasForAction(world, agent, action);
-  const socialFeedback = socialFeedbackBiasForAction(world, agent, action);
-  const causal = causalBiasForAction(world, agent, action, cognitive);
-  const causalCompensatoryWeight = causalWeight(world);
-  const socialFeedbackWeightedScore = num(socialFeedback.gamma, 0.65) * num(socialFeedback.score, 0);
-  const context = contextFit(world, agent, action, extras);
+  const features = stateUtilityFeatures(state, { ...action, actionVector: aVector });
+  const weights = unifiedUtilityWeights();
+  const weightTotal = Math.max(0.001, weights.need + weights.goal + weights.memory + weights.social + weights.causal);
+  const unifiedU = (
+    weights.need * features.Need
+    + weights.goal * features.GoalAlignment
+    + weights.memory * features.MemoryBias
+    + weights.social * features.SocialField
+    + weights.causal * features.CausalScore
+  ) / weightTotal;
+  const fitVector = {
+    driveVector: state.driveVector || {},
+    biasVector: state.biasVector || {},
+    perceptionWeights: state.projection?.perceptionWeights || {}
+  };
+  const cognitiveFit = 0;
+  const constraint = realityConstraint(fitVector, { ...action, actionVector: aVector }, {});
   const eligibilityBias = num(action.eligibilityBias || action.eligibility?.bias, 0);
-  const memoryValue = clamp(0.5 + (memory.score * 2.5 + influence.score * 0.08) / 20, 0, 1, 0.5);
-  const personaValue = clamp(0.5 + (personality + selfConsistency.score) / 45, 0, 1, 0.5);
-  const emotionValue = clamp(0.5 + emotion / 35, 0, 1, 0.5);
-  const goalValue = clamp(0.5 + goal.score / 38, 0, 1, 0.5);
-  const socialValue = clamp(0.5 + (social + relationshipMemory.score + socialField.score) / 35, 0, 1, 0.5);
-  const socialFeedbackValue = clamp(0.5 + socialFeedbackWeightedScore / 35, 0, 1, 0.5);
-  const causalValue = clamp(num(causal.value, 0.5), 0, 1, 0.5);
-  const noveltyValue = clamp((aVector.novelty || 0) * 0.55 + (aVector.curiosity || 0) * 0.35 + num(cognitive.biasVector?.noveltySeeking, 0.35) * 0.35, 0, 1, 0.2);
-  const vectorCap = 0.2;
-  const vectorValue = Math.min(clamp(vector.raw / 8, 0, 1, 0), vectorCap);
-  const contextValue = clamp(0.45 + match / 4 + cognitiveFit * 0.22 + context / 80 + eligibilityBias / 100 + num(action.base, 0) / 80, 0, 1, 0.5);
-  const weightTotal = Math.max(0.001,
-    num(weights.memory, 0.55)
-    + num(weights.persona, 0.55)
-    + num(weights.emotion, 0.45)
-    + num(weights.goal, 0.55)
-    + num(weights.novelty, 0.3)
-    + num(weights.social, 0.35)
-    + num(weights.social, 0.35) * 0.35
-    + causalCompensatoryWeight
-  );
-  const compensatory =
-    (num(weights.memory, 0.55) * memoryValue
-      + num(weights.persona, 0.55) * personaValue
-      + num(weights.emotion, 0.45) * emotionValue
-      + num(weights.goal, 0.55) * goalValue
-      + num(weights.novelty, 0.3) * noveltyValue
-      + num(weights.social, 0.35) * socialValue
-      + num(weights.social, 0.35) * 0.35 * socialFeedbackValue
-      + causalCompensatoryWeight * causalValue) / weightTotal;
-  const combinedA = clamp(compensatory * 0.78 + contextValue * 0.22 + vectorValue, 0, 1.2, 0.5);
-  const noise = (seededRandom(`${agent.id}:${world?.clock || 0}:${action.id}:v3`) - 0.5) * cognitiveTemperature(agent, cognitive) * 1.2;
-  const score = combinedA * constraint.value * 100 + noise;
+  const noveltyValue = clamp((aVector.novelty || 0) * 0.55 + (aVector.curiosity || 0) * 0.35 + num(state.biasVector?.noveltySeeking, 0.35) * 0.35, 0, 1, 0.2);
+  const feasibility = clamp(num(action.features?.feasibility, action.availability ?? constraint.value), 0.05, 1, 1);
+  const score = (unifiedU * 0.88 + cognitiveFit * 0.08 + eligibilityBias / 100 * 0.04) * feasibility * constraint.value * 100;
   return {
     ...action,
     actionVector: aVector,
     score: Number(score.toFixed(2)),
     components: {
       base: action.base,
-      cognitiveMatch: Number(match.toFixed(3)),
+      cognitiveMatch: Number(dotProduct(state.driveVector || {}, aVector).toFixed(3)),
       cognitiveFit: Number((cognitiveFit * 10).toFixed(2)),
       cognitiveFitValue: Number(cognitiveFit.toFixed(3)),
-      needDrive: Number((match * 5).toFixed(2)),
-      memoryBias: Number((memoryValue * 10).toFixed(2)),
-      structuredMemoryBias: Number(memory.score.toFixed(2)),
-      memoryInfluence: Number((Math.max(0, memoryValue - 0.5) * 20).toFixed(2)),
-      personalityBias: Number(personality.toFixed(2)),
-      personaValue: Number(personaValue.toFixed(3)),
-      emotionBias: Number(emotion.toFixed(2)),
-      emotionValue: Number(emotionValue.toFixed(3)),
-      socialBias: Number(social.toFixed(2)),
-      relationshipMemoryBias: Number(relationshipMemory.score.toFixed(2)),
-      socialFieldBias: Number(socialField.score.toFixed(2)),
-      socialFeedbackBias: Number(socialFeedback.score.toFixed(2)),
-      socialFeedbackGamma: Number(num(socialFeedback.gamma, 0.65).toFixed(3)),
-      socialFeedbackWeighted: Number(socialFeedbackWeightedScore.toFixed(2)),
-      socialFeedbackValue: Number(socialFeedbackValue.toFixed(3)),
-      socialValue: Number(socialValue.toFixed(3)),
-      causalBias: Number(causal.score.toFixed(2)),
-      causalValue: Number(causalValue.toFixed(3)),
-      causalWeight: Number(causalCompensatoryWeight.toFixed(3)),
-      goalBias: Number(goal.score.toFixed(2)),
-      goalValue: Number(goalValue.toFixed(3)),
-      selfConsistency: Number(selfConsistency.score.toFixed(2)),
+      needDrive: Number((features.Need * 10).toFixed(2)),
+      memoryBias: Number((features.MemoryBias * 10).toFixed(2)),
+      structuredMemoryBias: 0,
+      memoryInfluence: Number((features.MemoryBias * 10).toFixed(2)),
+      personalityBias: 0,
+      personaValue: 0,
+      emotionBias: 0,
+      emotionValue: 0,
+      socialBias: Number((features.SocialField * 10).toFixed(2)),
+      relationshipMemoryBias: 0,
+      socialFieldBias: Number((features.SocialField * 10).toFixed(2)),
+      socialFeedbackBias: 0,
+      socialFeedbackGamma: 0,
+      socialFeedbackWeighted: 0,
+      socialFeedbackValue: 0,
+      socialValue: features.SocialField,
+      causalBias: Number((features.CausalScore * 10).toFixed(2)),
+      causalValue: features.CausalScore,
+      causalWeight: Number(weights.causal.toFixed(3)),
+      goalBias: Number((features.GoalAlignment * 10).toFixed(2)),
+      goalValue: features.GoalAlignment,
+      selfConsistency: 0,
       eligibilityBias: Number(eligibilityBias.toFixed(2)),
-      contextFit: Number(context.toFixed(2)),
-      contextValue: Number(contextValue.toFixed(3)),
+      contextFit: 0,
+      contextValue: 0,
       noveltyValue: Number(noveltyValue.toFixed(3)),
-      vectorBonus: Number(vectorValue.toFixed(3)),
-      compensatoryA: Number(combinedA.toFixed(3)),
+      vectorBonus: 0,
+      compensatoryA: Number(unifiedU.toFixed(3)),
+      unifiedUtility: Number(unifiedU.toFixed(3)),
+      utilityFeatures: features,
+      utilityWeights: weights,
       realityB: constraint.value,
-      noise: Number(noise.toFixed(3)),
+      feasibility: Number(feasibility.toFixed(3)),
+      noise: 0,
       cost: action.cost,
       risk: action.risk
     },
-    memoryDetails: memory.details,
-    memoryInfluenceDetails: influence.details,
-    relationshipMemoryDetails: relationshipMemory.details,
+    memoryDetails: [],
+    memoryInfluenceDetails: [],
+    relationshipMemoryDetails: [],
     personalityRuntime: {
-      socialDrive: personalityState.socialDrive,
-      riskTolerance: personalityState.riskTolerance,
-      responsibilityDrive: personalityState.responsibilityDrive,
-      source: personalityState.source
+      socialDrive: state.projection?.socialNeed || 0,
+      riskTolerance: state.biasVector?.riskTolerance,
+      responsibilityDrive: state.projection?.goalPressure || 0,
+      source: "psychologicalState"
     },
-    cognitiveState: {
-      decisionWeights: cognitive.decisionWeights,
-      timestamp: cognitive.timestamp,
-      version: cognitive.version,
-      enabled: cognitive.enabled,
-      selfPressure: cognitive.selfPressure,
-      socialNeed: cognitive.socialNeed,
-      safetyConcern: cognitive.safetyConcern,
-      curiosityDrive: cognitive.curiosityDrive,
-      responsibilityDrive: cognitive.responsibilityDrive,
-      comfortNeed: cognitive.comfortNeed,
-      emotionalLoad: cognitive.emotionalLoad,
-      beliefActivation: cognitive.beliefActivation,
-      activeGoals: cognitive.activeGoals,
-      activeMemories: cognitive.activeMemories,
-      activeCausalMemory: cognitive.activeCausalMemory,
-      activeBeliefs: cognitive.activeBeliefs,
-      desireCandidates: cognitive.desireCandidates,
-      thoughtCandidates: cognitive.thoughtCandidates,
-      perceptionWeights: cognitive.perceptionWeights,
-      driveVector: cognitive.driveVector,
-      biasVector: cognitive.biasVector,
-      needDynamicsState: cognitive.needDynamicsState,
-      needEmergencyFlag: cognitive.needEmergencyFlag,
-      cognitiveProfile: cognitive.cognitiveProfile,
-      socialModifier: cognitive.socialModifier,
-      causalBias: cognitive.causalBias,
-      temporalCausal: cognitive.temporalCausal,
-      source: cognitive.source
-    },
-    socialFieldBias: socialField,
-    socialFeedbackBias: socialFeedback,
-    causalBias: causal,
+    cognitiveState: { psychologicalState: state, source: "psychologicalState-only" },
+    socialFieldBias: { score: Number((features.SocialField * 10).toFixed(2)), source: "psychologicalState" },
+    socialFeedbackBias: { score: 0, source: "psychologicalState" },
+    causalBias: { score: Number((features.CausalScore * 10).toFixed(2)), value: features.CausalScore, source: "psychologicalState" },
     realityConstraint: constraint,
-    goalDetails: goal.details,
-    selfConsistencyDetails: selfConsistency.details,
-    vectorDetails: vector.details,
-    vectorCap
+    goalDetails: [],
+    selfConsistencyDetails: [],
+    vectorDetails: [],
+    vectorCap: 0
   };
 }
 
@@ -983,63 +781,84 @@ function debugDecisionFor(action = null) {
   };
 }
 
-function utilityDecision(world, agent, extras = {}) {
-  const selfModel = ensureSelfModel(agent);
-  const goalRuntime = normalizeGoalRuntime(agent, world);
-  const memoryInfluence = extras.memoryInfluence || memoryInfluenceAgent(world, agent);
-  const plan = extras.plan || currentPlanItem(world, agent);
-  const interruption = extras.interruption || detectInterruption(world, agent);
-  const personalityState = extras.personalityRuntime || personalityRuntime(world, agent, { plan, interruption, memoryInfluence });
-  const cognitive = extras.cognitiveState || cognitiveState(world, agent, { plan, interruption, eventText: extras.eventText || "" });
-  const priority = agentPriority(world, agent, { interruption });
-  const vectorEnabled = world?.config?.vectorMemoryEnabled !== false;
-  const vectorLimit = clamp(world?.config?.vectorMaxRecall, 1, 20, 6);
-  const vectorRecall = vectorEnabled ? retrieveVectorMemories(agent, {
-    clock: world?.clock || 0,
-    type: interruption?.type || plan?.localAction || agent.currentTask || "",
-    place: agent.position || agent.place || plan?.place || "",
-    title: plan?.title || "",
-    reason: interruption?.reason || "",
-    currentTask: agent.currentTask || "",
-    need: JSON.stringify(agent.needs || {}),
-    emotion: JSON.stringify(agent.emotionVector || agent.emotions || {}),
-    queryVector: extras.vectorQueryVector || extras.queryVector || null
-  }, vectorLimit) : [];
-  const rawActions = candidateActions(world, agent, { plan, interruption });
-  const actionEligibilityResult = filterEligibleActions(world, agent, rawActions, { plan, interruption });
+function utilityDecision(S = {}) {
+  const legacyAgent = arguments.length >= 3 ? arguments[1] : null;
+  const extras = arguments.length >= 3 ? (arguments[2] || {}) : (arguments[1] || {});
+  const cognitive = extras.cognitiveState || null;
+  const psychologicalState = psychologicalStateFrom(S, extras) || cognitive?.psychologicalState || null;
+  if (!psychologicalState) throw new Error("V3.4.2 utilityDecision requires precomputed psychologicalState");
+  const agentId = agentIdFromState(psychologicalState) || String(legacyAgent?.id || "");
+  const tick = num(psychologicalState.timestamp, 0);
+  const rawActions = candidateActions(psychologicalState);
+  const runtimeContext = psychologicalState.projection?.runtimeContext || null;
+  if (!runtimeContext) throw new Error("V3.4.2 utilityDecision requires psychologicalState.projection.runtimeContext");
+  const actionEligibilityResult = filterEligibleActions(psychologicalState, rawActions, { runtimeContext });
   const actions = actionEligibilityResult.actions;
   const scored = actions
-    .map(action => scoreAction(world, agent, action, { plan, interruption, vectorRecall, memoryInfluence, personalityRuntime: personalityState, cognitiveState: cognitive }))
+    .map(action => scoreAction(psychologicalState, action))
     .sort((a, b) => b.score - a.score);
-  const temperature = cognitiveTemperature(agent, cognitive);
-  const selected = softmaxPick(scored, `${agent.id}:${world?.clock || 0}:${priority.reason}`, temperature);
+  if (!scored.length) {
+    return {
+      agentId,
+      status: "NO_VALID_CANDIDATE",
+      priority: 0,
+      priorityComponents: { psychologicalState: 0 },
+      priorityReason: "no_valid_candidate",
+      selectedAction: null,
+      candidateActions: [],
+      actionEligibility: actionEligibilityResult,
+      vectorRecall: [],
+      structuredMemory: {},
+      cognitiveState: { psychologicalState },
+      psychologicalState,
+      desireCandidates: [],
+      activeBeliefs: [],
+      thoughtStream: [],
+      selectionTemperature: null,
+      explorationRate: explorationRateFromState(psychologicalState),
+      personalityRuntime: { source: "psychologicalState" },
+      memoryInfluence: { agentId, memoryBias: [], rule: "V3.4.2.1 decision path reads unified psychological state only." },
+      goalRuntime: null,
+      selfModel: null,
+      decisionTrace: decisionTraceFor(null),
+      debugDecision: debugDecisionFor(null),
+      plan: null,
+      interruption: null,
+      rule: "V3.4.2.1 no fallback candidate generation."
+    };
+  }
+  const temperature = 0.65;
+  const explorationRate = explorationRateFromState(psychologicalState);
+  const priority = Math.round(Math.max(...scored.map(action => action.score || 0), 0));
+  const selected = pickWithExploration(scored, `${agentId}:${tick}:S:${temperature}`, explorationRate);
   const decisionTrace = decisionTraceFor(selected);
   const debugDecision = debugDecisionFor(selected);
-  agent.debugDecision = debugDecision;
   return {
-    agentId: agent.id,
-    priority: priority.priority,
-    priorityComponents: priority.components,
-    priorityReason: priority.reason,
+    agentId,
+    priority,
+    priorityComponents: { psychologicalState: priority },
+    priorityReason: "psychologicalState",
     selectedAction: selected,
     candidateActions: scored.slice(0, 12),
     actionEligibility: actionEligibilityResult,
-    vectorRecall,
-    structuredMemory: structuredMemoryForAgent(agent, 6),
-    cognitiveState: cognitive,
-    desireCandidates: cognitive.desireCandidates || [],
-    activeBeliefs: cognitive.activeBeliefs || [],
-    thoughtStream: cognitive.thoughtStream || [],
+    vectorRecall: [],
+    structuredMemory: {},
+    cognitiveState: { psychologicalState },
+    psychologicalState,
+    desireCandidates: [],
+    activeBeliefs: [],
+    thoughtStream: [],
     selectionTemperature: temperature,
-    personalityRuntime: personalityState,
-    memoryInfluence,
-    goalRuntime,
-    selfModel,
+    explorationRate,
+    personalityRuntime: { source: "psychologicalState" },
+    memoryInfluence: { agentId, memoryBias: [], rule: "V3.4.2 decision path reads unified psychological state only." },
+    goalRuntime: null,
+    selfModel: null,
     decisionTrace,
     debugDecision,
-    plan,
-    interruption,
-    rule: "V3 score uses CognitiveState -> actionVector match -> mixed utility -> softmax. Needs shape attention, patience, risk and drive vectors; they do not directly select actions. AgentAction still makes the subjective choice, WorldMaster and StateSettlement decide what becomes real."
+    plan: null,
+    interruption: null,
+    rule: "V3.4.2 score is S(t)-only: psychologicalState -> state candidates -> frozen utility -> selection."
   };
 }
 
@@ -1052,16 +871,12 @@ module.exports = {
   lifeStageOf,
   professionKind,
   memoryInfluenceAgent,
-  personalityRuntime,
-  personalityRuntimeBias,
-  cognitiveState,
   actionVector,
-  actionMatch,
   realityConstraint,
-  cognitiveTemperature,
   goalBias,
   selfConsistencyBias,
   cognitiveFitForAction,
+  explorationRateFromState,
   scoreAction,
   softmaxPick,
   decisionTraceFor,

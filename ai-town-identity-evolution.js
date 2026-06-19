@@ -1,13 +1,13 @@
 "use strict";
 
 const {
-  appendMemory,
   buildMemorySummary,
   ensureMemory,
   ensureSelfModel,
   normalizeGoalRuntime,
   syncLongTermMemoryViews
 } = require("./ai-town-memory-stream");
+const { cognitiveWrite } = require("./ai-town-cognitive-integrity");
 
 function num(value, fallback = 0) {
   const number = Number(value);
@@ -43,7 +43,7 @@ function narrativeThemeHash(theme = "") {
     .slice(0, 80) || "stable";
 }
 
-function shouldAppendNarrativeTheme(selfModel = {}, theme = "", clock = 0) {
+function narrativeThemeUpdate(selfModel = {}, theme = "", clock = 0) {
   const hash = narrativeThemeHash(theme);
   const state = selfModel.narrativeHash && typeof selfModel.narrativeHash === "object"
     ? selfModel.narrativeHash
@@ -51,23 +51,31 @@ function shouldAppendNarrativeTheme(selfModel = {}, theme = "", clock = 0) {
   const lastAt = num(state[hash]?.lastAt, -Infinity);
   const repeatWindow = 30 * 1440;
   if (Number.isFinite(lastAt) && clock - lastAt < repeatWindow) {
-    state[hash] = {
-      hash,
-      lastAt: clock,
-      count: num(state[hash]?.count, 1) + 1,
-      strength: clamp(num(state[hash]?.strength, 0.2) + 0.03, 0, 1, 0.2)
+    return {
+      shouldAppend: false,
+      narrativeHash: {
+        ...state,
+        [hash]: {
+          hash,
+          lastAt: clock,
+          count: num(state[hash]?.count, 1) + 1,
+          strength: clamp(num(state[hash]?.strength, 0.2) + 0.03, 0, 1, 0.2)
+        }
+      }
     };
-    selfModel.narrativeHash = state;
-    return false;
   }
-  state[hash] = {
-    hash,
-    lastAt: clock,
-    count: num(state[hash]?.count, 0) + 1,
-    strength: clamp(num(state[hash]?.strength, 0.2) + 0.05, 0, 1, 0.2)
+  return {
+    shouldAppend: true,
+    narrativeHash: {
+      ...state,
+      [hash]: {
+        hash,
+        lastAt: clock,
+        count: num(state[hash]?.count, 0) + 1,
+        strength: clamp(num(state[hash]?.strength, 0.2) + 0.05, 0, 1, 0.2)
+      }
+    }
   };
-  selfModel.narrativeHash = state;
-  return true;
 }
 
 function textOf(value) {
@@ -177,27 +185,24 @@ function buildSignals(world = {}, agent = {}, recentEvents = []) {
 }
 
 function ensureEvolutionSelfModel(agent = {}) {
-  const selfModel = ensureSelfModel(agent);
-  selfModel.selfImage = compactString(
+  return ensureSelfModel(agent);
+  void compactString(
     selfModel.selfImage || selfModel.currentSelfView || selfModel.identity,
     selfModel.identity || "自我理解保持稳定",
     180
   );
-  selfModel.competenceBeliefs = uniqueStrings([selfModel.competenceBeliefs], 8);
-  selfModel.fears = uniqueStrings([selfModel.fears], 8);
-  selfModel.lifeNarrative = compactString(
+  void compactString(
     selfModel.lifeNarrative || agent.selfNarrative || selfModel.currentSelfView || selfModel.identity,
     selfModel.currentSelfView || "生活经历还在慢慢积累",
     260
   );
-  return selfModel;
 }
 
 function appendIdentityMemory(agent, type, payload = {}, world = {}) {
   const text = compactString(payload.text || payload.meaning || payload.belief || payload.habit || payload.preference, "", 220);
   if (!text) return null;
   const at = num(world.clock, 0);
-  return appendMemory(agent, {
+  const memory = {
     semantic: true,
     type,
     text,
@@ -218,7 +223,19 @@ function appendIdentityMemory(agent, type, payload = {}, world = {}) {
     source: "identity-evolution",
     tags: uniqueStrings([payload.tags || [], "identity-evolution", type], 8),
     dedupeKey: payload.dedupeKey || `identity:${agent.id}:${type}:${text}`
+  };
+  const result = cognitiveWrite({
+    world,
+    agent,
+    agentId: agent.id,
+    source: "identity-evolution",
+    target: "memory",
+    payload: memory,
+    confidence: memory.confidence,
+    reason: "identity evolution memory write",
+    timestamp: at
   });
+  return result.ok ? result.applied : null;
 }
 
 function driftTrait(target = {}, key, direction, impact, rate, changes) {
@@ -476,19 +493,29 @@ function evolveAgentIdentity(world = {}, agent = {}, options = {}) {
   merged.selfModelUpdate.competenceBeliefs = uniqueStrings(merged.selfModelUpdate.competenceBeliefs, 6);
   merged.selfModelUpdate.fears = uniqueStrings(merged.selfModelUpdate.fears, 6);
   merged.sourceEvents = uniqueStrings(merged.sourceEvents, 12);
+  const applied = hasMeaningfulChange(merged);
+  const identityPayload = {
+    selfBeliefs: [],
+    competenceBeliefs: [],
+    fears: [],
+    currentSelfView: "",
+    selfImage: "",
+    lifeNarrative: "",
+    narrativeHash: null
+  };
 
   if (merged.selfModelUpdate.selfBeliefs.length) {
-    selfModel.selfBeliefs = uniqueStrings([selfModel.selfBeliefs, merged.selfModelUpdate.selfBeliefs], 12);
+    identityPayload.selfBeliefs = uniqueStrings([selfModel.selfBeliefs, merged.selfModelUpdate.selfBeliefs], 12);
   }
   if (merged.selfModelUpdate.competenceBeliefs.length) {
-    selfModel.competenceBeliefs = uniqueStrings([selfModel.competenceBeliefs, merged.selfModelUpdate.competenceBeliefs], 8);
+    identityPayload.competenceBeliefs = uniqueStrings([selfModel.competenceBeliefs, merged.selfModelUpdate.competenceBeliefs], 8);
   }
   if (merged.selfModelUpdate.fears.length) {
-    selfModel.fears = uniqueStrings([selfModel.fears, merged.selfModelUpdate.fears], 8);
+    identityPayload.fears = uniqueStrings([selfModel.fears, merged.selfModelUpdate.fears], 8);
   }
-  if (hasMeaningfulChange(merged)) {
+  if (applied) {
     const theme = merged.signals.slice(0, 3).map(item => item.type).join(" / ") || "stable";
-    selfModel.currentSelfView = compactString(
+    identityPayload.currentSelfView = compactString(
       merged.selfModelUpdate.competenceBeliefs[0]
         ? `最近的经历让${agent.name || "这个人"}更相信：${merged.selfModelUpdate.competenceBeliefs[0]}。`
         : merged.selfModelUpdate.selfBeliefs[0]
@@ -497,14 +524,27 @@ function evolveAgentIdentity(world = {}, agent = {}, options = {}) {
       selfModel.currentSelfView,
       220
     );
-    selfModel.selfImage = compactString(selfModel.selfImage || selfModel.currentSelfView, selfModel.currentSelfView, 180);
-    if (shouldAppendNarrativeTheme(selfModel, theme, clock)) {
-      selfModel.lifeNarrative = compactString(
+    identityPayload.selfImage = compactString(selfModel.selfImage || identityPayload.currentSelfView, identityPayload.currentSelfView, 180);
+    const narrativeUpdate = narrativeThemeUpdate(selfModel, theme, clock);
+    identityPayload.narrativeHash = narrativeUpdate.narrativeHash;
+    if (narrativeUpdate.shouldAppend) {
+      identityPayload.lifeNarrative = compactString(
         `${selfModel.lifeNarrative || selfModel.identity || ""} 最近的${theme}经历正在缓慢影响其判断方式。`,
-        selfModel.currentSelfView,
+        identityPayload.currentSelfView,
         260
       );
     }
+    cognitiveWrite({
+      world,
+      agent,
+      agentId: agent.id,
+      source: "identity-evolution",
+      target: "identity",
+      payload: { selfModel: identityPayload, sourceEvents: merged.sourceEvents },
+      confidence: 0.72,
+      reason: "identity evolution self model update",
+      timestamp: clock
+    });
   }
 
   syncLongTermMemoryViews(agent);
@@ -519,7 +559,6 @@ function evolveAgentIdentity(world = {}, agent = {}, options = {}) {
   };
 
   const newState = snapshotIdentity(agent);
-  const applied = hasMeaningfulChange(merged);
   const result = {
     ...merged,
     selfModelUpdate: {

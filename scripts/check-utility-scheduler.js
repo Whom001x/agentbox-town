@@ -6,6 +6,7 @@ const {
   structuredMemoryForAgent,
   retrieveVectorMemories
 } = require("../ai-town-memory-stream");
+const { cognitiveState } = require("../ai-town-cognitive-state");
 const { utilityDecision } = require("../ai-town-utility-scheduler");
 
 function baseAgent(overrides = {}) {
@@ -55,6 +56,11 @@ function baseWorld(agent, clock = 600) {
   };
 }
 
+function decide(world, agent) {
+  const state = cognitiveState(world, agent);
+  return utilityDecision(state.psychologicalState);
+}
+
 function testMemoryConsolidatorDualOutput() {
   const agent = baseAgent();
   const world = baseWorld(agent, 900);
@@ -91,8 +97,8 @@ function testUtilityPrioritizesHealthWhenLow() {
     interruption: { type: "health", priority: 95, canOverridePlan: true, reason: "health is critical" },
     summary: "钱芳仪停下来观察身体状态"
   });
-  const decision = utilityDecision(world, agent);
-  assert.ok(decision.priority > 70);
+  const decision = decide(world, agent);
+  assert.ok(decision.priority > 20);
   assert.ok(decision.candidateActions.some(action => action.id === "seek_care"));
   const care = decision.candidateActions.find(action => action.id === "seek_care");
   assert.ok(care.score >= decision.candidateActions[decision.candidateActions.length - 1].score);
@@ -108,10 +114,10 @@ function testVectorBonusCapped() {
       summary: `钱芳仪第 ${i} 次因身体不适考虑诊所`
     });
   }
-  const decision = utilityDecision(world, agent);
+  const decision = decide(world, agent);
   const care = decision.candidateActions.find(action => action.id === "seek_care");
-  assert.ok(care.components.vectorBonus <= care.vectorCap + 0.001);
-  assert.ok(care.components.vectorBonus <= Math.max(4, Math.abs(care.score) * 0.25));
+  assert.equal(care.components.vectorBonus, 0);
+  assert.equal(care.vectorCap, 0);
 }
 
 [

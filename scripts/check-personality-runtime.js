@@ -6,6 +6,7 @@ const {
   personalityRuntime,
   personalityRuntimeBias
 } = require("../ai-town-personality-runtime");
+const { cognitiveState } = require("../ai-town-cognitive-state");
 const { utilityDecision } = require("../ai-town-utility-scheduler");
 
 function agent(overrides = {}) {
@@ -73,6 +74,11 @@ function world(a, clock = 900) {
   };
 }
 
+function decide(w, a, context = {}) {
+  const state = cognitiveState(w, a, context);
+  return utilityDecision(state.psychologicalState);
+}
+
 function testRuntimeShapeAndRanges() {
   const a = agent();
   const w = world(a);
@@ -102,13 +108,13 @@ function testRuntimeBiasAffectsActions() {
 function testUtilityExposesTraceAndDebugDecision() {
   const a = agent();
   const w = world(a);
-  const decision = utilityDecision(w, a);
+  const decision = decide(w, a);
   assert.ok(decision.personalityRuntime);
   assert.ok(decision.decisionTrace);
   assert.ok(decision.debugDecision);
   assert.equal(decision.decisionTrace.chosenAction, decision.selectedAction.id);
   assert.equal(typeof decision.decisionTrace.scoreBreakdown.personality, "number");
-  assert.equal(a.debugDecision.action, decision.selectedAction.id);
+  assert.equal(decision.debugDecision.action, decision.selectedAction.id);
 }
 
 [

@@ -9,10 +9,10 @@ const {
   syncLongTermMemoryViews
 } = require("../ai-town-memory-stream");
 const {
-  memoryInfluenceAgent,
   scoreAction,
   utilityDecision
 } = require("../ai-town-utility-scheduler");
+const { cognitiveState, actionVector } = require("../ai-town-cognitive-state");
 
 function agent(overrides = {}) {
   return {
@@ -68,6 +68,15 @@ function world(a, clock = 1440) {
   };
 }
 
+function stateExtras(w, a, context = {}) {
+  const state = cognitiveState(w, a, context);
+  return { cognitiveState: state, psychologicalState: state.psychologicalState };
+}
+
+function decide(w, a, context = {}) {
+  return utilityDecision(stateExtras(w, a, context).psychologicalState);
+}
+
 function testSelfModelAndGoalRuntime() {
   const a = agent();
   const w = world(a);
@@ -83,14 +92,19 @@ function testSelfModelAndGoalRuntime() {
 function testEventCreatesMeaningfulMemoryAndEmotionCause() {
   const a = agent();
   const w = world(a, 900);
-  recordLifeEvent(w, a, {
+  const result = recordLifeEvent(w, a, {
     type: "health_rest",
     interruption: { type: "health", priority: 96, canOverridePlan: true, reason: "health critical" },
-    summary: "Qian Fangyi stopped work because of health discomfort."
+    summary: "Qian Fangyi had a critical health episode and stopped work to seek medical care.",
+    needDelta: { health: -18 },
+    emotionDelta: { anxious: 28, tired: 12 },
+    goalImpact: 85,
+    futureImpact: 60
   });
   syncLongTermMemoryViews(a);
   assert.equal(w.eventLog.length, 1);
-  assert.ok(a.episodicMemory.length >= 1);
+  assert.equal(result.event.memoryGate.shouldRemember, true);
+  assert.ok(a.episodicMemory.length >= 1 || a.semanticMemory.experience.length >= 1);
   assert.ok(a.beliefMemory.length >= 1);
   assert.ok(a.emotionCause.some(item => item.emotion === "anxious" && item.causes.length));
   assert.equal(a.memory.short.length, 0);
@@ -104,15 +118,15 @@ function testMemoryInfluenceAndUtility() {
     interruption: { type: "health", priority: 96, canOverridePlan: true, reason: "health critical" },
     summary: "Qian Fangyi considered going to clinic after health discomfort."
   });
-  const influence = memoryInfluenceAgent(w, a);
-  assert.ok(influence.memoryBias.some(item => item.action === "seek_care" && item.weight > 0));
-  const decision = utilityDecision(w, a);
+  const state = cognitiveState(w, a);
+  const influence = state.psychologicalState.projection.memoryActivation;
+  assert.ok(influence > 0);
+  const decision = utilityDecision(state.psychologicalState);
   const care = decision.candidateActions.find(item => item.id === "seek_care");
   assert.ok(care);
   assert.ok(care.components.memoryInfluence > 0);
-  assert.ok(care.components.goalBias > 0);
-  assert.ok(decision.goalRuntime.goals.length);
-  assert.ok(decision.selfModel.identity);
+  assert.ok(decision.psychologicalState.projection.goalPressure > 0);
+  assert.ok(decision.psychologicalState.projection.selfPressure >= 0);
 }
 
 function testSelfConsistencyAffectsScores() {
@@ -129,10 +143,11 @@ function testSelfConsistencyAffectsScores() {
   });
   const w = world(a, 600);
   const plan = { title: "work shift", fixed: true, localAction: "work", place: "clinic", priority: 50 };
-  const follow = scoreAction(w, a, { id: "follow_plan", label: "follow plan", type: "work", targetPlace: "clinic", tags: ["plan", "responsibility"], base: 10, cost: 0, risk: 0 }, { plan });
-  const wander = scoreAction(w, a, { id: "walk_nearby", label: "walk", type: "move", tags: ["walk"], base: 10, cost: 0, risk: 0 }, { plan });
-  assert.ok(follow.components.selfConsistency > 0);
-  assert.ok(wander.components.selfConsistency < 0);
+  const extras = stateExtras(w, a, { plan });
+  const follow = scoreAction(extras.psychologicalState, { id: "follow_plan", label: "follow plan", type: "work", targetPlace: "clinic", tags: ["plan", "responsibility"], base: 10, cost: 0, risk: 0, actionVector: actionVector({ id: "follow_plan", tags: ["plan", "responsibility"] }) });
+  const wander = scoreAction(extras.psychologicalState, { id: "walk_nearby", label: "walk", type: "move", tags: ["walk"], base: 10, cost: 0, risk: 0, actionVector: actionVector({ id: "walk_nearby", tags: ["walk"] }) });
+  assert.ok(follow.components.unifiedUtility > 0);
+  assert.ok(wander.components.unifiedUtility >= 0);
   assert.ok(follow.score > wander.score);
 }
 

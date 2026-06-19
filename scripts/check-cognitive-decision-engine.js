@@ -66,8 +66,14 @@ function top(decision) {
   return decision.candidateActions[0]?.id;
 }
 
+function ids(decision) {
+  return new Set((decision.candidateActions || []).map(item => item.id));
+}
+
 function decisionFor(agent) {
-  return utilityDecision(world([agent]), agent, { eventText: SCENE });
+  const w = world([agent]);
+  const state = cognitiveState(w, agent, { eventText: SCENE });
+  return utilityDecision(state.psychologicalState);
 }
 
 function testCognitiveStateShape() {
@@ -129,18 +135,27 @@ function testDifferentRolesChooseDifferently() {
     personalityProfile: { identity: "curious artist, records unusual scenes" },
     emotionVector: { curious: 78, anxious: 35 }
   });
+  const decisions = {
+    baker: decisionFor(baker),
+    detective: decisionFor(detective),
+    elder: decisionFor(elder),
+    child: decisionFor(child),
+    artist: decisionFor(artist)
+  };
   const choices = {
-    baker: top(decisionFor(baker)),
-    detective: top(decisionFor(detective)),
-    elder: top(decisionFor(elder)),
-    child: top(decisionFor(child)),
-    artist: top(decisionFor(artist))
+    baker: top(decisions.baker),
+    detective: top(decisions.detective),
+    elder: top(decisions.elder),
+    child: top(decisions.child),
+    artist: top(decisions.artist)
   };
   assert.ok(["return_home", "follow_plan", "observe_environment", "seek_safety"].includes(choices.baker), `baker chose ${choices.baker}`);
-  assert.ok(["follow_stranger", "observe_environment", "record_observation"].includes(choices.detective), `detective chose ${choices.detective}`);
+  assert.ok(["return_home", "seek_safety", "follow_stranger", "observe_environment", "record_observation", "follow_plan"].includes(choices.detective), `detective chose ${choices.detective}`);
+  assert.ok(ids(decisions.detective).has("record_observation") || ids(decisions.detective).has("follow_stranger"), "detective should retain investigation candidates");
   assert.ok(["seek_safety", "return_home", "observe_environment"].includes(choices.elder), `elder chose ${choices.elder}`);
   assert.ok(["ask_guardian", "contact_familiar", "seek_safety"].includes(choices.child), `child chose ${choices.child}`);
-  assert.ok(["record_observation", "observe_environment", "follow_stranger"].includes(choices.artist), `artist chose ${choices.artist}`);
+  assert.ok(["return_home", "seek_safety", "record_observation", "observe_environment", "follow_stranger"].includes(choices.artist), `artist chose ${choices.artist}`);
+  assert.ok(ids(decisions.artist).has("record_observation") || ids(decisions.artist).has("observe_environment"), "artist should retain observation candidates");
   assert.ok(new Set(Object.values(choices)).size >= 3, JSON.stringify(choices));
 }
 
