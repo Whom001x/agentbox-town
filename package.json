@@ -41,6 +41,7 @@
     "check:cognitive-hard-seal": "node scripts/check-cognitive-hard-seal.js",
     "check:cognitive-closure": "node scripts/check-cognitive-closure.js",
     "migrate:cognitive-audit": "node scripts/migrate-cognitive-audit-fields.js",
+    "report:cognitive-night": "node debug/cognitive-night-report.js",
     "check:internal-state": "node scripts/check-internal-state.js",
     "check:personality-runtime": "node scripts/check-personality-runtime.js",
     "check:personality-stability": "node scripts/check-personality-stability.js",

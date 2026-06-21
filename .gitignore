@@ -4,6 +4,7 @@ ai-town-config.json
 .env.*.local
 saves/
 runtime/
+logs/
 certs/
 *.log
 *.tmp

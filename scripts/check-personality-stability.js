@@ -49,7 +49,7 @@ function world() {
 
 function decide(w, a) {
   const cognitive = cognitiveState(w, a);
-  return utilityDecision(cognitive.psychologicalState);
+  return utilityDecision(w, a, { cognitiveState: cognitive, psychologicalState: cognitive.psychologicalState });
 }
 
 function testContinuity() {
@@ -71,7 +71,7 @@ function testCandidateBoundary() {
   const a = agent("a");
   w.agents = [a];
   const cognitive = cognitiveState(w, a);
-  const candidates = candidateActions(cognitive.psychologicalState);
+  const candidates = candidateActions(w, a, { cognitiveState: cognitive, psychologicalState: cognitive.psychologicalState });
   assert.ok(candidates.length > 0);
   assert.ok(candidates.every(item => item.source?.includes("S_state")));
 }
@@ -132,13 +132,30 @@ function testUnifiedFormulaTrace() {
   assert.deepEqual(Object.keys(features), ["Need", "GoalAlignment", "MemoryBias", "SocialField", "CausalScore"]);
 }
 
+function testReflectionAttractorCalibration() {
+  const w = world();
+  const a = agent("reflector", { ambition: 0.65, curiosity: 0.55 });
+  a.currentTask = "think and plan next step";
+  a.actionHistory = Array.from({ length: 8 }, () => ({ actionId: "think_and_plan" }));
+  a.goalRuntime = { goals: [{ name: "finish unresolved plan", priority: 0.8, clarity: 0.8 }], source: "test", updatedAt: 0 };
+  w.agents = [a];
+  const state = cognitiveState(w, a);
+  assert.equal(state.stabilityLayerVersion, "3.4.2.3");
+  assert.ok(state.runtimeContext.thoughtAction.reflectionSaturation > 0.5);
+  assert.ok(state.attractorLandscape.reflectionSaturation > 0.5);
+  assert.ok(state.attractorLandscape.actionExecutionPressure > 0.4);
+  assert.ok(state.psychologicalState.projection.thoughtAction.actionExecutionPressure > 0.4);
+  assert.ok(state.psychologicalState.projection.attractorLandscape.distribution.routine < 0.8);
+}
+
 [
   testContinuity,
   testCandidateBoundary,
   testInertiaLag,
   testBehaviorConsistency,
   testPersonalityDivergence,
-  testUnifiedFormulaTrace
+  testUnifiedFormulaTrace,
+  testReflectionAttractorCalibration
 ].forEach(fn => fn());
 
 console.log("PASS check-personality-stability");

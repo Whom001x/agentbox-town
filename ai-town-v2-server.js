@@ -1521,6 +1521,148 @@ function readSaveLogPayload(slot, options = {}) {
   };
 }
 
+function readSaveUiPayload(slot) {
+  const safeSlot = safeSaveName(slot);
+  const folderPath = saveFolderFor(safeSlot);
+  const jsonPath = savePathFor(safeSlot);
+  if (!fs.existsSync(folderPath) && !fs.existsSync(jsonPath)) return null;
+
+  if (!fs.existsSync(folderPath)) {
+    const payload = readSavePayload(safeSlot);
+    if (!payload) return null;
+    const world = payload.world || payload || {};
+    return {
+      version: payload.version || 2,
+      savedAt: payload.savedAt || new Date().toISOString(),
+      meta: payload.meta || { name: safeSlot },
+      world: {
+        clock: world.clock || 0,
+        day: world.day,
+        running: world.running,
+        selected: world.selected,
+        selectedPlace: world.selectedPlace,
+        places: Array.isArray(world.places) ? world.places : [],
+        agents: Array.isArray(world.agents) ? world.agents.map(compactUiAgent) : [],
+        actionQueue: Array.isArray(world.actionQueue) ? world.actionQueue.slice(0, 80) : [],
+        records: Array.isArray(world.records) ? world.records.slice(0, 80) : [],
+        logs: Array.isArray(world.logs) ? world.logs.slice(0, 80) : [],
+        locationRuntime: world.locationRuntime || {},
+        locationDailyPlans: world.locationDailyPlans || {},
+        config: world.config || {}
+      },
+      locationBoxes: payload.locationBoxes || {}
+    };
+  }
+
+  const meta = readJsonIfExists(path.join(folderPath, "meta.json"), { name: safeSlot });
+  const worldState = readJsonIfExists(path.join(folderPath, "world-state.json"), {});
+  const characterIndex = readJsonIfExists(path.join(folderPath, "characters", "index.json"), []);
+  const places = readWorldTableFolder(folderPath, "places", worldState.places || []);
+  const events = readWorldTableFolder(folderPath, "events", {});
+  const agentsDir = path.join(folderPath, "agents");
+  const agents = fs.existsSync(agentsDir)
+    ? fs.readdirSync(agentsDir, { withFileTypes: true })
+      .filter(item => item.isDirectory())
+      .map(item => {
+        const state = readJsonIfExists(path.join(agentsDir, item.name, "state.json"), {});
+        const info = readJsonIfExists(path.join(agentsDir, item.name, "info.json"), {});
+        const memory = readJsonIfExists(path.join(agentsDir, item.name, "memory.json"), {});
+        const base = Array.isArray(characterIndex) ? characterIndex.find(agent => agent.id === state.id || agent.id === item.name) : null;
+        const cognitive = state.cognitiveState || memory.cognitiveState || info.cognitiveState || {};
+        return compactUiAgent({
+          ...(base || {}),
+          ...info,
+          ...memory,
+          ...state,
+          relationshipMatrix: state.relationshipMatrix || info.relationshipMatrix || info.relationships || {},
+          relationships: state.relationships || info.relationships || info.relationshipMatrix || {},
+          psychologicalState: state.psychologicalState || cognitive.psychologicalState || info.psychologicalState || null,
+          previousPsychologicalState: state.previousPsychologicalState || info.previousPsychologicalState || null
+        });
+      })
+      .filter(agent => agent.id)
+    : [];
+  return {
+    version: 2,
+    savedAt: meta.updatedAt || meta.savedAt || new Date().toISOString(),
+    meta,
+    world: {
+      clock: worldState.clock || 0,
+      startClock: worldState.startClock || 0,
+      running: !!worldState.running,
+      selected: worldState.selected || "",
+      selectedPlace: worldState.selectedPlace || "",
+      agents,
+      places: Array.isArray(places) ? places : worldState.places || [],
+      records: (Array.isArray(events.records) ? events.records : worldState.records || []).slice(0, 80),
+      logs: (Array.isArray(events.logs) ? events.logs : worldState.logs || []).slice(0, 80),
+      eventLog: (Array.isArray(events.eventLog) ? events.eventLog : worldState.eventLog || []).slice(0, 200),
+      actionQueue: Array.isArray(worldState.actionQueue) ? worldState.actionQueue.slice(0, 80) : [],
+      locationRuntime: worldState.locationRuntime || {},
+      locationDailyPlans: worldState.locationDailyPlans || {},
+      config: worldState.config || {}
+    },
+    locationBoxes: readJsonIfExists(path.join(folderPath, "location-boxes.json"), {})
+  };
+}
+
+function compactUiAgent(agent = {}) {
+  const memory = agent.memory || {};
+  return {
+    id: agent.id,
+    name: agent.name,
+    job: agent.job,
+    ageYears: agent.ageYears,
+    ageStage: agent.ageStage,
+    place: agent.place,
+    position: agent.position || agent.place,
+    movement: agent.movement || null,
+    mood: agent.mood || agent.emotion || "",
+    emotion: agent.emotion || agent.mood || "",
+    emotionVector: agent.emotionVector || agent.emotions || {},
+    emotions: agent.emotions || agent.emotionVector || {},
+    needs: agent.needs || {},
+    energy: agent.energy,
+    isSleeping: !!agent.isSleeping,
+    currentTask: agent.currentTask || "",
+    goal: agent.goal || "",
+    longTermGoal: agent.longTermGoal || "",
+    lifeStatus: agent.lifeStatus || "alive",
+    activeProcess: agent.activeProcess || null,
+    relationshipMatrix: agent.relationshipMatrix || agent.relationships || agent.relations || {},
+    relationships: agent.relationships || agent.relationshipMatrix || {},
+    memory: {
+      short: Array.isArray(memory.short) ? memory.short.slice(0, 3) : [],
+      long: Array.isArray(memory.long) ? memory.long.slice(0, 3) : [],
+      emotional: Array.isArray(memory.emotional) ? memory.emotional.slice(0, 3) : []
+    },
+    episodicMemory: Array.isArray(agent.episodicMemory) ? agent.episodicMemory.slice(0, 3) : [],
+    beliefMemory: Array.isArray(agent.beliefMemory) ? agent.beliefMemory.slice(0, 3) : [],
+    habitMemory: Array.isArray(agent.habitMemory) ? agent.habitMemory.slice(0, 3) : [],
+    relationshipMemory: Array.isArray(agent.relationshipMemory) ? agent.relationshipMemory.slice(0, 3) : [],
+    causalMemory: Array.isArray(agent.causalMemory) ? agent.causalMemory.slice(0, 3) : [],
+    psychologicalState: compactUiPsychologicalState(agent.psychologicalState),
+    previousPsychologicalState: compactUiPsychologicalState(agent.previousPsychologicalState)
+  };
+}
+
+function compactUiPsychologicalState(state = null) {
+  if (!state || typeof state !== "object") return null;
+  return {
+    version: state.version || "",
+    vector: state.vector || null,
+    projection: {
+      transitionPressure: state.projection?.transitionPressure || null,
+      attractorLandscape: state.projection?.attractorLandscape ? {
+        dominantAttractor: state.projection.attractorLandscape.dominantAttractor || "",
+        distribution: state.projection.attractorLandscape.distribution || {},
+        flattened: state.projection.attractorLandscape.flattened || 0,
+        memoryCoupling: state.projection.attractorLandscape.memoryCoupling || 0
+      } : null
+    }
+  };
+}
+
 function compactText(value, fallback = "", limit = 180) {
   if (value === null || value === undefined) return fallback;
   const text = typeof value === "string" ? value : JSON.stringify(value);
@@ -2262,6 +2404,84 @@ function nodeRuntimePlaceId(world, agent) {
 
 function nodeRuntimeClockText(world) {
   return minutesToClock(Number(world?.clock || 0)).text;
+}
+
+function nodeRuntimeStableNoise(seed = "") {
+  let hash = 2166136261;
+  const value = String(seed || "");
+  for (let i = 0; i < value.length; i += 1) {
+    hash ^= value.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return ((hash >>> 0) % 1000) / 1000;
+}
+
+function nodeRuntimeApplySocialFriction(world) {
+  const agents = Array.isArray(world?.agents) ? world.agents.filter(agent => agent?.id && agent.lifeStatus !== "dead") : [];
+  if (agents.length < 2) return [];
+  const clock = Number(world.clock || 0);
+  const byPlace = new Map();
+  agents.forEach(agent => {
+    const placeId = nodeRuntimePlaceId(world, agent);
+    if (!placeId) return;
+    if (!byPlace.has(placeId)) byPlace.set(placeId, []);
+    byPlace.get(placeId).push(agent);
+  });
+  const updates = [];
+  [...byPlace.entries()].some(([placeId, group]) => {
+    if (group.length < 2) return false;
+    for (let i = 0; i < group.length && updates.length < 2; i += 1) {
+      for (let j = i + 1; j < group.length && updates.length < 2; j += 1) {
+        const a = group[i];
+        const b = group[j];
+        const relation = a.relationshipMatrix?.[b.id] || {};
+        const resentment = Number(relation.resentment || 0);
+        const trust = Number(relation.trust || 0);
+        const chance = Math.max(0.005, Math.min(0.02, 0.008 + resentment / 10000 - trust / 20000));
+        const seed = `${clock}:${placeId}:${a.id}:${b.id}:social-friction`;
+        if (nodeRuntimeStableNoise(seed) >= chance) continue;
+        const reason = nodeRuntimeStableNoise(seed + ":type") > 0.48 ? "unmetExpectation" : "misunderstanding";
+        const payload = {
+          to: b.id,
+          trust: -1,
+          resentment: 1,
+          debt: reason === "unmetExpectation" ? 1 : 0,
+          familiarity: 1,
+          reason
+        };
+        const write = cognitiveWrite({
+          world,
+          agent: a,
+          agentId: a.id,
+          source: "social-friction",
+          target: "relationship",
+          payload,
+          confidence: 0.55,
+          reason,
+          timestamp: clock
+        });
+        if (!write.ok) continue;
+        const record = {
+          agents: [a.id, b.id],
+          names: [a.name || a.id, b.name || b.id],
+          placeId,
+          trend: "tension",
+          reason,
+          strength: 0.01,
+          at: clock,
+          source: "social-friction"
+        };
+        updates.push(record);
+      }
+    }
+    return updates.length >= 2;
+  });
+  if (updates.length) {
+    world.relationshipDynamics ||= [];
+    world.relationshipDynamics.unshift(...updates);
+    world.relationshipDynamics = world.relationshipDynamics.slice(0, 120);
+  }
+  return updates;
 }
 
 function nodeRuntimePlace(world, placeId) {
@@ -3858,7 +4078,7 @@ registerCognitiveWriteCommitter("relationship", ({ world, agent, payload }) => {
   agent.relationshipMatrix ||= {};
   agent.relationshipMatrix[targetId] ||= {};
   const appliedDelta = {};
-  ["trust", "intimacy", "respect", "debt", "resentment", "dependency", "rivalry"].forEach(key => {
+  ["trust", "intimacy", "respect", "debt", "resentment", "dependency", "rivalry", "familiarity"].forEach(key => {
     const before = Number(agent.relationshipMatrix[targetId][key] ?? 0);
     const delta = nodeRuntimeClampDelta(payload[key], -4, 4);
     if (delta) appliedDelta[key] = delta;
@@ -4479,6 +4699,7 @@ async function nodeRuntimeRunPostAgents(world, actionItems, settlementPatches = 
   const relationItems = dynamics.pairDynamics || dynamics.relationshipDynamics || dynamics.relationUpdates || [];
   world.relationshipDynamics.unshift(...relationItems.slice(0, 20).map(item => ({ ...nodeRuntimeCompactItem(item), at: world.clock || 0, source: "node-relationship-dynamics" })));
   world.relationshipDynamics = world.relationshipDynamics.slice(0, 120);
+  const frictionItems = nodeRuntimeApplySocialFriction(world);
   if (!Array.isArray(world.socialProcesses)) world.socialProcesses = [];
   world.socialProcesses = nodeRuntimeDedupeSocialProcesses(world.socialProcesses);
   const processItems = social.processes || social.socialProcesses || social.updates || [];
@@ -4494,7 +4715,7 @@ async function nodeRuntimeRunPostAgents(world, actionItems, settlementPatches = 
   world.logs ||= [];
   world.logs.unshift({
     title: "Node Post Agents",
-    body: `EventImpact ${eventImpacts.length}/${impact.eventImpacts?.length || 0}; ProbabilisticInformation ${informationFlows.length}/${propagation.informationFlows?.length || 0}; SocialField fear=${socialField.fearLevel} rumor=${socialField.rumorDensity} tension=${socialField.socialTension}; SocialFeedback ${world.socialFeedbackState?.count || 0}; RelationshipDynamics ${relationItems.length}; SocialProcess ${socialProcesses.length}/${processItems.length}`,
+    body: `EventImpact ${eventImpacts.length}/${impact.eventImpacts?.length || 0}; ProbabilisticInformation ${informationFlows.length}/${propagation.informationFlows?.length || 0}; SocialField fear=${socialField.fearLevel} rumor=${socialField.rumorDensity} tension=${socialField.socialTension}; SocialFeedback ${world.socialFeedbackState?.count || 0}; RelationshipDynamics ${relationItems.length}; SocialFriction ${frictionItems.length}; SocialProcess ${socialProcesses.length}/${processItems.length}`,
     type: "node_runtime",
     time: nodeRuntimeClockText(world),
     clock: world.clock || 0,
@@ -7767,6 +7988,21 @@ async function handleApi(req, res) {
       send(res, 200, payload);
     } catch (error) {
       send(res, 400, { error: { message: error.message, type: "load_save_logs_error" } });
+    }
+    return;
+  }
+  if (apiPath.startsWith("/api/saves/") && apiPath.endsWith("/ui") && req.method === "GET") {
+    try {
+      const slotPart = apiPath.slice("/api/saves/".length, -"/ui".length);
+      const slot = safeSaveName(decodeURIComponent(slotPart));
+      const payload = readSaveUiPayload(slot);
+      if (!payload) {
+        send(res, 404, { error: { message: "Save not found", type: "not_found" } });
+        return;
+      }
+      send(res, 200, payload);
+    } catch (error) {
+      send(res, 400, { error: { message: error.message, type: "load_save_ui_error" } });
     }
     return;
   }

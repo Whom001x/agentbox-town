@@ -5,7 +5,7 @@ const path = require("path");
 const childProcess = require("child_process");
 
 const ROOT = path.resolve(__dirname, "..");
-const EXCLUDED_SEGMENTS = new Set([".git", "node_modules", "saves", ".gradle-local", "android"]);
+const EXCLUDED_SEGMENTS = new Set([".git", "node_modules", "saves", "logs", ".gradle-local", "android"]);
 const TEXT_EXTENSIONS = new Set([".js", ".json", ".html", ".md", ".cmd", ".ps1", ".txt"]);
 const JSON_EXTENSIONS = new Set([".json"]);
 const JS_EXTENSIONS = new Set([".js"]);
